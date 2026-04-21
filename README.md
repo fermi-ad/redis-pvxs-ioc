@@ -28,9 +28,8 @@ Populate the pinned submodules first:
 git submodule update --init --recursive
 ```
 
-The current `.gitmodules` entries point at local sibling repositories in this workspace.
-Before sharing the repo outside this machine, retarget those submodules to published remotes while preserving the pinned SHAs.
-The vendored `redis-adapter` also carries an MVP-local patch that forces direct single-node Redis connections instead of attempting cluster discovery first.
+`.gitmodules` points at published remotes for `epics-base`, `pvxs`, `redis-adapter`, and `yaml-cpp`.
+See [`docs/submodule-remotes.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/submodule-remotes.md) for the pinned SHAs, fork branch details, and the plan to relink `epics-base` and `pvxs` back to upstream after their fork changes are merged.
 
 Build the EPICS stack in-place:
 

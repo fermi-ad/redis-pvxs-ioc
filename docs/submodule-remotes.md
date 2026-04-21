@@ -27,8 +27,8 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 
 - Published `.gitmodules` URL: `git@github.com:fermi-ad/redis-adapter.git`
 - Pinned commit: `4a40fe8e6871a42bd225d405af9d8fdd859a591d`
-- Publish status: still needs push to the published remote
-- Current local branch carrying the patch: `redis-pvxs-ioc-mvp`
+- Publish status: ready
+- Published branch carrying the patch: `redis-pvxs-ioc-mvp`
 - Patch purpose: force direct single-node Redis connections instead of probing cluster mode first
 
 ### `third_party/yaml-cpp`
@@ -40,6 +40,5 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 
 ## Push checklist
 
-1. Push `redis-adapter` branch `redis-pvxs-ioc-mvp` containing commit `4a40fe8e6871a42bd225d405af9d8fdd859a591d` to `git@github.com:fermi-ad/redis-adapter.git`.
-2. Run `git submodule sync --recursive`.
-3. Re-run `git submodule update --init --recursive` from a clean clone to verify the repo is self-bootstrapable.
+1. Run `git submodule sync --recursive`.
+2. Re-run `git submodule update --init --recursive` from a clean clone to verify the repo is self-bootstrapable.

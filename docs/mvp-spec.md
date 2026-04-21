@@ -15,7 +15,6 @@
 - Each PV declares `name`, `type`, `shape`, `read`, optional `write`, optional `confirm`, optional `metadata`, optional `alarm`, and optional `transform`.
 - Only Redis routes are supported in the MVP.
 - The Redis backend target is a standalone single-node Redis server.
-- The current vendored `redis-adapter` is used in direct single-node mode with a local patch that skips cluster probing.
 - Reader keys must be unique across `read.key` and `confirm.key` subscriptions in a config generation.
 
 ## PVA payload contract

@@ -26,10 +26,9 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 ### `third_party/redis-adapter`
 
 - Published `.gitmodules` URL: `git@github.com:fermi-ad/redis-adapter.git`
-- Pinned commit: `4a40fe8e6871a42bd225d405af9d8fdd859a591d`
+- Pinned commit: `31832be0ab6d38ed1296f39ab73334a8663c7e6a`
 - Publish status: ready
-- Published branch carrying the patch: `redis-pvxs-ioc-mvp`
-- Patch purpose: force direct single-node Redis connections instead of probing cluster mode first
+- Current known branch containing the commit: `origin/main`
 
 ### `third_party/yaml-cpp`
 

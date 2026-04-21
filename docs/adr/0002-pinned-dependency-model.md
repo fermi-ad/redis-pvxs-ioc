@@ -19,5 +19,4 @@ The repo vendors its build-time dependencies through pinned git submodules under
 - `epics-base`, `pvxs`, `redis-adapter`, and `yaml-cpp` are versioned with the repo.
 - Docker builds assume the submodules are already populated in the build context.
 - Updating dependency behavior becomes an explicit repo change with a visible SHA delta.
-- The current submodule URLs are local workspace paths; before broader team adoption they need published remotes that preserve the same pinned revisions.
-- The vendored `redis-adapter` currently includes an MVP-local patch to force direct single-node Redis connections instead of probing cluster mode first.
+- The submodule URLs now point at published remotes, and the repo still depends on those remotes preserving the pinned revisions.

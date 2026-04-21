@@ -16,9 +16,9 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 
 - Published `.gitmodules` URL: `git@github.com:derekste/pvxs.git`
 - Pinned commit: `3c83f4bde9a36a3d06d65389b4f043de244464ac`
-- Publish status: still needs push to the published remote
-- Current known branch containing the commit: local `dev/client-stateful-dns`
-- Note: the local checkout currently has `origin` set to `git@github.com:epics-base/pvxs.git`, so the fork URL in `.gitmodules` assumes you will publish this commit to `git@github.com:derekste/pvxs.git`
+- Publish status: ready
+- Current known branch containing the commit: `dev/client-stateful-dns`
+- Verified remote branch head: `git@github.com:derekste/pvxs.git` `refs/heads/dev/client-stateful-dns`
 
 ### `third_party/redis-adapter`
 
@@ -37,7 +37,6 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 
 ## Push checklist
 
-1. Push `pvxs` commit `3c83f4bde9a36a3d06d65389b4f043de244464ac` to `git@github.com:derekste/pvxs.git`.
-2. Push `redis-adapter` branch `redis-pvxs-ioc-mvp` containing commit `4a40fe8e6871a42bd225d405af9d8fdd859a591d` to `git@github.com:fermi-ad/redis-adapter.git`.
-3. Run `git submodule sync --recursive`.
-4. Re-run `git submodule update --init --recursive` from a clean clone to verify the repo is self-bootstrapable.
+1. Push `redis-adapter` branch `redis-pvxs-ioc-mvp` containing commit `4a40fe8e6871a42bd225d405af9d8fdd859a591d` to `git@github.com:fermi-ad/redis-adapter.git`.
+2. Run `git submodule sync --recursive`.
+3. Re-run `git submodule update --init --recursive` from a clean clone to verify the repo is self-bootstrapable.

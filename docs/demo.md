@@ -9,7 +9,8 @@ docker compose pull
 ## Start the demo stack
 
 ```sh
-docker compose up
+docker compose up -d
+docker compose logs -f
 ```
 
 This launches:
@@ -20,6 +21,7 @@ This launches:
 The runtime container mounts [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
 The compose stack uses a local bridge network for service-to-service traffic and does not publish Redis or PVA ports onto the host.
 Use `docker exec` for validation.
+Stop the demo stack with `docker compose down`.
 
 ## Manual validation
 
@@ -34,17 +36,19 @@ For local source validation instead of the published IOC image, the smoke script
 Or validate by hand:
 
 ```sh
-IOC_CONTAINER="$(docker compose ps -q ioc)"
-REDIS_CONTAINER="$(docker compose ps -q redis)"
+IOC_CONTAINER=redis-pvxs-ioc-demo
+REDIS_CONTAINER=redis-pvxs-ioc-redis
 PV_ENV='EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1'
 PVX_BIN_DIR="/opt/redis-pvxs-ioc/bin/pvxs"
 
+docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health"
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature"
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:waveform"
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput DEMO:magnet:current 9.0"
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current"
 docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10
 docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1 | xxd -p -c 256"
+docker logs -f "$IOC_CONTAINER"
 ```
 
 The writable PV demo stores its raw Redis payload in the `{demo}:magnet:current` stream as a packed binary double.

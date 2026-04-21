@@ -75,11 +75,13 @@ kill -HUP "$(pgrep -f redis-pvxs-ioc)"
 
 ```sh
 docker compose pull
-docker compose up
+docker compose up -d
+docker compose logs -f
 ```
 
 The runtime container reads `/etc/redis-pvxs-ioc/config.yaml` by default.
 This default compose stack is intentionally self-contained on a local bridge network for smoke/demo testing. Deployment networking can move to dedicated IPs or `ipvlan` later.
 For `docker exec` validation, use the packaged PVXS tools under `/opt/redis-pvxs-ioc/bin/pvxs/`.
+Stop the demo stack with `docker compose down`.
 
 Transforms are internal to the server. YAML `transform` settings describe how raw Redis values are mapped to the served PVA `value`; display, control, units, and alarm thresholds are configured in served units.

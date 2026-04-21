@@ -1,9 +1,9 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: adregistry.fnal.gov/instrumentation/redis@sha256:365ee40e627b9faf0775c31c7d6eb9e88a2de201e981b28bd5206029375977b6
     container_name: redis-pvxs-ioc-redis
-    ports:
-      - "6379:6379"
+    networks:
+      - redis-pvxs-ioc
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -14,6 +14,8 @@ services:
     build:
       context: .
     container_name: redis-pvxs-ioc-demo
+    networks:
+      - redis-pvxs-ioc
     depends_on:
       redis:
         condition: service_healthy
@@ -22,3 +24,7 @@ services:
       - "5076:5076/udp"
     volumes:
       - ./demo/config.yaml:/etc/redis-pvxs-ioc/config.yaml:ro
+
+networks:
+  redis-pvxs-ioc:
+    driver: bridge

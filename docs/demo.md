@@ -18,6 +18,7 @@ This launches:
 - one `redis-pvxs-ioc` container
 
 The runtime container mounts [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
+The compose stack uses a local bridge network for service-to-service traffic; Redis is not published on a host port.
 
 ## Manual validation
 

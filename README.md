@@ -16,6 +16,7 @@
 
 - [`docs/design.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/design.md) is the baseline design artifact.
 - [`docs/mvp-spec.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/mvp-spec.md) is the implementation contract.
+- [`docs/submodule-remotes.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) is the sample runtime configuration.
 - [`scripts/smoke-test.sh`](/Users/derekste/Dev/epics/redis-pvxs-ioc/scripts/smoke-test.sh) exercises the container demo.
 

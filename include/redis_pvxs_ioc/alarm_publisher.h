@@ -1,0 +1,35 @@
+#pragma once
+
+#include <mutex>
+#include <string>
+
+#include "redis_pvxs_ioc/util.h"
+
+struct redisContext;
+
+namespace redis_pvxs_ioc {
+
+class AlarmPublisher {
+public:
+  AlarmPublisher(std::string host, int port, std::string stream);
+  ~AlarmPublisher();
+
+  AlarmPublisher(const AlarmPublisher&) = delete;
+  AlarmPublisher& operator=(const AlarmPublisher&) = delete;
+
+  void publishTransition(const std::string& pvName, const AlarmState& state);
+  bool connected() const;
+  const std::string& stream() const;
+
+private:
+  bool ensureConnected();
+  void resetConnection();
+
+  std::string host_;
+  int port_;
+  std::string stream_;
+  mutable std::mutex mutex_;
+  redisContext* context_ = nullptr;
+};
+
+}  // namespace redis_pvxs_ioc

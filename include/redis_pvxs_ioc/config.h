@@ -1,0 +1,168 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <variant>
+#include <vector>
+
+namespace redis_pvxs_ioc {
+
+enum class PrimitiveType {
+  Boolean,
+  Int8,
+  UInt8,
+  Int16,
+  UInt16,
+  Int32,
+  UInt32,
+  Int64,
+  UInt64,
+  Float32,
+  Float64,
+  String,
+};
+
+enum class Shape {
+  Scalar,
+  Array,
+};
+
+enum class DisplayForm {
+  Default,
+  String,
+  Binary,
+  Decimal,
+  Hex,
+  Exponential,
+  Engineering,
+};
+
+struct RouteConfig {
+  std::string backend = "redis";
+  std::string key;
+};
+
+struct ConfirmConfig {
+  std::string backend = "redis";
+  std::string key;
+  int timeoutMs = 250;
+};
+
+struct LimitConfig {
+  std::optional<double> low;
+  std::optional<double> high;
+};
+
+struct AlarmConfig {
+  std::optional<double> lowAlarm;
+  std::optional<double> lowWarning;
+  std::optional<double> highWarning;
+  std::optional<double> highAlarm;
+  double hysteresis = 0.0;
+};
+
+struct MetadataConfig {
+  std::string description;
+  std::string units;
+  std::optional<int32_t> precision;
+  std::optional<DisplayForm> form;
+  LimitConfig display;
+  LimitConfig control;
+  std::optional<double> minStep;
+};
+
+struct LinearTransformConfig {
+  double scale = 1.0;
+  double offset = 0.0;
+};
+
+using TypedValue = std::variant<
+  std::monostate,
+  bool,
+  int8_t,
+  uint8_t,
+  int16_t,
+  uint16_t,
+  int32_t,
+  uint32_t,
+  int64_t,
+  uint64_t,
+  float,
+  double,
+  std::string,
+  std::vector<int8_t>,
+  std::vector<uint8_t>,
+  std::vector<int16_t>,
+  std::vector<uint16_t>,
+  std::vector<int32_t>,
+  std::vector<uint32_t>,
+  std::vector<int64_t>,
+  std::vector<uint64_t>,
+  std::vector<float>,
+  std::vector<double>>;
+
+struct PVConfig {
+  std::string name;
+  PrimitiveType type = PrimitiveType::Float64;
+  Shape shape = Shape::Scalar;
+  RouteConfig read;
+  std::optional<RouteConfig> write;
+  std::optional<ConfirmConfig> confirm;
+  MetadataConfig metadata;
+  AlarmConfig alarms;
+  std::optional<LinearTransformConfig> transform;
+  TypedValue initialValue;
+};
+
+struct ServerConfig {
+  std::string instance;
+  std::string nameSpace;
+  std::vector<std::string> interfaces;
+  std::optional<unsigned short> tcpPort;
+  std::optional<unsigned short> udpPort;
+  bool autoBeacon = true;
+};
+
+struct RedisConfig {
+  std::string baseKey;
+  std::string host = "127.0.0.1";
+  uint16_t port = 6379;
+  std::string user;
+  std::string password;
+  uint16_t workers = 1;
+  uint16_t readers = 1;
+};
+
+struct AlarmStreamConfig {
+  std::string stream = "acorn:alarms";
+};
+
+struct AppConfig {
+  ServerConfig server;
+  RedisConfig redis;
+  AlarmStreamConfig alarms;
+  std::vector<PVConfig> pvs;
+};
+
+AppConfig loadConfigFile(const std::string& path);
+AppConfig loadConfigString(const std::string& text);
+std::string summarizeConfig(const AppConfig& config);
+
+bool isNumericType(PrimitiveType type);
+bool isFloatingPointType(PrimitiveType type);
+bool isArrayElementTypeSupported(PrimitiveType type);
+
+std::string toString(PrimitiveType type);
+std::string toString(Shape shape);
+std::string toString(DisplayForm form);
+
+bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);
+bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs);
+bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs);
+bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs);
+
+std::string fullPVName(const ServerConfig& server, const PVConfig& pv);
+std::string adminPVName(const ServerConfig& server, const std::string& suffix);
+
+}  // namespace redis_pvxs_ioc

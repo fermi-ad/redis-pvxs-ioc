@@ -1,0 +1,95 @@
+server:
+  instance: demo
+  namespace: DEMO
+  auto_beacon: true
+
+redis:
+  base_key: demo
+  host: redis
+  port: 6379
+  workers: 2
+  readers: 2
+
+alarms:
+  stream: acorn:alarms
+
+pvs:
+  - name: source:temperature
+    type: float64
+    shape: scalar
+    read:
+      backend: redis
+      key: temperature:rb
+    metadata:
+      description: Source temperature
+      units: C
+      precision: 1
+      form: default
+      display:
+        low: 0
+        high: 100
+      control:
+        low: 0
+        high: 120
+      min_step: 0.1
+    alarm:
+      low_warning: 5
+      high_warning: 75
+      high_alarm: 90
+      hysteresis: 1
+    initial: 21.5
+
+  - name: magnet:current
+    type: float64
+    shape: scalar
+    read:
+      backend: redis
+      key: magnet:current
+    write:
+      backend: redis
+      key: magnet:current
+    confirm:
+      backend: redis
+      key: magnet:current
+      timeout_ms: 500
+    metadata:
+      description: Magnet current
+      units: A
+      precision: 2
+      form: engineering
+      display:
+        low: 0
+        high: 15
+      control:
+        low: 0
+        high: 15
+      min_step: 0.1
+    alarm:
+      low_warning: 0.5
+      high_warning: 7
+      high_alarm: 8
+      hysteresis: 0.1
+    transform:
+      kind: linear
+      scale: 0.1
+      offset: 0.0
+    initial: 0.0
+
+  - name: waveform
+    type: float32
+    shape: array
+    read:
+      backend: redis
+      key: waveform:rb
+    metadata:
+      description: Demo waveform
+      units: V
+      precision: 2
+      form: decimal
+      display:
+        low: -10
+        high: 10
+      control:
+        low: -10
+        high: 10
+    initial: [0.0, 1.5, 3.0, 1.5, 0.0]

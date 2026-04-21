@@ -1,0 +1,24 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis-pvxs-ioc-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  ioc:
+    build:
+      context: .
+    container_name: redis-pvxs-ioc-demo
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5075:5075"
+      - "5076:5076/udp"
+    volumes:
+      - ./demo/config.yaml:/etc/redis-pvxs-ioc/config.yaml:ro

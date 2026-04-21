@@ -1,0 +1,12 @@
+[submodule "third_party/epics-base"]
+	path = third_party/epics-base
+	url = ../epics-base
+[submodule "third_party/pvxs"]
+	path = third_party/pvxs
+	url = ../pvxs
+[submodule "third_party/redis-adapter"]
+	path = third_party/redis-adapter
+	url = ../redis-adapter
+[submodule "third_party/yaml-cpp"]
+	path = third_party/yaml-cpp
+	url = ../yaml-cpp

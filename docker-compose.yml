@@ -11,8 +11,7 @@ services:
       retries: 15
 
   ioc:
-    build:
-      context: .
+    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:a21eb84c333028e19380d97ffebd4fd032281ec0d296023f6b6f38c1160790f1
     container_name: redis-pvxs-ioc-demo
     networks:
       - redis-pvxs-ioc

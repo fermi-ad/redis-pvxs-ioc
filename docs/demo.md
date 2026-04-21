@@ -1,15 +1,15 @@
 # Demo Guide
 
-## Build the image
+## Pull the images
 
 ```sh
-docker build -t redis-pvxs-ioc:dev .
+docker compose pull
 ```
 
 ## Start the demo stack
 
 ```sh
-docker compose up --build
+docker compose up
 ```
 
 This launches:

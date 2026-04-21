@@ -74,8 +74,8 @@ kill -HUP "$(pgrep -f redis-pvxs-ioc)"
 ## Container demo
 
 ```sh
-docker build -t redis-pvxs-ioc:dev .
-docker compose up --build
+docker compose pull
+docker compose up
 ```
 
 The runtime container reads `/etc/redis-pvxs-ioc/config.yaml` by default.

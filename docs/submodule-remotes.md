@@ -10,7 +10,9 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 - Published `.gitmodules` URL: `git@github.com:derekste/epics-base.git`
 - Pinned commit: `c5333b5c88dc05bbb5a6bc641527f11f949953b8`
 - Publish status: ready
-- Current known branch containing the commit: `origin/dev/as-hag-dns-ttl`
+- Current known branch containing the commit: `dev/as-hag-dns-ttl`
+- Verified remote branch head: `git@github.com:derekste/epics-base.git` `refs/heads/dev/as-hag-dns-ttl`
+- Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
 
 ### `third_party/pvxs`
 
@@ -19,6 +21,7 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 - Publish status: ready
 - Current known branch containing the commit: `dev/client-stateful-dns`
 - Verified remote branch head: `git@github.com:derekste/pvxs.git` `refs/heads/dev/client-stateful-dns`
+- Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/pvxs` repo at the merged upstream commit
 
 ### `third_party/redis-adapter`
 

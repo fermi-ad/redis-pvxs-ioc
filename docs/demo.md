@@ -18,7 +18,8 @@ This launches:
 - one `redis-pvxs-ioc` container
 
 The runtime container mounts [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
-The compose stack uses a local bridge network for service-to-service traffic; Redis is not published on a host port.
+The compose stack uses a local bridge network for service-to-service traffic and does not publish Redis or PVA ports onto the host.
+Use `docker exec` for validation.
 
 ## Manual validation
 
@@ -27,6 +28,8 @@ Run the smoke script:
 ```sh
 ./scripts/smoke-test.sh
 ```
+
+For local source validation instead of the published IOC image, the smoke script layers [`docker-compose.dev.yml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docker-compose.dev.yml) on top of the default compose stack and rebuilds the `ioc` service locally.
 
 Or validate by hand:
 

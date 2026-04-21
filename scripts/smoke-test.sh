@@ -6,18 +6,19 @@ cd "$ROOT_DIR"
 
 PVX_BIN_DIR="/opt/redis-pvxs-ioc/bin/pvxs"
 PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1'
+COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.dev.yml)
 
 docker build -t redis-pvxs-ioc:dev .
-docker compose up -d --build
+docker compose "${COMPOSE_FILES[@]}" up -d --build
 
 cleanup() {
-  docker compose down -v
+  docker compose "${COMPOSE_FILES[@]}" down -v
 }
 
 sleep 5
 
-IOC_CONTAINER="$(docker compose ps -q ioc)"
-REDIS_CONTAINER="$(docker compose ps -q redis)"
+IOC_CONTAINER="$(docker compose "${COMPOSE_FILES[@]}" ps -q ioc)"
+REDIS_CONTAINER="$(docker compose "${COMPOSE_FILES[@]}" ps -q redis)"
 TMP_CONFIG="$(mktemp)"
 cp demo/config.yaml "$TMP_CONFIG"
 

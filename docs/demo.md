@@ -39,7 +39,7 @@ REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 ./scripts/smoke-test.sh
 ```
 
-The default compose and smoke-test path tracks the published `v0.1.1` release tag. If you need a stricter pin, override `REDIS_PVXS_IOC_IMAGE` with an immutable digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
+The default compose and smoke-test path tracks the published `v0.1.2` release tag. If you need a stricter pin, override `REDIS_PVXS_IOC_IMAGE` with an immutable digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
 
 Or validate by hand:
 

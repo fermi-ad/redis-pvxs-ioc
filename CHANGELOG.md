@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.2 - 2026-04-22
+
+- make the default PVA multicast configuration host-agnostic instead of assuming a specific interface name
+- keep `EPICS_HOST_INTERFACE` as an explicit opt-in override when interface pinning is required
+- harden version metadata generation and smoke-test cleanup based on packaging review follow-up
+- make the default demo/smoke image reference track the published `v0.1.2` release tag
+
 ## v0.1.1 - 2026-04-22
 
 - switch the container build/runtime base image to Ubuntu 24.04

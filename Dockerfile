@@ -17,6 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/redis-pvxs-ioc
 COPY . .
 
+RUN VERSION_FROM_FILE="$(tr -d '\n' < VERSION)" && \
+    if [ "${REDIS_PVXS_IOC_VERSION}" != "dev" ] && [ "${REDIS_PVXS_IOC_VERSION}" != "${VERSION_FROM_FILE}" ]; then \
+      echo "REDIS_PVXS_IOC_VERSION (${REDIS_PVXS_IOC_VERSION}) must match VERSION (${VERSION_FROM_FILE})" >&2; \
+      exit 1; \
+    fi
+
 RUN test -d third_party/epics-base/modules/pvData
 RUN test -d third_party/pvxs/bundle/libevent
 RUN test -d third_party/redis-adapter/redis-plus-plus

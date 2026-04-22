@@ -5,7 +5,7 @@
 ## MVP scope
 
 - PVA only
-- Redis-backed reads and writes against a standalone single-node Redis instance
+- Redis-backed reads and writes against one or more standalone single-node Redis instances
 - `NTScalar` / `NTScalarArray` payloads with standard Phoebus-facing metadata
 - manual hot reload via `SIGHUP` and admin PV
 - Redis alarm stream publishing
@@ -14,11 +14,19 @@
 
 ## Repository layout
 
-- [`docs/design.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/design.md) is the baseline design artifact.
-- [`docs/mvp-spec.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/mvp-spec.md) is the implementation contract.
-- [`docs/submodule-remotes.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
-- [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) is the sample runtime configuration.
-- [`scripts/smoke-test.sh`](/Users/derekste/Dev/epics/redis-pvxs-ioc/scripts/smoke-test.sh) exercises the container demo.
+- [`docs/design.md`](docs/design.md) is the baseline design artifact.
+- [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
+- [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
+- [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
+- [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.
+- [`scripts/smoke-test.sh`](scripts/smoke-test.sh) exercises the container demo.
+
+## Config model
+
+- Legacy single-backend configs still use top-level `redis`.
+- Multi-backend configs use top-level `redis_backends` keyed by backend alias.
+- `read.backend`, `write.backend`, `confirm.backend`, and `alarms.backend` select which Redis backend each operation uses.
+- When multiple backends are configured, every PV route must resolve to an explicit backend alias.
 
 ## Dependency bootstrap
 
@@ -29,7 +37,7 @@ git submodule update --init --recursive
 ```
 
 `.gitmodules` points at published remotes for `epics-base`, `pvxs`, `redis-adapter`, and `yaml-cpp`.
-See [`docs/submodule-remotes.md`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docs/submodule-remotes.md) for the pinned SHAs, fork branch details, and the plan to relink `epics-base` and `pvxs` back to upstream after their fork changes are merged.
+See [`docs/submodule-remotes.md`](docs/submodule-remotes.md) for the pinned SHAs, fork branch details, and the plan to relink `epics-base` and `pvxs` back to upstream after their fork changes are merged.
 
 Build the EPICS stack in-place:
 

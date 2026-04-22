@@ -1,0 +1,48 @@
+server:
+  instance: demo-multi
+  auto_beacon: true
+
+redis_backends:
+  digit10:
+    base_key: demo-digit10
+    host: redis
+    port: 6379
+    workers: 1
+    readers: 1
+  system:
+    base_key: demo-system
+    host: redis
+    port: 6379
+    workers: 1
+    readers: 1
+
+alarms:
+  backend: system
+  stream: acorn:alarms
+
+pvs:
+  - name: N:PB10_DDCP_V
+    type: uint32
+    shape: scalar
+    read:
+      backend: digit10
+      key: DDCP_VERSION_R
+    metadata:
+      description: Demo digitizer firmware version
+      units: Raw
+
+  - name: N:PBSYNCGM
+    type: uint32
+    shape: scalar
+    read:
+      backend: system
+      key: SYNC_GATE_IN_MODE_R
+    write:
+      backend: system
+      key: SYNC_GATE_IN_MODE_S
+    confirm:
+      backend: system
+      key: SYNC_GATE_IN_MODE_R
+    metadata:
+      description: Demo system gate mode
+      units: Raw

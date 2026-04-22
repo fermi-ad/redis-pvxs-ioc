@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 
@@ -12,6 +13,8 @@ class RedisAdapter;
 namespace redis_pvxs_ioc {
 
 class AlarmPublisher;
+
+using RedisBackendRegistry = std::map<std::string, std::shared_ptr<RedisAdapter>>;
 
 class PVRuntimeBase {
 public:
@@ -27,7 +30,7 @@ public:
 
 std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
-                                           const std::shared_ptr<RedisAdapter>& redis,
+                                           const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
                                            uint64_t generation);
 

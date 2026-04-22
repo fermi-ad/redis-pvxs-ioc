@@ -1,4 +1,17 @@
 build
+build-iota
 .git
 **/.git
 .DS_Store
+third_party/epics-base/bin
+third_party/epics-base/lib
+third_party/epics-base/configure/O.*
+third_party/epics-base/modules/**/O.*
+third_party/pvxs/bin
+third_party/pvxs/lib
+third_party/pvxs/configure/O.*
+third_party/pvxs/setup/O.*
+third_party/pvxs/src/O.*
+third_party/pvxs/tools/O.*
+third_party/pvxs/bundle/O.*
+third_party/pvxs/bundle/usr

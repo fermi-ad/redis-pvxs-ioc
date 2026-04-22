@@ -1,12 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <variant>
 #include <vector>
 
 namespace redis_pvxs_ioc {
+
+inline constexpr const char kDefaultRedisBackendAlias[] = "default";
 
 enum class PrimitiveType {
   Boolean,
@@ -39,12 +42,12 @@ enum class DisplayForm {
 };
 
 struct RouteConfig {
-  std::string backend = "redis";
+  std::string backend;
   std::string key;
 };
 
 struct ConfirmConfig {
-  std::string backend = "redis";
+  std::string backend;
   std::string key;
   int timeoutMs = 250;
 };
@@ -134,13 +137,16 @@ struct RedisConfig {
   uint16_t readers = 1;
 };
 
+using RedisBackendConfigs = std::map<std::string, RedisConfig>;
+
 struct AlarmStreamConfig {
+  std::string backend;
   std::string stream = "acorn:alarms";
 };
 
 struct AppConfig {
   ServerConfig server;
-  RedisConfig redis;
+  RedisBackendConfigs redisBackends;
   AlarmStreamConfig alarms;
   std::vector<PVConfig> pvs;
 };
@@ -160,6 +166,7 @@ std::string toString(DisplayForm form);
 bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);
 bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs);
 bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs);
+bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs& rhs);
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs);
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv);

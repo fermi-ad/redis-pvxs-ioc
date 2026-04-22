@@ -183,10 +183,7 @@ RouteConfig parseRoute(const YAML::Node& node, const std::string& path) {
   requireMap(node, path);
   RouteConfig route;
   if (node["backend"]) {
-    route.backend = lowerCopy(parseString(node["backend"], path + ".backend"));
-  }
-  if (route.backend != "redis") {
-    fail(path, "only redis backends are supported in the MVP");
+    route.backend = parseString(node["backend"], path + ".backend");
   }
   route.key = parseString(requireNode(node, "key", path), path + ".key");
   if (route.key.empty()) {
@@ -199,10 +196,7 @@ ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
   requireMap(node, path);
   ConfirmConfig confirm;
   if (node["backend"]) {
-    confirm.backend = lowerCopy(parseString(node["backend"], path + ".backend"));
-  }
-  if (confirm.backend != "redis") {
-    fail(path, "only redis backends are supported in the MVP");
+    confirm.backend = parseString(node["backend"], path + ".backend");
   }
   confirm.key = parseString(requireNode(node, "key", path), path + ".key");
   if (node["timeout_ms"]) {
@@ -212,6 +206,50 @@ ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
     fail(path + ".key", "must not be empty");
   }
   return confirm;
+}
+
+RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path) {
+  const auto redisNode = requireMap(node, path);
+
+  RedisConfig config;
+  config.baseKey = parseString(requireNode(redisNode, "base_key", path), path + ".base_key");
+  config.host = parseString(requireNode(redisNode, "host", path), path + ".host");
+  config.port = parseNumeric<uint16_t>(requireNode(redisNode, "port", path), path + ".port");
+  if (redisNode["user"]) {
+    config.user = parseString(redisNode["user"], path + ".user");
+  }
+  if (redisNode["password"]) {
+    config.password = parseString(redisNode["password"], path + ".password");
+  }
+  if (redisNode["workers"]) {
+    config.workers = parseNumeric<uint16_t>(redisNode["workers"], path + ".workers");
+  }
+  if (redisNode["readers"]) {
+    config.readers = parseNumeric<uint16_t>(redisNode["readers"], path + ".readers");
+  }
+
+  return config;
+}
+
+void resolveBackendAlias(std::string& alias,
+                         const std::string& path,
+                         const RedisBackendConfigs& backends,
+                         const bool legacySingleBackend) {
+  if (alias.empty()) {
+    if (backends.size() == 1u) {
+      alias = backends.begin()->first;
+      return;
+    }
+    fail(path, "must be set when multiple redis_backends are configured");
+  }
+
+  if (legacySingleBackend && alias == "redis" && backends.count(kDefaultRedisBackendAlias) == 1u) {
+    alias = kDefaultRedisBackendAlias;
+  }
+
+  if (backends.count(alias) == 0u) {
+    fail(path, "unknown redis backend '" + alias + "'");
+  }
 }
 
 void parseLimitConfig(const YAML::Node& node, LimitConfig& config, const std::string& path) {
@@ -386,29 +424,38 @@ AppConfig parseConfig(const YAML::Node& root) {
     config.server.autoBeacon = serverNode["auto_beacon"].as<bool>();
   }
 
-  const auto redisNode = requireMap(requireNode(root, "redis", "root"), "root.redis");
-  config.redis.baseKey = parseString(requireNode(redisNode, "base_key", "root.redis"), "root.redis.base_key");
-  config.redis.host = parseString(requireNode(redisNode, "host", "root.redis"), "root.redis.host");
-  config.redis.port = parseNumeric<uint16_t>(requireNode(redisNode, "port", "root.redis"), "root.redis.port");
-  if (redisNode["user"]) {
-    config.redis.user = parseString(redisNode["user"], "root.redis.user");
+  const bool hasLegacyRedis = static_cast<bool>(root["redis"]);
+  const bool hasRedisBackends = static_cast<bool>(root["redis_backends"]);
+  if (hasLegacyRedis == hasRedisBackends) {
+    fail("root", "specify exactly one of 'redis' or 'redis_backends'");
   }
-  if (redisNode["password"]) {
-    config.redis.password = parseString(redisNode["password"], "root.redis.password");
-  }
-  if (redisNode["workers"]) {
-    config.redis.workers = parseNumeric<uint16_t>(redisNode["workers"], "root.redis.workers");
-  }
-  if (redisNode["readers"]) {
-    config.redis.readers = parseNumeric<uint16_t>(redisNode["readers"], "root.redis.readers");
+
+  if (hasLegacyRedis) {
+    config.redisBackends.emplace(kDefaultRedisBackendAlias, parseRedisConfig(requireNode(root, "redis", "root"), "root.redis"));
+  } else {
+    const auto redisBackendsNode = requireMap(requireNode(root, "redis_backends", "root"), "root.redis_backends");
+    if (redisBackendsNode.size() == 0u) {
+      fail("root.redis_backends", "must not be empty");
+    }
+    for (const auto& entry : redisBackendsNode) {
+      const auto alias = parseString(entry.first, "root.redis_backends.<alias>");
+      if (alias.empty()) {
+        fail("root.redis_backends", "backend alias must not be empty");
+      }
+      config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias));
+    }
   }
 
   if (root["alarms"]) {
     const auto alarmNode = requireMap(root["alarms"], "root.alarms");
+    if (alarmNode["backend"]) {
+      config.alarms.backend = parseString(alarmNode["backend"], "root.alarms.backend");
+    }
     if (alarmNode["stream"]) {
       config.alarms.stream = parseString(alarmNode["stream"], "root.alarms.stream");
     }
   }
+  resolveBackendAlias(config.alarms.backend, "root.alarms.backend", config.redisBackends, hasLegacyRedis);
 
   const auto pvsNode = requireSequence(requireNode(root, "pvs", "root"), "root.pvs");
   if (pvsNode.size() == 0) {
@@ -416,19 +463,36 @@ AppConfig parseConfig(const YAML::Node& root) {
   }
 
   std::set<std::string> pvNames;
-  std::set<std::string> subscribedKeys;
+  std::set<std::pair<std::string, std::string>> subscribedKeys;
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
+    resolveBackendAlias(pv.read.backend,
+                        "root.pvs[" + std::to_string(index) + "].read.backend",
+                        config.redisBackends,
+                        hasLegacyRedis);
+    if (pv.write) {
+      resolveBackendAlias(pv.write->backend,
+                          "root.pvs[" + std::to_string(index) + "].write.backend",
+                          config.redisBackends,
+                          hasLegacyRedis);
+    }
+    if (pv.confirm) {
+      resolveBackendAlias(pv.confirm->backend,
+                          "root.pvs[" + std::to_string(index) + "].confirm.backend",
+                          config.redisBackends,
+                          hasLegacyRedis);
+    }
     if (!pvNames.insert(pv.name).second) {
       fail("root.pvs[" + std::to_string(index) + "].name", "duplicate PV name '" + pv.name + "'");
     }
-    if (!subscribedKeys.insert(pv.read.key).second) {
-      fail("root.pvs[" + std::to_string(index) + "].read.key", "duplicate subscribed key '" + pv.read.key + "'");
+    if (!subscribedKeys.insert({pv.read.backend, pv.read.key}).second) {
+      fail("root.pvs[" + std::to_string(index) + "].read.key",
+           "duplicate subscribed key '" + pv.read.backend + ":" + pv.read.key + "'");
     }
-    if (pv.confirm && pv.confirm->key != pv.read.key) {
-      if (!subscribedKeys.insert(pv.confirm->key).second) {
+    if (pv.confirm && (pv.confirm->backend != pv.read.backend || pv.confirm->key != pv.read.key)) {
+      if (!subscribedKeys.insert({pv.confirm->backend, pv.confirm->key}).second) {
         fail("root.pvs[" + std::to_string(index) + "].confirm.key",
-             "duplicate subscribed key '" + pv.confirm->key + "'");
+             "duplicate subscribed key '" + pv.confirm->backend + ":" + pv.confirm->key + "'");
       }
     }
     config.pvs.push_back(std::move(pv));
@@ -451,18 +515,22 @@ std::string summarizeConfig(const AppConfig& config) {
   std::ostringstream stream;
   stream << "instance=" << config.server.instance
          << " namespace=" << (config.server.nameSpace.empty() ? "<none>" : config.server.nameSpace)
-         << " redis=" << config.redis.host << ":" << config.redis.port
-         << " base_key=" << config.redis.baseKey
+         << " redis_backends=" << config.redisBackends.size()
          << " pvs=" << config.pvs.size();
+  for (const auto& entry : config.redisBackends) {
+    stream << "\nbackend[" << entry.first << "]="
+           << entry.second.host << ":" << entry.second.port
+           << " base_key=" << entry.second.baseKey;
+  }
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)
            << " [" << toString(pv.shape) << " " << toString(pv.type) << "]"
-           << " read=" << pv.read.key;
+           << " read=" << pv.read.backend << ":" << pv.read.key;
     if (pv.write) {
-      stream << " write=" << pv.write->key;
+      stream << " write=" << pv.write->backend << ":" << pv.write->key;
     }
     if (pv.confirm) {
-      stream << " confirm=" << pv.confirm->key;
+      stream << " confirm=" << pv.confirm->backend << ":" << pv.confirm->key;
     }
   }
   return stream.str();
@@ -565,8 +633,24 @@ bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs) {
          lhs.readers == rhs.readers;
 }
 
+bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+
+  for (const auto& entry : lhs) {
+    const auto other = rhs.find(entry.first);
+    if (other == rhs.end() || !sameRedisConfig(entry.second, other->second)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs) {
-  return lhs.stream == rhs.stream;
+  return lhs.backend == rhs.backend &&
+         lhs.stream == rhs.stream;
 }
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {

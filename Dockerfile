@@ -26,7 +26,9 @@ RUN make -C third_party/epics-base configure.install src.install -j"$(nproc)" &&
 RUN printf 'EPICS_BASE=%s/third_party/epics-base\n' "$(pwd)" > third_party/pvxs/configure/RELEASE.local
 RUN make -C third_party/pvxs/bundle libevent
 RUN make -C third_party/pvxs configure.install setup.install src.install tools.install -j"$(nproc)"
-RUN cmake -S . -B build -D REDIS_PVXS_IOC_BUILD_TESTS=ON
+RUN cmake -S . -B build \
+    -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
+    -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
 RUN cmake --build build -j"$(nproc)"
 RUN ctest --test-dir build --output-on-failure
 RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" && \

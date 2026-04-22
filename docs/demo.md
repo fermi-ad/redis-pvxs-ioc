@@ -18,7 +18,7 @@ This launches:
 - one standalone Redis container
 - one `redis-pvxs-ioc` container
 
-The runtime container mounts [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
+The runtime container mounts [`demo/config.yaml`](../demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
 The compose stack uses a local bridge network for service-to-service traffic and does not publish Redis or PVA ports onto the host.
 Use `docker exec` for validation.
 Stop the demo stack with `docker compose down`.
@@ -38,6 +38,8 @@ REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<
 REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 ./scripts/smoke-test.sh
 ```
+
+The default compose and smoke-test path is pinned to the published `v0.1.0` release digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
 
 Or validate by hand:
 
@@ -60,7 +62,7 @@ docker logs -f "$IOC_CONTAINER"
 The writable PV demo stores its raw Redis payload in the `{demo}:magnet:current` stream as a packed binary double.
 For the sample transform, a served value of `9.0` corresponds to the raw hex payload `0000000000805640`, which is `90.0` in little-endian IEEE754.
 
-For reload validation, change [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) on the host and then signal the running process:
+For reload validation, change [`demo/config.yaml`](../demo/config.yaml) on the host and then signal the running process:
 
 ```sh
 docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'

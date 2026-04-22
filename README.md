@@ -2,7 +2,7 @@
 
 `redis-pvxs-ioc` is a standalone PVAccess-only service that serves Redis-backed PVs from structured YAML config and reloads configuration without restarting the process.
 
-Current release version: `v0.1.0`
+For the latest released version, see the repository's tags/releases.
 
 ## MVP scope
 
@@ -104,6 +104,8 @@ REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<
 REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 docker compose up -d
 ```
+
+If you intentionally want the moving convenience tag instead of the pinned release digest, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
 
 Run the registry-only smoke test with:
 

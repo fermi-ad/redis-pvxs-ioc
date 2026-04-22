@@ -4,7 +4,8 @@
 
 - `VERSION` is authoritative.
 - `CMakeLists.txt` reads `VERSION` and sets the CMake project version from it.
-- `redis-pvxs-ioc --version`, Docker image tags, and GitHub Release names must match `VERSION`.
+- `redis-pvxs-ioc --version` must match `VERSION`.
+- Git tags, GitHub Release names, and release image tags use `v${VERSION}`.
 
 ## Semver rules
 
@@ -40,7 +41,7 @@ ctest --test-dir build --output-on-failure
 ```sh
 VERSION="$(cat VERSION)"
 REVISION="$(git rev-parse --short=12 HEAD)"
-IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:${VERSION}"
+IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}"
 
 git tag "v${VERSION}"
 git push origin HEAD

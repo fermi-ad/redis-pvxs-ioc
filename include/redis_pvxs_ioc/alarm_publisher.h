@@ -11,7 +11,7 @@ namespace redis_pvxs_ioc {
 
 class AlarmPublisher {
 public:
-  AlarmPublisher(std::string host, int port, std::string stream);
+  AlarmPublisher(std::string host, int port, std::string stream, std::string user = {}, std::string password = {});
   ~AlarmPublisher();
 
   AlarmPublisher(const AlarmPublisher&) = delete;
@@ -28,6 +28,8 @@ private:
   std::string host_;
   int port_;
   std::string stream_;
+  std::string user_;
+  std::string password_;
   mutable std::mutex mutex_;
   redisContext* context_ = nullptr;
 };

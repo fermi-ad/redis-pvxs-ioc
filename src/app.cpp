@@ -170,8 +170,53 @@ std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {
   return std::make_shared<RedisAdapter>(config.baseKey, options);
 }
 
+RedisBackendRegistry buildRedisBackends(const AppConfig& config) {
+  RedisBackendRegistry backends;
+  for (const auto& entry : config.redisBackends) {
+    backends.emplace(entry.first, buildRedisAdapter(entry.second));
+  }
+  return backends;
+}
+
+void setDeferReaders(RedisBackendRegistry& backends, const bool defer) {
+  for (const auto& entry : backends) {
+    entry.second->setDeferReaders(defer);
+  }
+}
+
 std::shared_ptr<AlarmPublisher> buildAlarmPublisher(const AppConfig& config) {
-  return std::make_shared<AlarmPublisher>(config.redis.host, config.redis.port, config.alarms.stream);
+  const auto backend = config.redisBackends.at(config.alarms.backend);
+  return std::make_shared<AlarmPublisher>(backend.host, backend.port, config.alarms.stream, backend.user, backend.password);
+}
+
+std::string backendHealthSummary(const RedisBackendRegistry& backends) {
+  if (backends.empty()) {
+    return "0/0 connected";
+  }
+
+  size_t connected = 0;
+  std::vector<std::string> disconnected;
+  for (const auto& entry : backends) {
+    if (entry.second && entry.second->connected()) {
+      ++connected;
+      continue;
+    }
+    disconnected.push_back(entry.first);
+  }
+
+  std::ostringstream stream;
+  stream << connected << "/" << backends.size() << " connected";
+  if (!disconnected.empty()) {
+    stream << " (";
+    for (size_t index = 0; index < disconnected.size(); ++index) {
+      if (index != 0u) {
+        stream << ",";
+      }
+      stream << disconnected[index];
+    }
+    stream << " disconnected)";
+  }
+  return stream.str();
 }
 
 pvxs::server::Config buildServerConfig(const AppConfig& config) {
@@ -199,7 +244,7 @@ struct Application::Impl {
   AppConfig currentConfig;
   bool hasConfig = false;
   uint64_t generation = 0;
-  std::shared_ptr<RedisAdapter> redis;
+  RedisBackendRegistry redisBackends;
   std::shared_ptr<AlarmPublisher> alarmPublisher;
   RuntimeMap runtimes;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
@@ -274,8 +319,7 @@ void Application::pump() {
   if (now - impl_->lastHealthUpdate >= std::chrono::seconds(1)) {
     impl_->lastHealthUpdate = now;
     if (impl_->admin) {
-      const auto health = impl_->redis && impl_->redis->connected() ? "connected" : "disconnected";
-      impl_->admin->setBackendHealth(health);
+      impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
     }
   }
 }
@@ -290,6 +334,8 @@ void Application::stop() {
     impl_->server.removePV(item.first);
   }
   impl_->runtimes.clear();
+  impl_->redisBackends.clear();
+  impl_->alarmPublisher.reset();
 
   if (impl_->admin) {
     impl_->admin->remove(impl_->server);
@@ -306,7 +352,7 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
 
   const auto nextGeneration = impl_->generation + 1;
 
-  const bool redisChanged = !impl_->hasConfig || !sameRedisConfig(impl_->currentConfig.redis, config.redis);
+  const bool redisChanged = !impl_->hasConfig || !sameRedisBackends(impl_->currentConfig.redisBackends, config.redisBackends);
   const bool alarmChanged = !impl_->hasConfig || !sameAlarmStreamConfig(impl_->currentConfig.alarms, config.alarms);
 
   if (initialLoad || redisChanged || alarmChanged) {
@@ -317,16 +363,24 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
 
 bool Application::replaceAll(const AppConfig& config, const uint64_t generation, std::string& error) {
   try {
-    auto newRedis = buildRedisAdapter(config.redis);
-    newRedis->setDeferReaders(true);
+    auto newRedisBackends = buildRedisBackends(config);
+    setDeferReaders(newRedisBackends, true);
     auto newAlarmPublisher = buildAlarmPublisher(config);
 
     RuntimeMap staged;
-    for (const auto& pv : config.pvs) {
-      const auto name = fullPVName(config.server, pv);
-      staged.emplace(name, makeRuntime(config.server, pv, newRedis, newAlarmPublisher, generation));
+    try {
+      for (const auto& pv : config.pvs) {
+        const auto name = fullPVName(config.server, pv);
+        staged.emplace(name, makeRuntime(config.server, pv, newRedisBackends, newAlarmPublisher, generation));
+      }
+    } catch (...) {
+      setDeferReaders(newRedisBackends, false);
+      for (auto& item : staged) {
+        item.second->deactivate("staged config failure");
+      }
+      throw;
     }
-    newRedis->setDeferReaders(false);
+    setDeferReaders(newRedisBackends, false);
 
     for (auto& item : impl_->runtimes) {
       item.second->deactivate("config replaced");
@@ -339,7 +393,7 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
       impl_->runtimes.emplace(item.first, item.second);
     }
 
-    impl_->redis = std::move(newRedis);
+    impl_->redisBackends = std::move(newRedisBackends);
     impl_->alarmPublisher = std::move(newAlarmPublisher);
     impl_->currentConfig = config;
     impl_->hasConfig = true;
@@ -350,7 +404,7 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
       impl_->admin->setPvCount(impl_->runtimes.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
-      impl_->admin->setBackendHealth(impl_->redis && impl_->redis->connected() ? "connected" : "disconnected");
+      impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
     }
     return true;
   } catch (const std::exception& ex) {
@@ -393,22 +447,22 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
 
     RuntimeMap staged;
     if (!replaceNames.empty() || !addNames.empty()) {
-      impl_->redis->setDeferReaders(true);
+      setDeferReaders(impl_->redisBackends, true);
       try {
         for (const auto& name : replaceNames) {
-          staged.emplace(name, makeRuntime(config.server, desired.at(name), impl_->redis, impl_->alarmPublisher, generation));
+          staged.emplace(name, makeRuntime(config.server, desired.at(name), impl_->redisBackends, impl_->alarmPublisher, generation));
         }
         for (const auto& item : addNames) {
-          staged.emplace(item.first, makeRuntime(config.server, item.second, impl_->redis, impl_->alarmPublisher, generation));
+          staged.emplace(item.first, makeRuntime(config.server, item.second, impl_->redisBackends, impl_->alarmPublisher, generation));
         }
       } catch (...) {
-        impl_->redis->setDeferReaders(false);
+        setDeferReaders(impl_->redisBackends, false);
         for (auto& item : staged) {
           item.second->deactivate("staged config failure");
         }
         throw;
       }
-      impl_->redis->setDeferReaders(false);
+      setDeferReaders(impl_->redisBackends, false);
     }
 
     for (const auto& item : reconfigureNames) {
@@ -443,7 +497,7 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
       impl_->admin->setPvCount(impl_->runtimes.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
-      impl_->admin->setBackendHealth(impl_->redis && impl_->redis->connected() ? "connected" : "disconnected");
+      impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
     }
     return true;
   } catch (const std::exception& ex) {

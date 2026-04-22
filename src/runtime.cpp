@@ -23,6 +23,25 @@
 namespace redis_pvxs_ioc {
 namespace {
 
+bool sameRouteTarget(const RouteConfig& lhs, const RouteConfig& rhs) {
+  return lhs.backend == rhs.backend && lhs.key == rhs.key;
+}
+
+bool sameRouteTarget(const RouteConfig& lhs, const ConfirmConfig& rhs) {
+  return lhs.backend == rhs.backend && lhs.key == rhs.key;
+}
+
+std::shared_ptr<RedisAdapter> resolveBackend(const RedisBackendRegistry& redisBackends,
+                                             const std::string& alias,
+                                             const std::string& fullName,
+                                             const std::string& routeName) {
+  const auto it = redisBackends.find(alias);
+  if (it == redisBackends.end()) {
+    throw std::runtime_error("unknown redis backend '" + alias + "' for " + fullName + " " + routeName);
+  }
+  return it->second;
+}
+
 template <typename T, bool Array>
 class TypedRuntime final : public PVRuntimeBase, public std::enable_shared_from_this<TypedRuntime<T, Array>> {
 public:
@@ -32,11 +51,15 @@ public:
 
   TypedRuntime(const ServerConfig& serverConfig,
                PVConfig config,
-               std::shared_ptr<RedisAdapter> redis,
+               std::shared_ptr<RedisAdapter> readRedis,
+               std::shared_ptr<RedisAdapter> writeRedis,
+               std::shared_ptr<RedisAdapter> confirmRedis,
                std::shared_ptr<AlarmPublisher> alarmPublisher,
                const uint64_t generation)
       : config_(std::move(config)),
-        redis_(std::move(redis)),
+        readRedis_(std::move(readRedis)),
+        writeRedis_(std::move(writeRedis)),
+        confirmRedis_(std::move(confirmRedis)),
         alarmPublisher_(std::move(alarmPublisher)),
         fullName_(fullPVName(serverConfig, config_)),
         generation_(generation),
@@ -134,10 +157,10 @@ public:
       item->cv.notify_all();
     }
 
-    if (redis_) {
-      redis_->removeReader(config_.read.key);
-      if (config_.confirm && config_.confirm->key != config_.read.key) {
-        redis_->removeReader(config_.confirm->key);
+    if (readRedis_) {
+      readRedis_->removeReader(config_.read.key);
+      if (config_.confirm && confirmRedis_ && !sameRouteTarget(config_.read, *config_.confirm)) {
+        confirmRedis_->removeReader(config_.confirm->key);
       }
     }
 
@@ -190,13 +213,13 @@ private:
 
   void loadSnapshot(ValueType& raw, uint64_t& timestamp) {
     if constexpr (Array) {
-      const auto result = redis_->getSingleList<T>(config_.read.key, raw);
+      const auto result = readRedis_->getSingleList<T>(config_.read.key, raw);
       timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
     } else if constexpr (std::is_same_v<T, double>) {
-      const auto result = redis_->getSingleValue<double>(config_.read.key, raw);
+      const auto result = readRedis_->getSingleValue<double>(config_.read.key, raw);
       timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
     } else {
-      const auto result = redis_->getSingleValue<T>(config_.read.key, raw);
+      const auto result = readRedis_->getSingleValue<T>(config_.read.key, raw);
       timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
     }
   }
@@ -205,28 +228,28 @@ private:
     auto weak = this->weak_from_this();
 
     if constexpr (Array) {
-      redis_->addListsReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
+      readRedis_->addListsReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
         if (const auto self = weak.lock()) {
           self->handleRead(data, true);
         }
       });
     } else {
-      redis_->addValuesReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
+      readRedis_->addValuesReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
         if (const auto self = weak.lock()) {
           self->handleRead(data, true);
         }
       });
     }
 
-    if (config_.confirm && config_.confirm->key != config_.read.key) {
+    if (config_.confirm && !sameRouteTarget(config_.read, *config_.confirm)) {
       if constexpr (Array) {
-        redis_->addListsReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
+        confirmRedis_->addListsReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
           if (const auto self = weak.lock()) {
             self->handleRead(data, false);
           }
         });
       } else {
-        redis_->addValuesReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
+        confirmRedis_->addValuesReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
           if (const auto self = weak.lock()) {
             self->handleRead(data, false);
           }
@@ -351,7 +374,7 @@ private:
     }
 
     if (!currentConfig.confirm) {
-      if (currentConfig.write && currentConfig.write->key == currentConfig.read.key) {
+      if (currentConfig.write && sameRouteTarget(currentConfig.read, *currentConfig.write)) {
         handleRawUpdate(raw, static_cast<uint64_t>(writeTime.value), true);
       }
       op->reply();
@@ -379,17 +402,19 @@ private:
 
   RA_Time writeToRedis(const PVConfig& config, const ValueType& raw) {
     if constexpr (Array) {
-      return redis_->addSingleList<T>(config.write->key, raw);
+      return writeRedis_->addSingleList<T>(config.write->key, raw);
     } else if constexpr (std::is_same_v<T, double>) {
-      return redis_->addSingleDouble(config.write->key, raw);
+      return writeRedis_->addSingleDouble(config.write->key, raw);
     } else {
-      return redis_->addSingleValue<T>(config.write->key, raw);
+      return writeRedis_->addSingleValue<T>(config.write->key, raw);
     }
   }
 
   mutable std::mutex mutex_;
   PVConfig config_;
-  std::shared_ptr<RedisAdapter> redis_;
+  std::shared_ptr<RedisAdapter> readRedis_;
+  std::shared_ptr<RedisAdapter> writeRedis_;
+  std::shared_ptr<RedisAdapter> confirmRedis_;
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
   std::string fullName_;
   uint64_t generation_ = 0;
@@ -407,10 +432,18 @@ private:
 template <typename T, bool Array>
 std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig,
                                                 const PVConfig& config,
-                                                const std::shared_ptr<RedisAdapter>& redis,
+                                                const RedisBackendRegistry& redisBackends,
                                                 const std::shared_ptr<AlarmPublisher>& alarmPublisher,
                                                 const uint64_t generation) {
-  auto runtime = std::make_shared<TypedRuntime<T, Array>>(serverConfig, config, redis, alarmPublisher, generation);
+  const auto fullName = fullPVName(serverConfig, config);
+  auto runtime = std::make_shared<TypedRuntime<T, Array>>(
+      serverConfig,
+      config,
+      resolveBackend(redisBackends, config.read.backend, fullName, "read route"),
+      config.write ? resolveBackend(redisBackends, config.write->backend, fullName, "write route") : nullptr,
+      config.confirm ? resolveBackend(redisBackends, config.confirm->backend, fullName, "confirm route") : nullptr,
+      alarmPublisher,
+      generation);
   runtime->initialize();
   return runtime;
 }
@@ -419,38 +452,38 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
 
 std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
-                                           const std::shared_ptr<RedisAdapter>& redis,
+                                           const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
                                            const uint64_t generation) {
   switch (config.shape) {
   case Shape::Scalar:
     switch (config.type) {
-    case PrimitiveType::Boolean: return makeTypedRuntime<bool, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Float32: return makeTypedRuntime<float, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Float64: return makeTypedRuntime<double, false>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::String: return makeTypedRuntime<std::string, false>(serverConfig, config, redis, alarmPublisher, generation);
+    case PrimitiveType::Boolean: return makeTypedRuntime<bool, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Float32: return makeTypedRuntime<float, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Float64: return makeTypedRuntime<double, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::String: return makeTypedRuntime<std::string, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
     }
     break;
   case Shape::Array:
     switch (config.type) {
-    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Float32: return makeTypedRuntime<float, true>(serverConfig, config, redis, alarmPublisher, generation);
-    case PrimitiveType::Float64: return makeTypedRuntime<double, true>(serverConfig, config, redis, alarmPublisher, generation);
+    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Float32: return makeTypedRuntime<float, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Float64: return makeTypedRuntime<double, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
     case PrimitiveType::Boolean:
     case PrimitiveType::String:
       break;

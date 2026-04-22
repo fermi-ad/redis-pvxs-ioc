@@ -6,8 +6,16 @@
 
 namespace redis_pvxs_ioc {
 
-AlarmPublisher::AlarmPublisher(std::string host, const int port, std::string stream)
-    : host_(std::move(host)), port_(port), stream_(std::move(stream)) {}
+AlarmPublisher::AlarmPublisher(std::string host,
+                               const int port,
+                               std::string stream,
+                               std::string user,
+                               std::string password)
+    : host_(std::move(host)),
+      port_(port),
+      stream_(std::move(stream)),
+      user_(std::move(user)),
+      password_(std::move(password)) {}
 
 AlarmPublisher::~AlarmPublisher() {
   resetConnection();
@@ -65,7 +73,28 @@ bool AlarmPublisher::ensureConnected() {
   }
   resetConnection();
   context_ = redisConnect(host_.c_str(), port_);
-  return context_ != nullptr && context_->err == 0;
+  if (context_ == nullptr || context_->err != 0) {
+    resetConnection();
+    return false;
+  }
+
+  if (!user_.empty() || !password_.empty()) {
+    redisReply* reply = nullptr;
+    if (!user_.empty()) {
+      reply = static_cast<redisReply*>(redisCommand(context_, "AUTH %s %s", user_.c_str(), password_.c_str()));
+    } else {
+      reply = static_cast<redisReply*>(redisCommand(context_, "AUTH %s", password_.c_str()));
+    }
+
+    const bool ok = reply != nullptr && reply->type != REDIS_REPLY_ERROR;
+    freeReplyObject(reply);
+    if (!ok) {
+      resetConnection();
+      return false;
+    }
+  }
+
+  return true;
 }
 
 void AlarmPublisher::resetConnection() {

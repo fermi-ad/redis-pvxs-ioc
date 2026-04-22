@@ -11,11 +11,13 @@
 ## Config contract
 
 - YAML only.
-- Top-level sections are `server`, `redis`, optional `alarms`, and `pvs`.
+- Top-level sections are `server`, either `redis` or `redis_backends`, optional `alarms`, and `pvs`.
 - Each PV declares `name`, `type`, `shape`, `read`, optional `write`, optional `confirm`, optional `metadata`, optional `alarm`, and optional `transform`.
 - Only Redis routes are supported in the MVP.
-- The Redis backend target is a standalone single-node Redis server.
-- Reader keys must be unique across `read.key` and `confirm.key` subscriptions in a config generation.
+- Redis backends target standalone single-node Redis servers.
+- Legacy single-backend configs may omit route backend aliases; multi-backend configs must resolve every route to a configured backend alias.
+- Multi-backend configs must also set `alarms.backend` explicitly; the runtime does not pick a default alarm-stream backend when more than one backend is configured.
+- Reader keys must be unique per backend across `read` and `confirm` subscriptions in a config generation.
 
 ## PVA payload contract
 
@@ -30,7 +32,8 @@
 
 - Scalar numeric PVs evaluate warning/alarm thresholds locally in the runtime.
 - Alarm transitions are reflected in the PVA `alarm` fields.
-- Alarm transitions are also published to a Redis stream, default `acorn:alarms`.
+- Alarm transitions are also published to a Redis stream on the configured `alarms.backend`, default `acorn:alarms`.
+- With one configured backend, `alarms.backend` defaults to that backend. With multiple configured backends, `alarms.backend` is required.
 - Array PVs do not evaluate threshold alarms in the MVP.
 
 ## Transform strategy
@@ -44,6 +47,7 @@
 ## Acceptance criteria
 
 - The process serves configured PVs from Redis without an EPICS IOC database layer.
+- The process supports multiple Redis backends in one config generation.
 - A bad replacement config does not terminate the running process or replace the live config.
 - Reloading can add PVs, remove PVs, and replace writable/readback behavior without restarting the process.
 - Metadata fields expected by Phoebus are populated on numeric PVs.

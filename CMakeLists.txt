@@ -50,9 +50,13 @@ else()
   endif()
 endif()
 
+set(REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR
+  "${CMAKE_BINARY_DIR}/generated/include/redis_pvxs_ioc")
+file(MAKE_DIRECTORY "${REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR}")
+
 configure_file(
   ${CMAKE_SOURCE_DIR}/include/redis_pvxs_ioc/version.h.in
-  ${CMAKE_BINARY_DIR}/generated/include/redis_pvxs_ioc/version.h
+  ${REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR}/version.h
   @ONLY
 )
 

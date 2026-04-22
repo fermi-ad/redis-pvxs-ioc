@@ -31,7 +31,13 @@ Run the smoke script:
 ./scripts/smoke-test.sh
 ```
 
-For local source validation instead of the published IOC image, the smoke script layers [`docker-compose.dev.yml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docker-compose.dev.yml) on top of the default compose stack and rebuilds the `ioc` service locally.
+The smoke script only pulls and runs published registry images. To validate a specific release digest or alternate config, override the compose variables:
+
+```sh
+REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<digest> \
+REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
+./scripts/smoke-test.sh
+```
 
 Or validate by hand:
 

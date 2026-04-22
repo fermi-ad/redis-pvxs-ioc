@@ -1,6 +1,6 @@
 services:
   redis:
-    image: adregistry.fnal.gov/instrumentation/redis@sha256:365ee40e627b9faf0775c31c7d6eb9e88a2de201e981b28bd5206029375977b6
+    image: ${REDIS_IMAGE:-adregistry.fnal.gov/instrumentation/redis@sha256:365ee40e627b9faf0775c31c7d6eb9e88a2de201e981b28bd5206029375977b6}
     container_name: redis-pvxs-ioc-redis
     networks:
       - redis-pvxs-ioc
@@ -11,7 +11,7 @@ services:
       retries: 15
 
   ioc:
-    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:a21eb84c333028e19380d97ffebd4fd032281ec0d296023f6b6f38c1160790f1
+    image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest}
     container_name: redis-pvxs-ioc-demo
     networks:
       - redis-pvxs-ioc
@@ -19,7 +19,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./demo/config.yaml:/etc/redis-pvxs-ioc/config.yaml:ro
+      - ${REDIS_PVXS_IOC_CONFIG:-./demo/config.yaml}:/etc/redis-pvxs-ioc/config.yaml:ro
 
 networks:
   redis-pvxs-ioc:

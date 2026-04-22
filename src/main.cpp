@@ -7,6 +7,7 @@
 #include <pvxs/log.h>
 
 #include "redis_pvxs_ioc/app.h"
+#include "redis_pvxs_ioc/version.h"
 
 namespace {
 
@@ -22,7 +23,15 @@ void signalHandler(const int signalNumber) {
 }
 
 void printUsage(const char* executable) {
-  std::cerr << "Usage: " << executable << " [--config <path>] [--check-config <path>]\n";
+  std::cerr << "Usage: " << executable << " [--config <path>] [--check-config <path>] [--version]\n";
+}
+
+void printVersion() {
+  std::cout << "redis-pvxs-ioc " << REDIS_PVXS_IOC_VERSION;
+  if (std::string(REDIS_PVXS_IOC_GIT_REVISION) != "unknown") {
+    std::cout << " (" << REDIS_PVXS_IOC_GIT_REVISION << ")";
+  }
+  std::cout << '\n';
 }
 
 }  // namespace
@@ -40,6 +49,9 @@ int main(int argc, char* argv[]) {
       checkOnly = (argument == "--check-config");
     } else if (argument == "--help" || argument == "-h") {
       printUsage(argv[0]);
+      return 0;
+    } else if (argument == "--version") {
+      printVersion();
       return 0;
     } else {
       printUsage(argv[0]);

@@ -1,5 +1,9 @@
 FROM debian:bookworm-slim AS builder
 
+ARG REDIS_PVXS_IOC_VERSION=dev
+ARG REDIS_PVXS_IOC_REVISION=unknown
+ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
@@ -38,6 +42,10 @@ RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" &
 
 FROM debian:bookworm-slim
 
+ARG REDIS_PVXS_IOC_VERSION=dev
+ARG REDIS_PVXS_IOC_REVISION=unknown
+ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgcc-s1 \
@@ -47,6 +55,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/redis-pvxs-ioc
+
+LABEL org.opencontainers.image.title="redis-pvxs-ioc" \
+      org.opencontainers.image.version="${REDIS_PVXS_IOC_VERSION}" \
+      org.opencontainers.image.revision="${REDIS_PVXS_IOC_REVISION}" \
+      org.opencontainers.image.source="${REDIS_PVXS_IOC_SOURCE}"
 
 COPY --from=builder /opt/runtime /opt/redis-pvxs-ioc
 COPY demo/config.yaml /etc/redis-pvxs-ioc/config.yaml

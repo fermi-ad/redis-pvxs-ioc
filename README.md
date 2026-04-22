@@ -2,6 +2,8 @@
 
 `redis-pvxs-ioc` is a standalone PVAccess-only service that serves Redis-backed PVs from structured YAML config and reloads configuration without restarting the process.
 
+Current release version: `v0.1.0`
+
 ## MVP scope
 
 - PVA only
@@ -20,6 +22,7 @@
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
 - [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.
 - [`scripts/smoke-test.sh`](scripts/smoke-test.sh) exercises the container demo.
+- [`docs/releasing.md`](docs/releasing.md) is the manual semver release procedure.
 
 ## Config model
 
@@ -58,6 +61,7 @@ Then build the service:
 cmake -S . -B build
 cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
+./build/redis-pvxs-ioc --version
 ```
 
 ## Local run
@@ -92,5 +96,19 @@ The runtime container reads `/etc/redis-pvxs-ioc/config.yaml` by default.
 This default compose stack is intentionally self-contained on a local bridge network for smoke/demo testing. Deployment networking can move to dedicated IPs or `ipvlan` later.
 For `docker exec` validation, use the packaged PVXS tools under `/opt/redis-pvxs-ioc/bin/pvxs/`.
 Stop the demo stack with `docker compose down`.
+
+To test a specific published image or alternate config without editing tracked files:
+
+```sh
+REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<digest> \
+REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
+docker compose up -d
+```
+
+Run the registry-only smoke test with:
+
+```sh
+./scripts/smoke-test.sh
+```
 
 Transforms are internal to the server. YAML `transform` settings describe how raw Redis values are mapped to the served PVA `value`; display, control, units, and alarm thresholds are configured in served units.

@@ -1,5 +1,0 @@
-services:
-  ioc:
-    image: redis-pvxs-ioc:dev
-    build:
-      context: .

@@ -442,7 +442,10 @@ AppConfig parseConfig(const YAML::Node& root) {
       if (alias.empty()) {
         fail("root.redis_backends", "backend alias must not be empty");
       }
-      config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias));
+      const auto [it, inserted] = config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias));
+      if (!inserted) {
+        fail("root.redis_backends." + alias, "duplicate redis backend alias '" + alias + "'");
+      }
     }
   }
 

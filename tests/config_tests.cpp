@@ -166,6 +166,27 @@ pvs:
       key: rb
 )YAML";
 
+const char* const kMultiBackendMissingAlarmBackend = R"YAML(
+server:
+  instance: test
+redis_backends:
+  a:
+    base_key: one
+    host: localhost
+    port: 6379
+  b:
+    base_key: two
+    host: localhost
+    port: 6380
+pvs:
+  - name: ok
+    type: float64
+    shape: scalar
+    read:
+      backend: a
+      key: rb
+)YAML";
+
 }  // namespace
 
 int main() {
@@ -204,6 +225,7 @@ int main() {
   assert(throwsConfig(kDuplicateReaders));
   assert(!throwsConfig(kDuplicateReadersDifferentBackends));
   assert(throwsConfig(kUnknownBackend));
+  assert(throwsConfig(kMultiBackendMissingAlarmBackend));
 
   std::cout << "config tests passed\n";
   return 0;

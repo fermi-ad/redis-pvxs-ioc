@@ -27,6 +27,7 @@
 - Multi-backend configs use top-level `redis_backends` keyed by backend alias.
 - `read.backend`, `write.backend`, `confirm.backend`, and `alarms.backend` select which Redis backend each operation uses.
 - When multiple backends are configured, every PV route must resolve to an explicit backend alias.
+- When multiple backends are configured, set `alarms.backend` explicitly as well. The runtime does not choose a default alarm-stream backend when more than one backend is present.
 
 ## Dependency bootstrap
 

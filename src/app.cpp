@@ -1,6 +1,5 @@
 #include "redis_pvxs_ioc/app.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <map>

@@ -1,4 +1,8 @@
-FROM debian:bookworm-slim AS builder
+FROM ubuntu:24.04 AS builder
+
+ARG REDIS_PVXS_IOC_VERSION=dev
+ARG REDIS_PVXS_IOC_REVISION=unknown
+ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -22,7 +26,9 @@ RUN make -C third_party/epics-base configure.install src.install -j"$(nproc)" &&
 RUN printf 'EPICS_BASE=%s/third_party/epics-base\n' "$(pwd)" > third_party/pvxs/configure/RELEASE.local
 RUN make -C third_party/pvxs/bundle libevent
 RUN make -C third_party/pvxs configure.install setup.install src.install tools.install -j"$(nproc)"
-RUN cmake -S . -B build -D REDIS_PVXS_IOC_BUILD_TESTS=ON
+RUN cmake -S . -B build \
+    -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
+    -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
 RUN cmake --build build -j"$(nproc)"
 RUN ctest --test-dir build --output-on-failure
 RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" && \
@@ -36,10 +42,16 @@ RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" &
     cp -R "third_party/epics-base/bin/${EPICS_HOST_ARCH}" /opt/runtime/bin/epics-base && \
     cp -R "third_party/pvxs/bin/${EPICS_HOST_ARCH}" /opt/runtime/bin/pvxs
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
+
+ARG REDIS_PVXS_IOC_VERSION=dev
+ARG REDIS_PVXS_IOC_REVISION=unknown
+ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    iproute2 \
+    iputils-ping \
     libgcc-s1 \
     libreadline8 \
     libstdc++6 \
@@ -48,11 +60,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/redis-pvxs-ioc
 
+LABEL org.opencontainers.image.title="redis-pvxs-ioc" \
+      org.opencontainers.image.version="${REDIS_PVXS_IOC_VERSION}" \
+      org.opencontainers.image.revision="${REDIS_PVXS_IOC_REVISION}" \
+      org.opencontainers.image.source="${REDIS_PVXS_IOC_SOURCE}"
+
 COPY --from=builder /opt/runtime /opt/redis-pvxs-ioc
 COPY demo/config.yaml /etc/redis-pvxs-ioc/config.yaml
+COPY scripts/container-entrypoint.sh /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
+
+RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 
 ENV PATH=/opt/redis-pvxs-ioc/bin/pvxs:/opt/redis-pvxs-ioc/bin/epics-base:$PATH
 ENV LD_LIBRARY_PATH=/opt/redis-pvxs-ioc/lib/epics-base:/opt/redis-pvxs-ioc/lib/pvxs:/opt/redis-pvxs-ioc/lib/libevent
 
-ENTRYPOINT ["/opt/redis-pvxs-ioc/bin/redis-pvxs-ioc"]
+ENTRYPOINT ["/opt/redis-pvxs-ioc/bin/container-entrypoint.sh"]
 CMD ["--config", "/etc/redis-pvxs-ioc/config.yaml"]

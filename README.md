@@ -2,6 +2,10 @@
 
 `redis-pvxs-ioc` is a standalone PVAccess-only service that serves Redis-backed PVs from structured YAML config and reloads configuration without restarting the process.
 
+For the latest released version, see the repository's tags/releases.
+
+The published container image starts through [`scripts/container-entrypoint.sh`](scripts/container-entrypoint.sh), which exports the standard EPICS CA/PVA multicast network defaults before launching the IOC. Every setting can still be overridden with an explicit container environment variable.
+
 ## MVP scope
 
 - PVA only
@@ -20,6 +24,7 @@
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
 - [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.
 - [`scripts/smoke-test.sh`](scripts/smoke-test.sh) exercises the container demo.
+- [`docs/releasing.md`](docs/releasing.md) is the manual semver release procedure.
 
 ## Config model
 
@@ -58,6 +63,7 @@ Then build the service:
 cmake -S . -B build
 cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
+./build/redis-pvxs-ioc --version
 ```
 
 ## Local run
@@ -92,5 +98,23 @@ The runtime container reads `/etc/redis-pvxs-ioc/config.yaml` by default.
 This default compose stack is intentionally self-contained on a local bridge network for smoke/demo testing. Deployment networking can move to dedicated IPs or `ipvlan` later.
 For `docker exec` validation, use the packaged PVXS tools under `/opt/redis-pvxs-ioc/bin/pvxs/`.
 Stop the demo stack with `docker compose down`.
+
+To test a specific published image or alternate config without editing tracked files:
+
+```sh
+REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<digest> \
+REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
+docker compose up -d
+```
+
+If you intentionally want the moving convenience tag instead of the default release tag, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
+
+The runtime image is built on `ubuntu:24.04` and includes `iproute2` and `iputils-ping` for basic network diagnostics.
+
+Run the registry-only smoke test with:
+
+```sh
+./scripts/smoke-test.sh
+```
 
 Transforms are internal to the server. YAML `transform` settings describe how raw Redis values are mapped to the served PVA `value`; display, control, units, and alarm thresholds are configured in served units.

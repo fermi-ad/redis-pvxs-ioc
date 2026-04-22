@@ -18,7 +18,7 @@ This launches:
 - one standalone Redis container
 - one `redis-pvxs-ioc` container
 
-The runtime container mounts [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
+The runtime container mounts [`demo/config.yaml`](../demo/config.yaml) into `/etc/redis-pvxs-ioc/config.yaml`.
 The compose stack uses a local bridge network for service-to-service traffic and does not publish Redis or PVA ports onto the host.
 Use `docker exec` for validation.
 Stop the demo stack with `docker compose down`.
@@ -31,7 +31,15 @@ Run the smoke script:
 ./scripts/smoke-test.sh
 ```
 
-For local source validation instead of the published IOC image, the smoke script layers [`docker-compose.dev.yml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/docker-compose.dev.yml) on top of the default compose stack and rebuilds the `ioc` service locally.
+The smoke script only pulls and runs published registry images. To validate a specific release digest or alternate config, override the compose variables:
+
+```sh
+REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<digest> \
+REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
+./scripts/smoke-test.sh
+```
+
+The default compose and smoke-test path tracks the published `v0.1.1` release tag. If you need a stricter pin, override `REDIS_PVXS_IOC_IMAGE` with an immutable digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
 
 Or validate by hand:
 
@@ -51,10 +59,12 @@ docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magne
 docker logs -f "$IOC_CONTAINER"
 ```
 
+The container starts through [`scripts/container-entrypoint.sh`](../scripts/container-entrypoint.sh), which exports the default EPICS multicast network settings before launching the IOC. Override any of those variables with explicit container environment settings if your deployment needs different interfaces or multicast groups.
+
 The writable PV demo stores its raw Redis payload in the `{demo}:magnet:current` stream as a packed binary double.
 For the sample transform, a served value of `9.0` corresponds to the raw hex payload `0000000000805640`, which is `90.0` in little-endian IEEE754.
 
-For reload validation, change [`demo/config.yaml`](/Users/derekste/Dev/epics/redis-pvxs-ioc/demo/config.yaml) on the host and then signal the running process:
+For reload validation, change [`demo/config.yaml`](../demo/config.yaml) on the host and then signal the running process:
 
 ```sh
 docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'

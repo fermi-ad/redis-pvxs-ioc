@@ -6,47 +6,58 @@ cd "$ROOT_DIR"
 
 PVX_BIN_DIR="/opt/redis-pvxs-ioc/bin/pvxs"
 PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1'
-COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.dev.yml)
+DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.1.1"
 
-docker build -t redis-pvxs-ioc:dev .
-docker compose "${COMPOSE_FILES[@]}" up -d --build
+export REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE:-$DEFAULT_REDIS_PVXS_IOC_IMAGE}"
+SOURCE_CONFIG="${REDIS_PVXS_IOC_CONFIG:-$ROOT_DIR/demo/config.yaml}"
+TEMP_CONFIG="$(mktemp)"
+export REDIS_PVXS_IOC_CONFIG="$TEMP_CONFIG"
+cp "$SOURCE_CONFIG" "$REDIS_PVXS_IOC_CONFIG"
+
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 "$@"
+  else
+    "$@"
+  fi
+}
+
+docker compose pull
+docker compose up -d
 
 cleanup() {
-  docker compose "${COMPOSE_FILES[@]}" down -v
+  docker compose down -v
 }
 
 sleep 5
 
-IOC_CONTAINER="$(docker compose "${COMPOSE_FILES[@]}" ps -q ioc)"
-REDIS_CONTAINER="$(docker compose "${COMPOSE_FILES[@]}" ps -q redis)"
-TMP_CONFIG="$(mktemp)"
-cp demo/config.yaml "$TMP_CONFIG"
+IOC_CONTAINER="$(docker compose ps -q ioc)"
+REDIS_CONTAINER="$(docker compose ps -q redis)"
 
 restore_config() {
-  cp "$TMP_CONFIG" demo/config.yaml
-  rm -f "$TMP_CONFIG"
+  rm -f "$REDIS_PVXS_IOC_CONFIG"
 }
 
 trap 'restore_config; cleanup' EXIT
 
 for _ in {1..30}; do
-  if docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -q 'value string = "connected"'; then
+  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -q 'value string = "connected"'; then
     break
   fi
   sleep 2
 done
 
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep 'value string = "connected"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep 'value string = "connected"'
 
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature"'
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:waveform" | grep 'value float\[] = {5}\[0, 1.5, 3, 1.5, 0\]'
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput DEMO:magnet:current 9.0"
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 9'
-docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1 | xxd -p -c 256" | grep '^0000000000805640'
-docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10 | grep 'DEMO:magnet:current'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:waveform" | grep 'value float\[] = {5}\[0, 1.5, 3, 1.5, 0\]'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput DEMO:magnet:current 9.0"
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 9'
+run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1 | xxd -p -c 256" | grep '^0000000000805640'
+run_with_timeout docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10 | grep 'DEMO:magnet:current'
 
-LC_ALL=C LANG=C perl -0pi -e 's/description: Source temperature/description: Source temperature reloaded/' demo/config.yaml
-docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'
+LC_ALL=C LANG=C perl -0pi -e 's/description: Source temperature/description: Source temperature reloaded/' "$REDIS_PVXS_IOC_CONFIG"
+run_with_timeout docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'
 sleep 2
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'

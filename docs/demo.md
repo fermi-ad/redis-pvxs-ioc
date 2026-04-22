@@ -39,7 +39,7 @@ REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 ./scripts/smoke-test.sh
 ```
 
-The default compose and smoke-test path is pinned to the published `v0.1.0` release digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
+The default compose and smoke-test path tracks the published `v0.1.1` release tag. If you need a stricter pin, override `REDIS_PVXS_IOC_IMAGE` with an immutable digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
 
 Or validate by hand:
 
@@ -58,6 +58,8 @@ docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10
 docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1 | xxd -p -c 256"
 docker logs -f "$IOC_CONTAINER"
 ```
+
+The container starts through [`scripts/container-entrypoint.sh`](../scripts/container-entrypoint.sh), which exports the default EPICS multicast network settings before launching the IOC. Override any of those variables with explicit container environment settings if your deployment needs different interfaces or multicast groups.
 
 The writable PV demo stores its raw Redis payload in the `{demo}:magnet:current` stream as a packed binary double.
 For the sample transform, a served value of `9.0` corresponds to the raw hex payload `0000000000805640`, which is `90.0` in little-endian IEEE754.

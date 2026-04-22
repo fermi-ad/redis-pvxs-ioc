@@ -4,6 +4,8 @@
 
 For the latest released version, see the repository's tags/releases.
 
+The published container image starts through [`scripts/container-entrypoint.sh`](scripts/container-entrypoint.sh), which exports the standard EPICS CA/PVA multicast network defaults before launching the IOC. Every setting can still be overridden with an explicit container environment variable.
+
 ## MVP scope
 
 - PVA only
@@ -105,7 +107,9 @@ REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 docker compose up -d
 ```
 
-If you intentionally want the moving convenience tag instead of the pinned release digest, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
+If you intentionally want the moving convenience tag instead of the default release tag, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
+
+The runtime image is built on `ubuntu:24.04` and includes `iproute2` and `iputils-ping` for basic network diagnostics.
 
 Run the registry-only smoke test with:
 

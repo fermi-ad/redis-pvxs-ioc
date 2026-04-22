@@ -14,6 +14,16 @@ TEMP_CONFIG="$(mktemp)"
 export REDIS_PVXS_IOC_CONFIG="$TEMP_CONFIG"
 cp "$SOURCE_CONFIG" "$REDIS_PVXS_IOC_CONFIG"
 
+cleanup() {
+  docker compose down -v >/dev/null 2>&1 || true
+}
+
+restore_config() {
+  rm -f "${REDIS_PVXS_IOC_CONFIG:-}"
+}
+
+trap 'restore_config; cleanup' EXIT
+
 run_with_timeout() {
   if command -v timeout >/dev/null 2>&1; then
     timeout 20 "$@"
@@ -25,20 +35,10 @@ run_with_timeout() {
 docker compose pull
 docker compose up -d
 
-cleanup() {
-  docker compose down -v
-}
-
 sleep 5
 
 IOC_CONTAINER="$(docker compose ps -q ioc)"
 REDIS_CONTAINER="$(docker compose ps -q redis)"
-
-restore_config() {
-  rm -f "$REDIS_PVXS_IOC_CONFIG"
-}
-
-trap 'restore_config; cleanup' EXIT
 
 for _ in {1..30}; do
   if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -q 'value string = "connected"'; then

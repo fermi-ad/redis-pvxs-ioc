@@ -6,7 +6,7 @@ For the latest released version, see the repository's tags/releases.
 
 The published container image starts through [`scripts/container-entrypoint.sh`](scripts/container-entrypoint.sh), which exports the standard EPICS CA/PVA multicast network defaults before launching the IOC. Every setting can still be overridden with an explicit container environment variable.
 
-## MVP scope
+## Current feature state
 
 - PVA only
 - Redis-backed reads and writes against one or more standalone single-node Redis instances
@@ -16,9 +16,12 @@ The published container image starts through [`scripts/container-entrypoint.sh`]
 - linear transforms for floating-point PVs
 - no CA, no embedded record/database host, no Redis Cluster support, and no ACF in the first cut
 
+The current product/roadmap state is tracked in [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md). That document separates implemented features from planned tracks such as Redis-backed definitions/settings, ACF, support-module compatibility, and CA compatibility.
+
 ## Repository layout
 
 - [`docs/design.md`](docs/design.md) is the baseline design artifact.
+- [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md) captures the current feature state and the post-MVP capability tracks.
 - [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.

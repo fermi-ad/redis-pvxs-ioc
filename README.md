@@ -124,4 +124,11 @@ Transforms are internal to the server. YAML `transform` settings describe how ra
 
 The optional legacy sidecar is a conventional EPICS IOC container that can run beside `redis-pvxs-ioc` for base-record `.db` files and user-owned support-module images. It does not add `.dbd`, `.db`, or `iocInit()` behavior to the main `redis-pvxs-ioc` process.
 
+The sample sidecar is also registry-backed, so a fresh clone can start the complete testbed without local image builds:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+```
+
 See [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the sample sidecar image, compose overlay, and instructions for deriving a real support-module sidecar.

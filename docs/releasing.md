@@ -30,10 +30,11 @@ ctest --test-dir build --output-on-failure
 4. Commit the release prep and push the branch.
 5. Tag the release commit with `v$(cat VERSION)`.
 6. Build and push the production image.
-7. Record the pushed digest.
-8. Create the GitHub Release and include:
+7. Build and push the legacy sidecar sample image when `legacy-sidecar/` changes.
+8. Record the pushed digests.
+9. Create the GitHub Release and include:
    - the semver tag
-   - the immutable image digest
+   - the immutable image digest for each published image
    - the validation commands used
 
 ## Manual build and publish
@@ -42,6 +43,7 @@ ctest --test-dir build --output-on-failure
 VERSION="$(cat VERSION)"
 REVISION="$(git rev-parse --short=12 HEAD)"
 IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}"
+LEGACY_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v${VERSION}"
 
 git tag "v${VERSION}"
 git push origin HEAD
@@ -58,12 +60,32 @@ docker build \
 
 docker push "${IMAGE}"
 docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest
+
+LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
+  docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.legacy-sidecar.yml \
+    -f docker-compose.legacy-sidecar.build.yml \
+    --profile legacy \
+    build legacy-ioc
+
+LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
+  docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.legacy-sidecar.yml \
+    -f docker-compose.legacy-sidecar.build.yml \
+    --profile legacy \
+    push legacy-ioc
+
+docker tag "${LEGACY_IMAGE}" adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:latest
+docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:latest
 ```
 
 Capture the immutable digest after push:
 
 ```sh
 docker image inspect "${IMAGE}" --format '{{join .RepoDigests "\n"}}'
+docker image inspect "${LEGACY_IMAGE}" --format '{{join .RepoDigests "\n"}}'
 ```
 
 ## Manual GitHub release
@@ -76,4 +98,4 @@ gh release create "v${VERSION}" \
   --notes-file CHANGELOG.md
 ```
 
-After the release is created, edit the release notes to add the final image digest and the tested validation commands.
+After the release is created, edit the release notes to add the final image digests and the tested validation commands.

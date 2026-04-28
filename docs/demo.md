@@ -23,6 +23,22 @@ The compose stack uses a local bridge network for service-to-service traffic and
 Use `docker exec` for validation.
 Stop the demo stack with `docker compose down`.
 
+## Start the complete testbed
+
+The optional legacy sidecar is also registry-backed. A fresh clone can start Redis, `redis-pvxs-ioc`, and the sample conventional IOC sidecar without local image builds:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+```
+
+This adds:
+
+- one `legacy-ioc` container serving base records through `pvxsIoc`
+
+The sidecar is on the same local bridge network as the Redis-backed IOC and does not publish host ports by default.
+Use [`docs/legacy-sidecar.md`](legacy-sidecar.md) for sidecar-specific validation, optional CA enablement, and the maintainer-only build/push path.
+
 ## Manual validation
 
 Run the smoke script:
@@ -39,7 +55,7 @@ REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 ./scripts/smoke-test.sh
 ```
 
-The default compose and smoke-test path tracks the published `v0.1.2` release tag. If you need a stricter pin, override `REDIS_PVXS_IOC_IMAGE` with an immutable digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
+The default compose and smoke-test path tracks the published `v0.2.0` release tag. If you need a stricter pin, override `REDIS_PVXS_IOC_IMAGE` with an immutable digest. If you intentionally want the moving convenience tag instead, override `REDIS_PVXS_IOC_IMAGE` with `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest`.
 
 Or validate by hand:
 

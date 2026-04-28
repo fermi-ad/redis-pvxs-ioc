@@ -1,0 +1,6 @@
+services:
+  legacy-ioc:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: legacy-sidecar/Dockerfile

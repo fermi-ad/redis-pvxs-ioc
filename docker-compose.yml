@@ -11,7 +11,7 @@ services:
       retries: 15
 
   ioc:
-    image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.1.2}
+    image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.2.0}
     container_name: redis-pvxs-ioc-demo
     networks:
       - redis-pvxs-ioc

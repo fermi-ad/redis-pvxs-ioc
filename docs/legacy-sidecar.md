@@ -18,7 +18,7 @@ It exists to help teams adopt the Redis-first PVXS IOC without forcing every exi
 - mounting an unknown `.dbd` file and expecting missing C/C++ registrar or device-support code to appear
 - re-exporting sidecar PVs through `redis-pvxs-ioc`
 - Redis shadowing of sidecar values
-- CA compatibility
+- CA compatibility by default
 - hot reload of legacy `.dbd` or `.db` structure after `iocInit()`
 
 ## Why A `.dbd` Is Not Enough
@@ -36,16 +36,25 @@ For a real support module, derive a custom sidecar image and link that module in
 
 ## Run The Sample
 
-Build and run the normal Redis-backed IOC demo:
+Start the normal Redis-backed IOC demo from published registry images:
 
 ```sh
+docker compose pull
 docker compose up -d
 ```
 
-Build and run the optional legacy IOC sidecar:
+Start the optional legacy IOC sidecar from its published registry image:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d --build legacy-ioc
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+```
+
+To mount a different host startup script into the fixed in-container path:
+
+```sh
+LEGACY_IOC_STARTUP_HOST=/path/to/st.cmd \
+  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
 Validate the sidecar PVs from the main IOC container, which already includes PVXS tools:
@@ -67,6 +76,19 @@ docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --prof
 ```
 
 The Redis-backed IOC remains running.
+
+## Optional Channel Access
+
+The sample sidecar links EPICS Base IOC libraries, so the CA server layer is available. It is disabled by default by adding `rsrv` to `EPICS_IOC_IGNORE_SERVERS` before `iocInit()`.
+
+Enable CA only when a sidecar is explicitly being used as a legacy CA compatibility surface:
+
+```sh
+LEGACY_IOC_ENABLE_CA=YES \
+  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+```
+
+This does not add CA support to the main `redis-pvxs-ioc` runtime. It only opts the conventional sidecar IOC into its normal EPICS Base RSRV server behavior.
 
 ## Deriving A Real Support-Module Sidecar
 
@@ -113,3 +135,33 @@ iocInit()
 ```
 
 The sidecar and `redis-pvxs-ioc` share a PVA network, but they are separate processes with separate failure domains.
+
+## Publishing The Sample Sidecar Image
+
+Normal users should not need to build the sample sidecar locally. The compose overlay defaults to:
+
+```text
+adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0
+```
+
+Maintainers can use the optional build overlay to build and push that image from this repo:
+
+```sh
+LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0 \
+  docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.legacy-sidecar.yml \
+    -f docker-compose.legacy-sidecar.build.yml \
+    --profile legacy \
+    build legacy-ioc
+
+LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0 \
+  docker compose \
+    -f docker-compose.yml \
+    -f docker-compose.legacy-sidecar.yml \
+    -f docker-compose.legacy-sidecar.build.yml \
+    --profile legacy \
+    push legacy-ioc
+```
+
+Project-specific sidecars should follow the same pattern: build a derived image, push it to the registry, then set `LEGACY_IOC_IMAGE` in that project's compose override. Do not make normal project startup depend on local image builds.

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.0 - 2026-04-28
+
+- add an optional conventional IOC sidecar image/demo for base-record `.db` workflows with PVA exposure through `pvxsIoc`
+- keep the main `redis-pvxs-ioc` runtime PVA-first with no `.dbd`, `.db`, or `iocInit()` behavior
+- make the legacy sidecar compose path registry-first while preserving an optional maintainer build overlay
+- disable CA server behavior in the sidecar by default and require `LEGACY_IOC_ENABLE_CA=YES` for opt-in CA compatibility
+
 ## v0.1.2 - 2026-04-22
 
 - make the default PVA multicast configuration host-agnostic instead of assuming a specific interface name

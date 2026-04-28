@@ -1,0 +1,2 @@
+PVXS = /opt/redis-pvxs-ioc/third_party/pvxs
+EPICS_BASE = /opt/redis-pvxs-ioc/third_party/epics-base

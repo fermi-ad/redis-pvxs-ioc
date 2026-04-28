@@ -35,7 +35,7 @@ docker exec redis-pvxs-ioc-demo sh -lc \
 
 See [`docs/demo.md`](docs/demo.md) for the complete validation flow and [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the support-module sidecar adoption path.
 
-## MVP scope
+## Current feature state
 
 - PVA only
 - Redis-backed reads and writes against one or more standalone single-node Redis instances
@@ -45,10 +45,15 @@ See [`docs/demo.md`](docs/demo.md) for the complete validation flow and [`docs/l
 - linear transforms for floating-point PVs
 - no CA, no embedded record/database host, no Redis Cluster support, and no ACF in the first cut
 
+The current product/roadmap state is tracked in [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md). That document separates implemented features from planned tracks such as Redis-backed definitions/settings, ACF, support-module compatibility, and CA compatibility.
+The normative-types expansion target is tracked separately in [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md).
+
 ## Repository layout
 
 - [`docs/design.md`](docs/design.md) is the baseline design artifact.
+- [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md) captures the current feature state and the post-MVP capability tracks.
 - [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
+- [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md) breaks down the long-term EPICS normative-types coverage goal.
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
 - [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.

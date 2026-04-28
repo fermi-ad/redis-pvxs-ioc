@@ -17,12 +17,14 @@ The published container image starts through [`scripts/container-entrypoint.sh`]
 - no CA, no embedded record/database host, no Redis Cluster support, and no ACF in the first cut
 
 The current product/roadmap state is tracked in [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md). That document separates implemented features from planned tracks such as Redis-backed definitions/settings, ACF, support-module compatibility, and CA compatibility.
+The normative-types expansion target is tracked separately in [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md).
 
 ## Repository layout
 
 - [`docs/design.md`](docs/design.md) is the baseline design artifact.
 - [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md) captures the current feature state and the post-MVP capability tracks.
 - [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
+- [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md) breaks down the long-term EPICS normative-types coverage goal.
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
 - [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.

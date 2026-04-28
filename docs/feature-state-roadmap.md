@@ -33,6 +33,7 @@ Assumed defaults:
 - recaster or any other EPICS support module integration
 - any backend adapter besides Redis
 - CA service or CA compatibility layer
+- broader EPICS normative-type coverage beyond `NTScalar` and `NTScalarArray`
 - Redis Cluster
 - general-purpose IOC hosting or in-process support-module loading
 
@@ -49,7 +50,28 @@ This is the base track for every later feature.
 - Add source revision reporting, config diff/reporting, and reload diagnostics in issue `#3`.
 - Finish runtime hardening in issue `#4` so backend loss, bad replacement generations, and stale callback fencing are proven before larger feature tracks build on top.
 
-### 2. Full Redis Settings Path
+### 2. Normative Types Coverage
+
+This track captures the long-term goal of broader alignment with the EPICS V4 Normative Types specification.
+
+- The umbrella is issue `#17`.
+- The groundwork is issue `#20`.
+- General normative types are issue `#18`.
+- Specific normative types are issue `#19`.
+- Appendix A future additions are issue `#21`.
+- Current support remains limited to `NTScalar` and `NTScalarArray`.
+- The long-term target includes:
+  - `NTEnum`, `NTMatrix`, `NTURI`, `NTNameValue`, `NTTable`, `NTAttribute`
+  - `NTMultiChannel`, `NTNDArray`, `NTContinuum`, `NTHistogram`, `NTAggregate`
+  - `NTUnion`, `NTScalarMultiChannel`
+- This track should build a reusable internal framework for:
+  - self-identification and type IDs
+  - richer optional metadata handling
+  - validation
+  - structured and union-bearing payload construction
+- This track must remain compatible with the zero-downtime generation model and the long-term Redis-backed definition/settings direction.
+
+### 3. Full Redis Settings Path
 
 This is the long-term "everything dynamic" track.
 
@@ -69,10 +91,10 @@ This is the long-term "everything dynamic" track.
 - Preserve generation-based apply:
   - build the next definition generation off-thread
   - validate before cutover
-  - reject bad definitions without disturbing the live generation
+- reject bad definitions without disturbing the live generation
 - Keep YAML as bootstrap/fallback initially, then treat it as just one control-plane source.
 
-### 3. Security and ACF
+### 4. Security and ACF
 
 ACF remains a built-in product requirement after MVP.
 
@@ -91,7 +113,7 @@ ACF remains a built-in product requirement after MVP.
   - dynamic Redis-backed ASG assignment is in scope early
   - Redis-delivered ACF text can be a later extension after file/text-based ACF is stable
 
-### 4. Compatibility Lane for Support Modules
+### 5. Compatibility Lane for Support Modules
 
 The core runtime should not become a support-module host.
 
@@ -106,7 +128,7 @@ The core runtime should not become a support-module host.
   - first viable path is a sidecar IOC plus a new backend adapter, preferably PVA first
 - This track should produce a clean answer to "can you run our support module?" without compromising zero-downtime guarantees.
 
-### 5. CA Compatibility Track
+### 6. CA Compatibility Track
 
 CA stays out of the core runtime.
 
@@ -118,7 +140,7 @@ CA stays out of the core runtime.
   - the PVA core remains the primary product architecture
 - Do not let CA requirements drag record/device/database behavior back into the core server.
 
-### 6. Release and Operational Maturity
+### 7. Release and Operational Maturity
 
 Release automation is a separate ops track.
 

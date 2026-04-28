@@ -1,0 +1,3 @@
+include $(CONFIG)/RULES
+
+$(LIBNAME): ../Makefile

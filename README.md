@@ -23,6 +23,7 @@ The published container image starts through [`scripts/container-entrypoint.sh`]
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
 - [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.
+- [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) explains the optional conventional IOC sidecar for legacy `.dbd` / `.db` workflows.
 - [`scripts/smoke-test.sh`](scripts/smoke-test.sh) exercises the container demo.
 - [`docs/releasing.md`](docs/releasing.md) is the manual semver release procedure.
 
@@ -118,3 +119,9 @@ Run the registry-only smoke test with:
 ```
 
 Transforms are internal to the server. YAML `transform` settings describe how raw Redis values are mapped to the served PVA `value`; display, control, units, and alarm thresholds are configured in served units.
+
+## Legacy IOC sidecar
+
+The optional legacy sidecar is a conventional EPICS IOC container that can run beside `redis-pvxs-ioc` for base-record `.db` files and user-owned support-module images. It does not add `.dbd`, `.db`, or `iocInit()` behavior to the main `redis-pvxs-ioc` process.
+
+See [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the sample sidecar image, compose overlay, and instructions for deriving a real support-module sidecar.

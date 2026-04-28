@@ -1,0 +1,32 @@
+# CONFIG - Load build configuration data
+
+RULES = $(EPICS_BASE)
+
+include $(TOP)/configure/RELEASE
+-include $(TOP)/configure/RELEASE.$(EPICS_HOST_ARCH).Common
+
+ifdef T_A
+  -include $(TOP)/configure/RELEASE.Common.$(T_A)
+  -include $(TOP)/configure/RELEASE.$(EPICS_HOST_ARCH).$(T_A)
+endif
+
+ifneq (file,$(origin EPICS_BASE))
+  $(error EPICS_BASE must be set in a configure/RELEASE file)
+else
+  ifeq ($(wildcard $(EPICS_BASE)/configure/CONFIG_BASE),)
+    $(error EPICS_BASE does not point to an EPICS installation)
+  endif
+endif
+
+CONFIG = $(RULES)/configure
+include $(CONFIG)/CONFIG
+
+INSTALL_LOCATION = $(TOP)
+
+include $(TOP)/configure/CONFIG_SITE
+-include $(TOP)/configure/CONFIG_SITE.$(EPICS_HOST_ARCH).Common
+
+ifdef T_A
+  -include $(TOP)/configure/CONFIG_SITE.Common.$(T_A)
+  -include $(TOP)/configure/CONFIG_SITE.$(EPICS_HOST_ARCH).$(T_A)
+endif

@@ -1,0 +1,13 @@
+services:
+  legacy-ioc:
+    image: ${LEGACY_IOC_IMAGE:-redis-pvxs-ioc-legacy-sidecar:local}
+    build:
+      context: .
+      dockerfile: legacy-sidecar/Dockerfile
+    container_name: redis-pvxs-ioc-legacy
+    profiles:
+      - legacy
+    networks:
+      - redis-pvxs-ioc
+    volumes:
+      - ${LEGACY_IOC_STARTUP:-./legacy-sidecar/iocBoot/st.cmd}:/etc/legacy-ioc/st.cmd:ro

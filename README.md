@@ -6,6 +6,35 @@ For the latest released version, see the repository's tags/releases.
 
 The published container image starts through [`scripts/container-entrypoint.sh`](scripts/container-entrypoint.sh), which exports the standard EPICS CA/PVA multicast network defaults before launching the IOC. Every setting can still be overridden with an explicit container environment variable.
 
+## Quick start
+
+Registry-first startup:
+
+```sh
+git clone https://github.com/fermi-ad/redis-pvxs-ioc.git
+cd redis-pvxs-ioc
+docker compose pull
+docker compose up -d
+```
+
+Add the legacy IOC sidecar:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
+docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+```
+
+Validate:
+
+```sh
+docker exec redis-pvxs-ioc-demo sh -lc \
+  'EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1 /opt/redis-pvxs-ioc/bin/pvxs/pvxget DEMO:source:temperature'
+docker exec redis-pvxs-ioc-demo sh -lc \
+  'EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=239.128.1.6 /opt/redis-pvxs-ioc/bin/pvxs/pvxget LEGACY:readback'
+```
+
+See [`docs/demo.md`](docs/demo.md) for the complete validation flow and [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the support-module sidecar adoption path.
+
 ## MVP scope
 
 - PVA only

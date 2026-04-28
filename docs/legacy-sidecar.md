@@ -2,7 +2,9 @@
 
 The legacy sidecar is an optional conventional EPICS IOC container that can run beside `redis-pvxs-ioc`.
 
-It exists to help teams adopt the Redis-first PVXS IOC without forcing every existing support module into the main runtime. The main `redis-pvxs-ioc` binary still does not load `.dbd` files, `.db` files, or run `iocInit()`.
+If you already have a working `.db` / `.dbd` IOC or a support module people depend on, start here. The sidecar lets that IOC join the PVA testbed without changing the Redis-first runtime.
+
+The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-support behavior in a separate sidecar image, publish that image to the registry, and run both containers on the same PVA network.
 
 ## What This Supports
 
@@ -36,28 +38,12 @@ For a real support module, derive a custom sidecar image and link that module in
 
 ## Run The Sample
 
-Start the normal Redis-backed IOC demo from published registry images:
-
-```sh
-docker compose pull
-docker compose up -d
-```
-
-Start the optional legacy IOC sidecar from its published registry image:
-
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
 docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-To mount a different host startup script into the fixed in-container path:
-
-```sh
-LEGACY_IOC_STARTUP_HOST=/path/to/st.cmd \
-  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
-Validate the sidecar PVs from the main IOC container, which already includes PVXS tools:
+Validate:
 
 ```sh
 IOC_CONTAINER=redis-pvxs-ioc-demo
@@ -69,28 +55,36 @@ docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput LEGACY:setpoint
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:setpoint"
 ```
 
-Stop only the sidecar:
+Use a different startup script:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy stop legacy-ioc
+LEGACY_IOC_STARTUP_HOST=/path/to/st.cmd \
+  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
-
-The Redis-backed IOC remains running.
 
 ## Optional Channel Access
 
-The sample sidecar links EPICS Base IOC libraries, so the CA server layer is available. It is disabled by default by adding `rsrv` to `EPICS_IOC_IGNORE_SERVERS` before `iocInit()`.
-
-Enable CA only when a sidecar is explicitly being used as a legacy CA compatibility surface:
+CA is disabled by default. Enable it only for a sidecar that must serve legacy CA clients:
 
 ```sh
 LEGACY_IOC_ENABLE_CA=YES \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-This does not add CA support to the main `redis-pvxs-ioc` runtime. It only opts the conventional sidecar IOC into its normal EPICS Base RSRV server behavior.
-
 ## Deriving A Real Support-Module Sidecar
+
+Fast path:
+
+```sh
+cp -R legacy-sidecar /path/to/my-project/legacy-sidecar
+```
+
+Then edit:
+
+- `legacy-sidecar/app/legacyIocApp/src/Makefile`
+- `legacy-sidecar/iocBoot/st.cmd`
+- `legacy-sidecar/app/legacyIocApp/Db/`
+- `legacy-sidecar/Dockerfile` if the support module needs extra source packages or build steps
 
 A user-owned sidecar image should contain:
 
@@ -136,15 +130,29 @@ iocInit()
 
 The sidecar and `redis-pvxs-ioc` share a PVA network, but they are separate processes with separate failure domains.
 
-## Publishing The Sample Sidecar Image
+Common mistakes:
 
-Normal users should not need to build the sample sidecar locally. The compose overlay defaults to:
+- Do not mount only a `.dbd` and expect missing support code to appear.
+- Do not make normal users build images locally.
+- Do not enable CA unless the sidecar must serve legacy CA clients.
 
-```text
-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0
+## Use Your Sidecar Image
+
+Push the project sidecar image to the registry, then override the image:
+
+```yaml
+services:
+  legacy-ioc:
+    image: adregistry.fnal.gov/instrumentation/my-device-legacy-ioc@sha256:<digest>
+    environment:
+      LEGACY_IOC_ENABLE_CA: "NO"
+    volumes:
+      - ./iocBoot/st.cmd:/etc/legacy-ioc/st.cmd:ro
 ```
 
-Maintainers can use the optional build overlay to build and push that image from this repo:
+## Publishing The Sample Sidecar Image
+
+Maintainers only:
 
 ```sh
 LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0 \

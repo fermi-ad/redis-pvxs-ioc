@@ -7,7 +7,6 @@ services:
     networks:
       - redis-pvxs-ioc
     environment:
-      LEGACY_IOC_STARTUP: /etc/legacy-ioc/st.cmd
       LEGACY_IOC_ENABLE_CA: ${LEGACY_IOC_ENABLE_CA:-NO}
     volumes:
       - ${LEGACY_IOC_STARTUP_HOST:-./legacy-sidecar/iocBoot/st.cmd}:/etc/legacy-ioc/st.cmd:ro

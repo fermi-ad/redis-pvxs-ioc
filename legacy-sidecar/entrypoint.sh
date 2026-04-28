@@ -39,7 +39,7 @@ export EPICS_PVAS_AUTO_BEACON_ADDR_LIST="${EPICS_PVAS_AUTO_BEACON_ADDR_LIST:-NO}
 export EPICS_PVAS_BEACON_ADDR_LIST="${EPICS_PVAS_BEACON_ADDR_LIST:-239.128.1.7,10}"
 
 if [ "$#" -eq 0 ]; then
-  set -- "${LEGACY_IOC_STARTUP:-/etc/legacy-ioc/st.cmd}"
+  set -- /etc/legacy-ioc/st.cmd
 fi
 
 exec /opt/legacy-ioc/bin/legacyIoc "$@"

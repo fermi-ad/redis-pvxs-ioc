@@ -35,18 +35,41 @@ docker exec redis-pvxs-ioc-demo sh -lc \
 
 See [`docs/demo.md`](docs/demo.md) for the complete validation flow and [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the support-module sidecar adoption path.
 
-## Current feature state
+## What works today
 
-- PVA only
-- Redis-backed reads and writes against one or more standalone single-node Redis instances
-- `NTScalar` / `NTScalarArray` payloads with standard Phoebus-facing metadata
-- manual hot reload via `SIGHUP` and admin PV
-- Redis alarm stream publishing
-- linear transforms for floating-point PVs
-- no CA, no embedded record/database host, no Redis Cluster support, and no ACF in the first cut
+`redis-pvxs-ioc` gives a fresh clone a working PVA testbed from registry images only:
 
-The current product/roadmap state is tracked in [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md). That document separates implemented features from planned tracks such as Redis-backed definitions/settings, ACF, support-module compatibility, and CA compatibility.
-The normative-types expansion target is tracked separately in [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md).
+- a Redis-backed PVA IOC serving configured PVs
+- a Redis container for the demo value plane
+- packaged `pvxget` / `pvxput` tools inside the IOC image
+- an optional conventional IOC sidecar for base-record `.db` examples and support-module adoption
+
+The main runtime serves `NTScalar` and `NTScalarArray` PVs with the Phoebus-facing fields operators expect: `value`, `alarm`, `timeStamp`, `display`, `control`, and `valueAlarm`. PVs can read from Redis, write to Redis, confirm readback, publish alarm transitions to a Redis stream, and reload YAML config without restarting the process.
+
+## Runtime capabilities
+
+- Redis-backed reads, writes, and confirm/readback routes
+- one or more standalone Redis backends in the same config
+- scalar and array PVs over PVAccess
+- units, description, precision, display form, display/control limits, and alarm limits
+- scalar alarm evaluation with Redis alarm-stream publishing
+- linear transforms for floating-point PVs and arrays
+- manual hot reload via `SIGHUP` and admin PVs
+- standard EPICS/PVA network defaults at container startup, with environment overrides
+
+## Legacy compatibility
+
+Legacy IOC support is handled as a sidecar, not by loading `.dbd` files into the Redis-first runtime. The included sidecar image runs a small conventional IOC with `pvxsIoc`, so users can see base records over PVA immediately.
+
+Teams that need real support modules should derive their own sidecar image, link the required module code there, publish it to the registry, and run it next to `redis-pvxs-ioc` on the same PVA network. That keeps support-module behavior available without compromising the hot-reload Redis runtime.
+
+## Current boundaries
+
+- The core product is PVA-first; CA is not served by the main runtime.
+- ACF enforcement and Redis-native PV definitions/settings are planned, not implemented yet.
+- Redis Cluster and in-process EPICS database hosting are intentionally out of scope.
+
+The detailed product/roadmap state is tracked in [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md). The normative-types expansion target is tracked separately in [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md).
 
 ## Repository layout
 

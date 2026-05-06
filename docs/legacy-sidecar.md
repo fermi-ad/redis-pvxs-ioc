@@ -11,6 +11,7 @@ The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-
 - a conventional IOC startup script
 - base records from `.db` files
 - PVA exposure through `pvxsIoc` / QSRV2
+- RecCaster status records and RecCeiver/ChannelFinder advertisement for conventional IOC records
 - an optional compose service on the same PVA network as `redis-pvxs-ioc`
 - a template that teams can derive from for real support-module images
 
@@ -32,6 +33,7 @@ The sample sidecar image links only:
 - EPICS Base IOC libraries
 - `pvxs`
 - `pvxsIoc`
+- upstream `reccaster`
 - base record/device support
 
 For a real support module, derive a custom sidecar image and link that module into the IOC app. Do not treat the sample image as a universal `.dbd` loader.
@@ -53,6 +55,8 @@ PVX_BIN_DIR='/opt/redis-pvxs-ioc/bin/pvxs'
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:readback"
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput LEGACY:setpoint 2.5"
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:setpoint"
+docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:State-Sts"
+docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:Msg-I"
 ```
 
 Use a different startup script:
@@ -61,6 +65,8 @@ Use a different startup script:
 LEGACY_IOC_STARTUP_HOST=/path/to/st.cmd \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
+
+The overlay publishes UDP `5049` by default for RecCaster discovery. If another local test stack already owns that host port, set `RECCASTER_UDP_HOST_PORT`.
 
 ## Optional Channel Access
 
@@ -95,6 +101,7 @@ A user-owned sidecar image should contain:
 - startup script
 - EPICS Base runtime libraries
 - `pvxs` and `pvxsIoc` when PVA exposure is required
+- `reccaster` when conventional records should advertise through RecCeiver/ChannelFinder
 
 The important application pattern is:
 
@@ -104,11 +111,13 @@ PROD_IOC = legacy
 DBD += legacy.dbd
 legacy_DBD += base.dbd
 legacy_DBD += pvxsIoc.dbd
+legacy_DBD += reccaster.dbd
 legacy_DBD += mySupportModule.dbd
 
 legacy_SRCS += legacy_registerRecordDeviceDriver.cpp
 legacy_SRCS_DEFAULT += legacyMain.cpp
 
+legacy_LIBS += reccaster
 legacy_LIBS += mySupportModule
 legacy_LIBS += pvxsIoc
 legacy_LIBS += pvxs
@@ -123,12 +132,15 @@ epicsEnvSet("PVXS_QSRV_ENABLE", "YES")
 dbLoadDatabase("/opt/legacy-ioc/dbd/legacy.dbd")
 legacy_registerRecordDeviceDriver(pdbbase)
 
+addReccasterEnvVars("CONTACT", "BUILDING", "SECTOR")
 dbLoadRecords("/opt/legacy-ioc/db/records.db", "P=LEGACY:")
+dbLoadRecords("/opt/legacy-ioc/db/reccaster.db", "P=LEGACY:RecCaster:")
 
 iocInit()
 ```
 
 The sidecar and `redis-pvxs-ioc` share a PVA network, but they are separate processes with separate failure domains.
+See [`reccaster.md`](reccaster.md) for RecCaster discovery and RecCeiver configuration details.
 
 Common mistakes:
 
@@ -155,7 +167,7 @@ services:
 Maintainers only:
 
 ```sh
-LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0 \
+LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.3.0 \
   docker compose \
     -f docker-compose.yml \
     -f docker-compose.legacy-sidecar.yml \
@@ -163,7 +175,7 @@ LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidec
     --profile legacy \
     build legacy-ioc
 
-LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0 \
+LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.3.0 \
   docker compose \
     -f docker-compose.yml \
     -f docker-compose.legacy-sidecar.yml \

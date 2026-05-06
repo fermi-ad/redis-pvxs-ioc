@@ -43,6 +43,7 @@ See [`docs/demo.md`](docs/demo.md) for the complete validation flow and [`docs/l
 - a Redis container for the demo value plane
 - packaged `pvxget` / `pvxput` tools inside the IOC image
 - an optional conventional IOC sidecar for base-record `.db` examples and support-module adoption
+- optional ChannelFinder catalog sync for Redis-backed PV definitions
 
 The main runtime serves `NTScalar` and `NTScalarArray` PVs with the Phoebus-facing fields operators expect: `value`, `alarm`, `timeStamp`, `display`, `control`, and `valueAlarm`. PVs can read from Redis, write to Redis, confirm readback, publish alarm transitions to a Redis stream, and reload YAML config without restarting the process.
 
@@ -56,10 +57,11 @@ The main runtime serves `NTScalar` and `NTScalarArray` PVs with the Phoebus-faci
 - linear transforms for floating-point PVs and arrays
 - manual hot reload via `SIGHUP` and admin PVs
 - standard EPICS/PVA network defaults at container startup, with environment overrides
+- one-shot ChannelFinder dry-run/publish tooling for Redis PV definitions
 
 ## Legacy compatibility
 
-Legacy IOC support is handled as a sidecar, not by loading `.dbd` files into the Redis-first runtime. The included sidecar image runs a small conventional IOC with `pvxsIoc`, so users can see base records over PVA immediately.
+Legacy IOC support is handled as a sidecar, not by loading `.dbd` files into the Redis-first runtime. The included sidecar image runs a small conventional IOC with `pvxsIoc` and RecCaster, so users can see base records over PVA and advertise conventional records through RecCeiver/ChannelFinder.
 
 Teams that need real support modules should derive their own sidecar image, link the required module code there, publish it to the registry, and run it next to `redis-pvxs-ioc` on the same PVA network. That keeps support-module behavior available without compromising the hot-reload Redis runtime.
 
@@ -77,6 +79,8 @@ The detailed product/roadmap state is tracked in [`docs/feature-state-roadmap.md
 - [`docs/feature-state-roadmap.md`](docs/feature-state-roadmap.md) captures the current feature state and the post-MVP capability tracks.
 - [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
 - [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md) breaks down the long-term EPICS normative-types coverage goal.
+- [`docs/channelfinder-sync.md`](docs/channelfinder-sync.md) documents Redis PV catalog publishing.
+- [`docs/reccaster.md`](docs/reccaster.md) documents RecCaster in the legacy sidecar.
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
 - [`demo/config.multi.yaml`](demo/config.multi.yaml) is the sample multi-backend runtime configuration.
@@ -100,7 +104,7 @@ Populate the pinned submodules first:
 git submodule update --init --recursive
 ```
 
-`.gitmodules` points at published remotes for `epics-base`, `pvxs`, `redis-adapter`, and `yaml-cpp`.
+`.gitmodules` points at published remotes for `epics-base`, `pvxs`, `redis-adapter`, `yaml-cpp`, and `recsync`.
 See [`docs/submodule-remotes.md`](docs/submodule-remotes.md) for the pinned SHAs, fork branch details, and the plan to relink `epics-base` and `pvxs` back to upstream after their fork changes are merged.
 
 Build the EPICS stack in-place:
@@ -177,6 +181,20 @@ Run the registry-only smoke test with:
 
 Transforms are internal to the server. YAML `transform` settings describe how raw Redis values are mapped to the served PVA `value`; display, control, units, and alarm thresholds are configured in served units.
 
+## ChannelFinder sync
+
+Preview ChannelFinder entries for Redis-backed PVs:
+
+```sh
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.channelfinder-sync.yml \
+  --profile channelfinder \
+  run --rm channelfinder-sync
+```
+
+See [`docs/channelfinder-sync.md`](docs/channelfinder-sync.md) for publish commands and config.
+
 ## Legacy IOC sidecar
 
 The optional legacy sidecar is a conventional EPICS IOC container that can run beside `redis-pvxs-ioc` for base-record `.db` files and user-owned support-module images. It does not add `.dbd`, `.db`, or `iocInit()` behavior to the main `redis-pvxs-ioc` process.
@@ -188,4 +206,6 @@ docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --prof
 docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-See [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the sample sidecar image, compose overlay, and instructions for deriving a real support-module sidecar.
+The sidecar overlay publishes UDP `5049` by default so RecCaster can receive RecCeiver announcements on a bridge-network demo stack. Override `RECCASTER_UDP_HOST_PORT` if another local stack already owns that port.
+
+See [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the sample sidecar image, compose overlay, and instructions for deriving a real support-module sidecar. See [`docs/reccaster.md`](docs/reccaster.md) for RecCaster/RecCeiver details.

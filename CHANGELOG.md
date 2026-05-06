@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0 - 2026-05-06
+
+- add direct ChannelFinder sync for Redis-sourced PV definitions with dry-run JSON and HTTP publish modes
+- add optional `channelfinder` config metadata for owner, tags, and properties
+- include upstream RecSync/RecCaster in the legacy sidecar image for conventional IOC record cataloging
+- expose RecCaster status records under `LEGACY:RecCaster:` and publish UDP `5049` in the legacy compose overlay
+- document the split catalog model: RecCaster for sidecar records, direct ChannelFinder sync for Redis-backed PVs
+
 ## v0.2.0 - 2026-04-28
 
 - add an optional conventional IOC sidecar image/demo for base-record `.db` workflows with PVA exposure through `pvxsIoc`

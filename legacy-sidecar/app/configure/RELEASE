@@ -1,2 +1,3 @@
 PVXS = /opt/redis-pvxs-ioc/third_party/pvxs
+RECCASTER = /opt/redis-pvxs-ioc/third_party/recsync/client
 EPICS_BASE = /opt/redis-pvxs-ioc/third_party/epics-base

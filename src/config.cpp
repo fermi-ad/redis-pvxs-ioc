@@ -231,6 +231,46 @@ RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path) {
   return config;
 }
 
+ChannelFinderConfig parseChannelFinderConfig(const YAML::Node& node, const std::string& path) {
+  ChannelFinderConfig config;
+  if (!node) {
+    return config;
+  }
+
+  const auto channelFinderNode = requireMap(node, path);
+  if (channelFinderNode["url"]) {
+    config.url = parseString(channelFinderNode["url"], path + ".url");
+  }
+  if (channelFinderNode["owner"]) {
+    config.owner = parseString(channelFinderNode["owner"], path + ".owner");
+    if (config.owner.empty()) {
+      fail(path + ".owner", "must not be empty");
+    }
+  }
+  if (channelFinderNode["tags"]) {
+    const auto tags = requireSequence(channelFinderNode["tags"], path + ".tags");
+    for (size_t index = 0; index < tags.size(); ++index) {
+      const auto tag = parseString(tags[index], path + ".tags[" + std::to_string(index) + "]");
+      if (tag.empty()) {
+        fail(path + ".tags[" + std::to_string(index) + "]", "must not be empty");
+      }
+      config.tags.push_back(tag);
+    }
+  }
+  if (channelFinderNode["properties"]) {
+    const auto properties = requireMap(channelFinderNode["properties"], path + ".properties");
+    for (const auto& entry : properties) {
+      const auto name = parseString(entry.first, path + ".properties.<name>");
+      if (name.empty()) {
+        fail(path + ".properties", "property name must not be empty");
+      }
+      config.properties[name] = parseString(entry.second, path + ".properties." + name);
+    }
+  }
+
+  return config;
+}
+
 void resolveBackendAlias(std::string& alias,
                          const std::string& path,
                          const RedisBackendConfigs& backends,
@@ -423,6 +463,8 @@ AppConfig parseConfig(const YAML::Node& root) {
   if (serverNode["auto_beacon"]) {
     config.server.autoBeacon = serverNode["auto_beacon"].as<bool>();
   }
+
+  config.channelFinder = parseChannelFinderConfig(root["channelfinder"], "root.channelfinder");
 
   const bool hasLegacyRedis = static_cast<bool>(root["redis"]);
   const bool hasRedisBackends = static_cast<bool>(root["redis_backends"]);

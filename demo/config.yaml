@@ -13,6 +13,13 @@ redis:
 alarms:
   stream: acorn:alarms
 
+channelfinder:
+  owner: redis-pvxs-ioc
+  tags:
+    - demo
+  properties:
+    deployment: redis-pvxs-ioc-demo
+
 pvs:
   - name: source:temperature
     type: float64

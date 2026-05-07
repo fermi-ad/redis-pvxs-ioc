@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     cmake \
     git \
+    libcurl4-openssl-dev \
     libreadline-dev \
     perl \
     pkg-config \
@@ -40,6 +41,7 @@ RUN ctest --test-dir build --output-on-failure
 RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" && \
     mkdir -p /opt/runtime/bin /opt/runtime/lib/epics-base /opt/runtime/lib/pvxs /opt/runtime/lib/libevent && \
     cp build/redis-pvxs-ioc /opt/runtime/bin/redis-pvxs-ioc && \
+    cp build/redis-pvxs-channelfinder-sync /opt/runtime/bin/redis-pvxs-channelfinder-sync && \
     cp -R "third_party/epics-base/lib/${EPICS_HOST_ARCH}/." /opt/runtime/lib/epics-base/ && \
     cp -R "third_party/pvxs/lib/${EPICS_HOST_ARCH}/." /opt/runtime/lib/pvxs/ && \
     if [ -d "third_party/pvxs/bundle/usr/${EPICS_HOST_ARCH}/lib" ]; then \
@@ -58,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     iproute2 \
     iputils-ping \
+    libcurl4t64 \
     libgcc-s1 \
     libreadline8 \
     libstdc++6 \

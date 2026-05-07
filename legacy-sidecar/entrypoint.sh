@@ -38,6 +38,15 @@ export EPICS_PVAS_INTF_ADDR_LIST="${EPICS_PVAS_INTF_ADDR_LIST:-239.128.1.6}"
 export EPICS_PVAS_AUTO_BEACON_ADDR_LIST="${EPICS_PVAS_AUTO_BEACON_ADDR_LIST:-NO}"
 export EPICS_PVAS_BEACON_ADDR_LIST="${EPICS_PVAS_BEACON_ADDR_LIST:-239.128.1.7,10}"
 
+export IOCNAME="${IOCNAME:-legacy-ioc}"
+export ENGINEER="${ENGINEER:-redis-pvxs-ioc}"
+export LOCATION="${LOCATION:-redis-pvxs-ioc-demo}"
+export CONTACT="${CONTACT:-redis-pvxs-ioc}"
+export BUILDING="${BUILDING:-demo}"
+export SECTOR="${SECTOR:-demo}"
+export RECCAST_TIMEOUT="${RECCAST_TIMEOUT:-20}"
+export RECCAST_MAX_HOLDOFF="${RECCAST_MAX_HOLDOFF:-10}"
+
 if [ "$#" -eq 0 ]; then
   set -- /etc/legacy-ioc/st.cmd
 fi

@@ -24,6 +24,7 @@ set(EPICS_BASE "${CMAKE_SOURCE_DIR}/third_party/epics-base" CACHE PATH "Path to 
 set(PVXS_ROOT "${CMAKE_SOURCE_DIR}/third_party/pvxs" CACHE PATH "Path to built pvxs")
 
 find_package(Perl REQUIRED)
+find_package(CURL REQUIRED)
 
 set(
   REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE
@@ -60,8 +61,8 @@ set(REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR
 file(MAKE_DIRECTORY "${REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR}")
 
 configure_file(
-  ${CMAKE_SOURCE_DIR}/include/redis_pvxs_ioc/version.h.in
-  ${REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR}/version.h
+  "${CMAKE_SOURCE_DIR}/include/redis_pvxs_ioc/version.h.in"
+  "${REDIS_PVXS_IOC_GENERATED_INCLUDE_DIR}/version.h"
   @ONLY
 )
 
@@ -125,6 +126,7 @@ add_subdirectory(third_party/redis-adapter)
 
 add_library(redis-pvxs-ioc-core STATIC
   src/config.cpp
+  src/channelfinder.cpp
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
@@ -156,7 +158,10 @@ target_link_libraries(redis-pvxs-ioc-core
 add_executable(redis-pvxs-ioc src/main.cpp)
 target_link_libraries(redis-pvxs-ioc PRIVATE redis-pvxs-ioc-core)
 
-install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
+add_executable(redis-pvxs-channelfinder-sync tools/channelfinder_sync.cpp)
+target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-ioc-core CURL::libcurl)
+
+install(TARGETS redis-pvxs-ioc redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
@@ -168,4 +173,8 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_executable(model_tests tests/model_tests.cpp)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME model_tests COMMAND model_tests)
+
+  add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
+  target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
 endif()

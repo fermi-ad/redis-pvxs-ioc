@@ -37,6 +37,14 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 - Publish status: ready
 - Source of the local checkout: `https://github.com/jbeder/yaml-cpp.git`
 
+### `third_party/recsync`
+
+- Published `.gitmodules` URL: `https://github.com/ChannelFinder/recsync.git`
+- Pinned commit: `864b162cb05fa140e67e056bda86ed750447c3d4`
+- Pinned upstream tag: `1.9.2`
+- Publish status: ready
+- Use: legacy IOC sidecar RecCaster support only
+
 ## Push checklist
 
 1. Run `git submodule sync --recursive`.

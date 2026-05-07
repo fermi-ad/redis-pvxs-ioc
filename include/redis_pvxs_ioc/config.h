@@ -144,10 +144,18 @@ struct AlarmStreamConfig {
   std::string stream = "acorn:alarms";
 };
 
+struct ChannelFinderConfig {
+  std::string url;
+  std::string owner = "redis-pvxs-ioc";
+  std::vector<std::string> tags;
+  std::map<std::string, std::string> properties;
+};
+
 struct AppConfig {
   ServerConfig server;
   RedisBackendConfigs redisBackends;
   AlarmStreamConfig alarms;
+  ChannelFinderConfig channelFinder;
   std::vector<PVConfig> pvs;
 };
 

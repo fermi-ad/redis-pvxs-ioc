@@ -1,0 +1,15 @@
+services:
+  channelfinder-sync:
+    image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.3.0}
+    container_name: redis-pvxs-ioc-channelfinder-sync
+    profiles:
+      - channelfinder
+    networks:
+      - redis-pvxs-ioc
+    entrypoint: ["/opt/redis-pvxs-ioc/bin/redis-pvxs-channelfinder-sync"]
+    command: ["--config", "/etc/redis-pvxs-ioc/config.yaml", "--dry-run"]
+    environment:
+      CHANNELFINDER_USERNAME: ${CHANNELFINDER_USERNAME:-}
+      CHANNELFINDER_PASSWORD: ${CHANNELFINDER_PASSWORD:-}
+    volumes:
+      - ${REDIS_PVXS_IOC_CONFIG:-./demo/config.yaml}:/etc/redis-pvxs-ioc/config.yaml:ro

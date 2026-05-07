@@ -54,6 +54,29 @@ docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:config
 docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus"
 ```
 
+## Preview ChannelFinder Catalog Entries
+
+```sh
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.channelfinder-sync.yml \
+  --profile channelfinder \
+  run --rm channelfinder-sync
+```
+
+Publish with a config that sets `channelfinder.url`:
+
+```sh
+CHANNELFINDER_USERNAME=<user> \
+CHANNELFINDER_PASSWORD=<password> \
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.channelfinder-sync.yml \
+  --profile channelfinder \
+  run --rm channelfinder-sync \
+  --config /etc/redis-pvxs-ioc/config.yaml
+```
+
 ## Validate Legacy Sidecar
 
 ```sh
@@ -63,6 +86,8 @@ docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY
 docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxput LEGACY:setpoint 2.5"
 docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:setpoint"
 docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:counter"
+docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:State-Sts"
+docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:Msg-I"
 ```
 
 ## Use Your Config

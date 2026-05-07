@@ -1,12 +1,22 @@
 services:
   legacy-ioc:
-    image: ${LEGACY_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.2.0}
+    image: ${LEGACY_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.3.0}
     container_name: redis-pvxs-ioc-legacy
     profiles:
       - legacy
     networks:
       - redis-pvxs-ioc
+    ports:
+      - "${RECCASTER_UDP_HOST_PORT:-5049}:5049/udp"
     environment:
       LEGACY_IOC_ENABLE_CA: ${LEGACY_IOC_ENABLE_CA:-NO}
+      IOCNAME: ${IOCNAME:-legacy-ioc}
+      ENGINEER: ${ENGINEER:-redis-pvxs-ioc}
+      LOCATION: ${LOCATION:-redis-pvxs-ioc-demo}
+      CONTACT: ${CONTACT:-redis-pvxs-ioc}
+      BUILDING: ${BUILDING:-demo}
+      SECTOR: ${SECTOR:-demo}
+      RECCAST_TIMEOUT: ${RECCAST_TIMEOUT:-20}
+      RECCAST_MAX_HOLDOFF: ${RECCAST_MAX_HOLDOFF:-10}
     volumes:
       - ${LEGACY_IOC_STARTUP_HOST:-./legacy-sidecar/iocBoot/st.cmd}:/etc/legacy-ioc/st.cmd:ro

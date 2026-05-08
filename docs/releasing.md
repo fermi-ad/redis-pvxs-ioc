@@ -36,6 +36,15 @@ ctest --test-dir build --output-on-failure
    - the semver tag
    - the immutable image digest for each published image
    - the validation commands used
+10. Pin production compose defaults as `image:v${VERSION}@sha256:<digest>`.
+
+## Image reference policy
+
+- Development and local experiments may use `:latest` or branch/test tags.
+- Integration may use `:v${VERSION}` while validating a release.
+- Production compose files must use `:v${VERSION}@sha256:<digest>`.
+
+Tags describe releases. Digests define deployments. The tag keeps the human-readable release intent visible; the digest guarantees the exact artifact that runs.
 
 ## Manual build and publish
 
@@ -86,6 +95,13 @@ Capture the immutable digest after push:
 ```sh
 docker image inspect "${IMAGE}" --format '{{join .RepoDigests "\n"}}'
 docker image inspect "${LEGACY_IMAGE}" --format '{{join .RepoDigests "\n"}}'
+```
+
+When updating deployment compose files, keep the tag and digest together:
+
+```sh
+image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}@sha256:<digest>
+image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v${VERSION}@sha256:<digest>
 ```
 
 ## Manual GitHub release

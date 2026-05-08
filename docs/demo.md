@@ -100,7 +100,7 @@ REDIS_PVXS_IOC_CONFIG=/path/to/my-config.yaml docker compose up -d
 Use a pinned release image:
 
 ```sh
-REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<digest> \
+REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:vX.Y.Z@sha256:<digest> \
 REDIS_PVXS_IOC_CONFIG=/path/to/my-config.yaml \
 docker compose up -d
 ```

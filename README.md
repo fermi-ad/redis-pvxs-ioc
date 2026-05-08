@@ -164,7 +164,7 @@ Stop the demo stack with `docker compose down`.
 To test a specific published image or alternate config without editing tracked files:
 
 ```sh
-REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:<digest> \
+REDIS_PVXS_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:vX.Y.Z@sha256:<digest> \
 REDIS_PVXS_IOC_CONFIG=/absolute/path/to/config.yaml \
 docker compose up -d
 ```

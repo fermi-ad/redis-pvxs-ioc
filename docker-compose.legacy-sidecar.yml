@@ -1,6 +1,6 @@
 services:
   legacy-ioc:
-    image: ${LEGACY_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.4.0}
+    image: ${LEGACY_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.4.0@sha256:e8e1a47d393db11083b44fdcc1029dfba83c21cbac55a50a1a81db4d1a9aa795}
     container_name: redis-pvxs-ioc-legacy
     profiles:
       - legacy

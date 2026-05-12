@@ -1,6 +1,6 @@
 services:
   channelfinder-sync:
-    image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.4.0}
+    image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.4.0@sha256:b11193d66b7db30e18e567c195e5f42c7bfa5de34060278596113e02f607d89a}
     container_name: redis-pvxs-ioc-channelfinder-sync
     profiles:
       - channelfinder

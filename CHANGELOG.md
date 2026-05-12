@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.0 - 2026-05-12
+
+- major legacy sidecar compatibility release for controls EPICS ecosystem adoption
+- add a prelinked support-module bundle to the conventional IOC sidecar: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, and `caPutLog`
+- include Fermilab `tcast` and `acnetPV` in the sidecar image as opt-in capabilities while keeping them inactive by default
+- keep support-module behavior isolated in the sidecar lane so the Redis/PVXS runtime remains PVA-first and hot-reload focused
+- document the support-module adoption path, pinned public remotes, and vendored FNAL compatibility sources
+
 ## v0.3.0 - 2026-05-06
 
 - add direct ChannelFinder sync for Redis-sourced PV definitions with dry-run JSON and HTTP publish modes

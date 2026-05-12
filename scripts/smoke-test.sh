@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 PVX_BIN_DIR="/opt/redis-pvxs-ioc/bin/pvxs"
 PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1'
-DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.4.0"
+DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.4.0@sha256:b11193d66b7db30e18e567c195e5f42c7bfa5de34060278596113e02f607d89a"
 
 export REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE:-$DEFAULT_REDIS_PVXS_IOC_IMAGE}"
 SOURCE_CONFIG="${REDIS_PVXS_IOC_CONFIG:-$ROOT_DIR/demo/config.yaml}"

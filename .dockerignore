@@ -1,4 +1,5 @@
 build
+build.verify
 build-iota
 .git
 **/.git
@@ -15,3 +16,14 @@ third_party/pvxs/src/O.*
 third_party/pvxs/tools/O.*
 third_party/pvxs/bundle/O.*
 third_party/pvxs/bundle/usr
+third_party/support/**/O.*
+third_party/support/**/bin
+third_party/support/**/lib
+third_party/fnal/**/O.*
+third_party/fnal/**/bin
+third_party/fnal/**/lib
+legacy-sidecar/app/**/O.*
+legacy-sidecar/app/bin
+legacy-sidecar/app/lib
+legacy-sidecar/app/db
+legacy-sidecar/app/dbd

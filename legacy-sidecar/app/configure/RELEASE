@@ -1,3 +1,23 @@
-PVXS = /opt/redis-pvxs-ioc/third_party/pvxs
-RECCASTER = /opt/redis-pvxs-ioc/third_party/recsync/client
-EPICS_BASE = /opt/redis-pvxs-ioc/third_party/epics-base
+REDIS_PVXS_IOC_TOP = $(TOP)/../..
+
+PVXS = $(REDIS_PVXS_IOC_TOP)/third_party/pvxs
+RECCASTER = $(REDIS_PVXS_IOC_TOP)/third_party/recsync/client
+
+SNCSEQ = $(REDIS_PVXS_IOC_TOP)/third_party/support/seq
+SSCAN = $(REDIS_PVXS_IOC_TOP)/third_party/support/sscan
+CALC = $(REDIS_PVXS_IOC_TOP)/third_party/support/calc
+ASYN = $(REDIS_PVXS_IOC_TOP)/third_party/support/asyn
+STD = $(REDIS_PVXS_IOC_TOP)/third_party/support/std
+PCRE = $(REDIS_PVXS_IOC_TOP)/third_party/support/pcre
+STREAM = $(REDIS_PVXS_IOC_TOP)/third_party/support/StreamDevice
+LUA = $(REDIS_PVXS_IOC_TOP)/third_party/support/lua
+IOCSTATS = $(REDIS_PVXS_IOC_TOP)/third_party/support/iocStats
+ALIVE = $(REDIS_PVXS_IOC_TOP)/third_party/support/alive
+AUTOSAVE = $(REDIS_PVXS_IOC_TOP)/third_party/support/autosave
+BUSY = $(REDIS_PVXS_IOC_TOP)/third_party/support/busy
+CAPUTLOG = $(REDIS_PVXS_IOC_TOP)/third_party/support/caPutLog
+
+TCAST = $(REDIS_PVXS_IOC_TOP)/third_party/fnal/tcast
+ACNETPV = $(REDIS_PVXS_IOC_TOP)/third_party/fnal/acnetPV
+
+EPICS_BASE = $(REDIS_PVXS_IOC_TOP)/third_party/epics-base

@@ -1,0 +1,35 @@
+#!../../bin/linux-x86_64/tcastDemo
+
+#- You may have to change tcastDemo to something else
+#- everywhere it appears in this file
+
+#< envPaths
+
+## Register all support components
+dbLoadDatabase("../../dbd/tcastDemo.dbd",0,0)
+tcastDemo_registerRecordDeviceDriver(pdbbase)
+
+# TCLK 239.128.1.4
+# TEST 239.128.1.5
+# NML  239.128.4.4
+# CMTF 239.128.4.5
+epicsEnvSet("PREF", "MD:")
+
+epicsEnvSet("TCAST_DEFAULT", "group=239.128.1.5")
+dbLoadRecords("../../db/tcastHealth.db","P=$(PREF)TEST:")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TEST:07:,TCAST=0x07")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TEST:0C:,TCAST=0x0C")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TEST:0F:,TCAST=0x0f")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TEST:19:,TCAST=0x19")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TEST:A5:,TCAST=0xA5")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TEST:BE:,TCAST=0xBE")
+
+dbLoadRecords("../../db/tcastHealth.db","P=$(PREF)TCLK:,TCAST=group=239.128.1.4")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TCLK:0C:,TCAST=group=239.128.1.4 0x0C")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TCLK:0F:,TCAST=group=239.128.1.4 0x0F")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TCLK:11:,TCAST=group=239.128.1.4 0x11")
+dbLoadRecords("../../db/tcastEvent.db","P=$(PREF)TCLK:18:,TCAST=group=239.128.1.4 0x18")
+
+var tcastDebug 1
+
+iocInit()

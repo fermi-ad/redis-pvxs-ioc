@@ -1,0 +1,228 @@
+##************************************************************************##
+##*                                                                      *##
+##* Written by Pierrick Hanlet, 1 November 2019                          *##
+##*                                                                      *##
+##* Basic EPICS structure to create basic acnet device from EPICS PVs    *##
+##* Description of the struct is as follows:                             *##
+##*                                                                      *##
+##************************************************************************##
+##*                                                                      *##
+##* Use this template to allow substitution files to fill PVs:           *##
+##*                                                                      *##
+##* di:   device index          (filled from config DB)                  *##
+##* ssdn: SSDN of ACNET device  (filled from config DB)                  *##
+##* node: ACNET trunk/node      (filled from config DB)                  *##
+##* name: name of ACNET device  (filled from config DB)                  *##
+##* bdev/bsta/bpp:              ACNET basic status                       *##
+##* edev/esta/epp:              ACNET extended status                    *##
+##* ddev/dsta/dpp:              digital alarm block                      *##
+##* adev/asta/app:              analog alarm block                       *##
+##* rdev/read/rpp/rtype:        reading value                            *##
+##* wdev/wrd/wpp/wnelm/wtype:   reading waveform value                   *##
+##* cdev/ctrl/cpp:              control bits                             *##
+##* dev/set/pp:                 setting value                            *##
+##*                                                                      *##
+##* At present both PV description and engineering units are read from   *##
+##* from the v3 record and written to the ADR                            *##
+##*                                                                      *##
+##* Where  Xdev/xxxx/Xpp (above) is:                                     *##
+##*        Xdev-> IOC family                                             *##
+##*        xxxx-> PV name                                                *##
+##*        Xpp -> CP (different IOC) or PP (same IOC)                    *##
+##*                                                                      *##
+##* When there are no input PVs, xxxx should be "Xdummy"                 *##
+##*                                                                      *##
+##* These macros are defined in the IOC substitution file:               *##
+##* AcnetDevices.substitutions found in xxx/xxxApp/Db                    *##
+##*                                                                      *##
+##************************************************************************##
+##*                                                                      *##
+##* PV names should have the form: ACC/EXP-SYS-SUB-NUM:VAR               *##
+##* where:                                                               *##
+##*       ACC/EXP is ACC=accelerator (e.g. LIN,BOO,MI )                  *##
+##*               or EXP=experiment  (e.g. NUMI)                         *##
+##*       SYS=system (e.g. VAC for vacuum)                               *##
+##*       SUB=sub-system (e.g. GAUGE,PUMP,VALVE)                         *##
+##*       NUM=element number (e.g. 01 for pump 1)                        *##
+##*       VAR=variable being read or written (e.g. PRES for pressure)    *##
+##* These names will eventually be standardized                          *##
+##*                                                                      *##
+##************************************************************************##
+##*
+record(aSub,"$(ndev):ReadPVs") {
+    field(DESC,"Read PVs for acnet device")
+    field(SCAN,"$(scan)")
+    field(SNAM,"CallReadPVs")
+    field(INPA,"$(ndev):ADR")
+    field(FTA, "STRING")
+    field(NOA, "1")
+    field(INPB,"$(bdev):$(bsta) $(bpp) MS")
+    field(FTB, "SHORT")
+    field(NOB, "1")
+    field(INPC,"$(edev):$(esta) $(epp) MS")
+    field(FTC, "LONG")
+    field(NOC, "1")
+    field(INPD,"$(ddev):$(dsta) $(dpp) MS")
+    field(FTD, "SHORT")
+    field(NOD, "1")
+    field(INPE,"$(adev):$(asta) $(app) MS")
+    field(FTE, "FLOAT")
+    field(NOE, "1")
+    field(INPF,"$(rdev):$(read) $(rpp) MS")
+    field(FTF, "$(rtype)")
+    field(NOF, "1")
+    field(INPG,"$(wdev):$(wrd) $(wpp) MS")
+    field(FTG, "$(wtype)")
+    field(NOG, "$(wnelm)")
+    field(INPH,"$(rdev):$(read).DESC")
+    field(FTH, "STRING")
+    field(NOH, "1")
+    field(INPI,"$(rdev):$(read).EGU")
+    field(FTI, "STRING")
+    field(NOI, "1")
+    field(INPJ,"$(wdev):$(wrd).DESC")
+    field(FTJ, "STRING")
+    field(NOJ, "1")
+    field(INPK,"$(wdev):$(wrd).EGU")
+    field(FTK, "STRING")
+    field(NOK, "1")
+    field(INPL,"$(sdev):SettingPVs.DESC")
+    field(FTL, "STRING")
+    field(NOL, "1")
+    field(INPM,"$(cdev):ControlPVs.DESC")
+    field(FTM, "STRING")
+    field(NOM, "1")
+
+    field(OUTA,"$(sdev):SettingPVs PP")
+    field(FTVA,"$(rtype)")
+    field(NOVA,"1")
+    field(OUTB,"$(cdev):ControlPVs PP")
+    field(FTVB,"SHORT")
+    field(NOVB,"1")
+}
+
+#
+### Setting PVs
+record(ao,"$(sdev):SettingPVs") {
+    field(DESC,"Acnet Trigger to Set PVs - $(set)")
+    field(SCAN,"Passive")
+    field(OUT,{pva:{pv:"$(name)",field:"Setting.value",proc:"CP"}})
+}
+record(aSub,"$(sdev):SetPVs") {
+    field(DESC,"Set PVs from acnet device")
+    field(SNAM,"CallSetPVs")
+    field(INPA,"$(ndev):ADR")
+    field(FTA, "STRING")
+    field(NOA, "1")
+    field(INPB,{pva:{pv:"$(name)",field:"Setting.value",proc:"$(spp)"}})
+    field(FTB, "FLOAT")
+    field(NOB, "1")
+    field(OUTA,"$(dev)$(host):$(set) $(spp)")
+    field(FTVA, "FLOAT")
+    field(NOVA, "1")
+    field(OUTB,"$(sdev):oldSetting $(spp)")
+    field(FTVB,"FLOAT")
+    field(NOVB,"1")
+}
+record(ai,"$(sdev):oldSetting") {
+    field(DESC,"Previous setting value")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+
+#
+### Control PVs
+record(longout,"$(cdev):ControlPVs") {
+    field(DESC,"Acnet Trigger to Control PVs - $(ctrl)")
+    field(SCAN,"Passive")
+    field(OUT,{pva:{pv:"$(name)",field:"Control.value",proc:"CP"}})
+}
+record(aSub,"$(cdev):CtrlPVs") {
+    field(DESC,"Control PVs from acnet device")
+    field(SNAM,"CallCtrlPVs")
+    field(INPA,"$(ndev):ADR")
+    field(FTA, "STRING")
+    field(NOA, "1")
+    field(INPB,{pva:{pv:"$(name)",field:"Control.value",proc:"$(cpp)"}})
+    field(FTB, "SHORT")
+    field(NOB, "1")
+    field(OUTA,"$(dev)$(host):$(ctrl) $(cpp)")
+    field(FTVA,"SHORT")
+    field(NOVA,"1")
+    field(OUTB,"$(cdev):oldControl $(cpp)")
+    field(FTVB,"SHORT")
+    field(NOVB,"1")
+}
+record(longin,"$(cdev):oldControl") {
+    field(DESC,"Previous control value")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+
+#
+### acnetPV name - device name
+record(stringin,"$(ndev):ADR") {
+    field(DESC,"Acnet Device Record name")
+    field(PINI,"YES")
+    field(VAL, "$(name)")
+    field(SCAN,"Passive")
+}
+
+#
+### Reading dummies
+record(ai,"$(ndev):bdummy") {
+    field(DESC,"Dummy PV for Basic Status")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+record(ai,"$(ndev):edummy") {
+    field(DESC,"Dummy PV for Extended Status")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+record(ai,"$(ndev):ddummy") {
+    field(DESC,"Dummy PV for Digital Status")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+record(ai,"$(ndev):adummy") {
+    field(DESC,"Dummy PV for Analog Status")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+record(ai,"$(ndev):rdummy") {
+    field(DESC,"Dummy PV for Reading")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+    field(EGU,"?")
+}
+record(waveform,"$(ndev):wdummy") {
+    field(DESC,"Dummy PV for wReading")
+    field(PINI,"YES")
+    field(NELM,"$(wnelm)")
+    field(FTVL,"$(wtype)")
+    field(SCAN,"Passive")
+    field(EGU,"?")
+}
+
+#
+### Setting dummys
+record(ao,"$(ndev):cdummy") {
+    field(DESC,"Dummy PV for Control")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}
+record(ao,"$(ndev):sdummy") {
+    field(DESC,"Dummy PV for Setting")
+    field(PINI,"YES")
+    field(VAL, "0")
+    field(SCAN,"Passive")
+}

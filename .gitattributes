@@ -1,0 +1,2 @@
+third_party/fnal/** -whitespace
+third_party/support/pcre/** -whitespace

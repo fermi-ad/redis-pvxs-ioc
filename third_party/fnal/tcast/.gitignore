@@ -1,0 +1,11 @@
+*~
+/bin/
+/db/
+/dbd/
+/include/
+/lib/
+/cfg/
+O.*/
+*.local
+
+envPaths

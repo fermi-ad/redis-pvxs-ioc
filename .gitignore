@@ -1,4 +1,17 @@
 build/
+build.verify/
 .DS_Store
 *.swp
 *.swo
+
+third_party/support/**/O.*
+third_party/support/**/bin/
+third_party/support/**/lib/
+third_party/fnal/**/O.*
+third_party/fnal/**/bin/
+third_party/fnal/**/lib/
+legacy-sidecar/app/**/O.*
+legacy-sidecar/app/bin/
+legacy-sidecar/app/lib/
+legacy-sidecar/app/db/
+legacy-sidecar/app/dbd/

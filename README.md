@@ -82,6 +82,7 @@ The detailed product/roadmap state is tracked in [`docs/feature-state-roadmap.md
 - [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
 - [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md) breaks down the long-term EPICS normative-types coverage goal.
 - [`docs/channelfinder-sync.md`](docs/channelfinder-sync.md) documents Redis PV catalog publishing.
+- [`docs/pva-networking.md`](docs/pva-networking.md) documents PVAccess discovery expectations for Docker bridge demos and routable deployments.
 - [`docs/reccaster.md`](docs/reccaster.md) documents RecCaster in the legacy sidecar.
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.
 - [`demo/config.yaml`](demo/config.yaml) is the legacy single-backend sample runtime configuration.
@@ -159,8 +160,9 @@ docker compose logs -f
 ```
 
 The runtime container reads `/etc/redis-pvxs-ioc/config.yaml` by default.
-This default compose stack is intentionally self-contained on a local bridge network for smoke/demo testing. Deployment networking can move to dedicated IPs or `ipvlan` later.
+This default compose stack is intentionally self-contained on a local bridge network for smoke/demo testing. Host-side `pvxhosts`/`pvxlist` discovery is not expected from that private bridge network; use routable `ipvlan`/`macvlan`/host networking for controls-network visibility.
 For `docker exec` validation, use the packaged PVXS tools under `/opt/redis-pvxs-ioc/bin/pvxs/`.
+See [`docs/pva-networking.md`](docs/pva-networking.md) for the deployment pattern and troubleshooting commands.
 Stop the demo stack with `docker compose down`.
 
 To test a specific published image or alternate config without editing tracked files:

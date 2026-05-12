@@ -16,6 +16,10 @@ docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --prof
 
 ## Validate Redis-Backed PVs
 
+The default compose stack uses a private Docker bridge network. Validate it from
+inside the IOC container; host-side `pvxhosts`/`pvxlist` discovery is a
+deployment-network check, not a smoke-test check for this bridge demo.
+
 ```sh
 IOC_CONTAINER=redis-pvxs-ioc-demo
 REDIS_CONTAINER=redis-pvxs-ioc-redis

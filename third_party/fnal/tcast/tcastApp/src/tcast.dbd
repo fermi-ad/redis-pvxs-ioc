@@ -1,0 +1,7 @@
+driver(tcastdrv)
+registrar(tcast_registrar)
+variable(tcastDebug, int)
+variable(tcastTimeout, double)
+
+device(longin, INST_IO, devTcastLIEvt, "TCLK Event")
+device(longin, INST_IO, devTcastLICnt, "TCLK Counter")

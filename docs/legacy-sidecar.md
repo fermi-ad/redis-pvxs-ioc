@@ -12,6 +12,7 @@ The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-
 - base records from `.db` files
 - PVA exposure through `pvxsIoc` / QSRV2
 - RecCaster status records and RecCeiver/ChannelFinder advertisement for conventional IOC records
+- a prelinked compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, `tcast`, and `acnetPV`
 - an optional compose service on the same PVA network as `redis-pvxs-ioc`
 - a template that teams can derive from for real support-module images
 
@@ -28,15 +29,9 @@ The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-
 
 A `.dbd` file describes record types, device support, menus, functions, and registrars. If it references a support module, the corresponding compiled code must be linked into the IOC application image.
 
-The sample sidecar image links only:
+The sample sidecar image now links the controls compatibility bundle listed above. That makes it a useful out-of-the-box testbed for common EPICS module workflows, but it is still not a universal `.dbd` loader.
 
-- EPICS Base IOC libraries
-- `pvxs`
-- `pvxsIoc`
-- upstream `reccaster`
-- base record/device support
-
-For a real support module, derive a custom sidecar image and link that module into the IOC app. Do not treat the sample image as a universal `.dbd` loader.
+For a support module outside this bundle, derive a custom sidecar image and link that module into the IOC app.
 
 ## Run The Sample
 
@@ -77,6 +72,19 @@ LEGACY_IOC_ENABLE_CA=YES \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
+## Optional tcast And acnetPV
+
+`tcast` and `acnetPV` are compiled into the sample sidecar so Fermilab projects can opt in without rebuilding the base compatibility image.
+
+They are inactive by default. To use them, provide a startup script that loads the relevant records or calls the relevant IOC shell commands:
+
+```sh
+LEGACY_IOC_STARTUP_HOST=/path/to/tcast-or-acnet/st.cmd \
+  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+```
+
+The default `st.cmd` does not load tcast/acnet records or start acnet/tcast-specific behavior.
+
 ## Deriving A Real Support-Module Sidecar
 
 Fast path:
@@ -103,7 +111,7 @@ A user-owned sidecar image should contain:
 - `pvxs` and `pvxsIoc` when PVA exposure is required
 - `reccaster` when conventional records should advertise through RecCeiver/ChannelFinder
 
-The important application pattern is:
+If your support module is already in the sample compatibility bundle, you usually only need a project startup script and `.db` files. If your support module is not in the bundle, use this application pattern:
 
 ```makefile
 PROD_IOC = legacy

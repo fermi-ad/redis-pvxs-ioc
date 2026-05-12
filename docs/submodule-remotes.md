@@ -45,6 +45,31 @@ Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinn
 - Publish status: ready
 - Use: legacy IOC sidecar RecCaster support only
 
+## Legacy sidecar support-module remotes
+
+These public support modules are pinned for the registry-built legacy IOC sidecar:
+
+| Path | Remote | Pinned commit | Tag/describe |
+| --- | --- | --- | --- |
+| `third_party/support/seq` | `https://github.com/epics-modules/sequencer.git` | `7544ad3acd18d0b4d072c5d3b089b87b073097c0` | `R2-2-5` |
+| `third_party/support/sscan` | `https://github.com/epics-modules/sscan.git` | `a67107fd9ca533d3056b157ad29a7e0b395f3147` | `R2-12` |
+| `third_party/support/calc` | `https://github.com/epics-modules/calc.git` | `2f5b175f260bc3fe35bc25a3f6c204e9d6f628c9` | `R3-7-5` |
+| `third_party/support/asyn` | `https://github.com/epics-modules/asyn.git` | `0e6d2edfcefd2e53580f07ba159a0ef0f8a4bc55` | `R4-44` |
+| `third_party/support/std` | `https://github.com/epics-modules/std.git` | `1b416dbb74fb54060395347433c30361bd276424` | `R3-6-4` |
+| `third_party/support/StreamDevice` | `https://github.com/paulscherrerinstitute/StreamDevice.git` | `211f689cdf8acaf45a53fe035a1b1d0fac8a40d7` | `2.8.24` |
+| `third_party/support/lua` | `https://github.com/epics-modules/lua.git` | `0091a141a9f708a47c87554a72da79da039f210b` | `R3-0-2` |
+| `third_party/support/iocStats` | `https://github.com/epics-modules/iocStats.git` | `4df9e87815f6a9432955a3ddb45fafa9fe4a4d40` | `3.1.16` |
+| `third_party/support/alive` | `https://github.com/epics-modules/alive.git` | `fd1fd81286cc1ace7f06b9f7c91a8a0c8fecd044` | `R1-4-1` |
+| `third_party/support/autosave` | `https://github.com/epics-modules/autosave.git` | `800c2d600908cf300c9b1c8beedd090991e8d554` | `R5-10-2` |
+| `third_party/support/busy` | `https://github.com/epics-modules/busy.git` | `569a6b6fb1288c067ac2b22a998aa7de5375ddc4` | `R1-7-4` |
+| `third_party/support/caPutLog` | `https://github.com/epics-modules/caPutLog.git` | `062998a1d4b9c4ccacf3277e9097a63c5db4c28e` | `R4.0` |
+
+Vendored non-submodule trees:
+
+- `third_party/support/pcre`: copied from the local GHE support-module monorepo `pcre-8.44` tree because the EPICS build wrapper is local.
+- `third_party/fnal/tcast`: copied as-is from the local GHE support-module monorepo and disabled by default at runtime.
+- `third_party/fnal/acnetPV`: copied as-is from the local GHE support-module monorepo and disabled by default at runtime.
+
 ## Push checklist
 
 1. Run `git submodule sync --recursive`.

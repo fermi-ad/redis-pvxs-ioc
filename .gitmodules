@@ -13,3 +13,39 @@
 [submodule "third_party/recsync"]
 	path = third_party/recsync
 	url = https://github.com/ChannelFinder/recsync.git
+[submodule "third_party/support/seq"]
+	path = third_party/support/seq
+	url = https://github.com/epics-modules/sequencer.git
+[submodule "third_party/support/sscan"]
+	path = third_party/support/sscan
+	url = https://github.com/epics-modules/sscan.git
+[submodule "third_party/support/calc"]
+	path = third_party/support/calc
+	url = https://github.com/epics-modules/calc.git
+[submodule "third_party/support/asyn"]
+	path = third_party/support/asyn
+	url = https://github.com/epics-modules/asyn.git
+[submodule "third_party/support/std"]
+	path = third_party/support/std
+	url = https://github.com/epics-modules/std.git
+[submodule "third_party/support/StreamDevice"]
+	path = third_party/support/StreamDevice
+	url = https://github.com/paulscherrerinstitute/StreamDevice.git
+[submodule "third_party/support/lua"]
+	path = third_party/support/lua
+	url = https://github.com/epics-modules/lua.git
+[submodule "third_party/support/iocStats"]
+	path = third_party/support/iocStats
+	url = https://github.com/epics-modules/iocStats.git
+[submodule "third_party/support/alive"]
+	path = third_party/support/alive
+	url = https://github.com/epics-modules/alive.git
+[submodule "third_party/support/autosave"]
+	path = third_party/support/autosave
+	url = https://github.com/epics-modules/autosave.git
+[submodule "third_party/support/busy"]
+	path = third_party/support/busy
+	url = https://github.com/epics-modules/busy.git
+[submodule "third_party/support/caPutLog"]
+	path = third_party/support/caPutLog
+	url = https://github.com/epics-modules/caPutLog.git

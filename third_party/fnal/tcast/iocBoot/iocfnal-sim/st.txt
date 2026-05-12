@@ -1,0 +1,26 @@
+#!../../bin/linux-x86_64/tcastDemo
+
+#- You may have to change tcastDemo to something else
+#- everywhere it appears in this file
+
+#< envPaths
+
+## Register all support components
+dbLoadDatabase("../../dbd/tcastDemo.dbd",0,0)
+tcastDemo_registerRecordDeviceDriver(pdbbase)
+
+epicsEnvSet("TCAST_DEFAULT", "group=239.128.5.4")
+
+## Load record instances
+dbLoadRecords("../../db/tcastHealth.db","P=TST:")
+dbLoadRecords("../../db/tcastEvent.db","P=TST:E0F:,TCAST=15")
+dbLoadRecords("../../db/tcastEvent.db","P=TST:E8F:,TCAST=0x8f")
+dbLoadRecords("../../db/tcastEvent.db","P=TST:E02:,TCAST=event=2")
+dbLoadRecords("../../db/tcastEvent.db","P=TST:E00:,TCAST=0")
+
+var tcastDebug 1
+
+iocInit()
+
+## Start any sequence programs
+#seq snctcastDemo,"user=mdavidsaver"

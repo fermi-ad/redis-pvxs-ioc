@@ -1,0 +1,27 @@
+# TCAST (Tclk multiCAST) event receiver
+#
+# macros:
+#   P - Unique record prefix
+#   acc - accelerator
+#   sys - system
+#   sub - subsystem
+#   num - enumeration (usually 0)
+#   TCAST - (Optional) config string to select a receiver instance.
+#           My be omitted if $TCAST_DEFAULT contains a group=
+#   FLNK - (Optional) link event occurs
+
+record(longin, "$(acc):$(sys)_$(sub)_$(num):Cnt-I") {
+    field(DTYP, "TCLK Event")
+    field(INP , "@$(TCAST=)")
+    field(SCAN, "I/O Intr")
+    field(TSE , "-2")
+    field(TPRO, "$(TPRO=)")
+    field(FLNK, "$(FLNK=)")
+}
+
+record(calc, "$(acc):$(sys)_$(sub)_$(num):Rate-I") {
+    field(SCAN, "1 second")
+    field(INPA, "$(acc):$(sys)_$(sub)_$(num):Cnt-I NPP MSS")
+    field(CALC, "C:=A-B;B:=A;C")
+    field(EGU , "Hz")
+}

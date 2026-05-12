@@ -1,0 +1,95 @@
+# per-receiver TCAST driver health/status information
+#
+# macros:
+#   P - Unique record prefix
+#   acc - accelerator
+#   sys - system
+#   sub - subsystem
+#   num - enumeration (usually 0)
+#   TCAST - (Optional) config string to select a receiver instance.
+#           My be omitted if $TCAST_DEFAULT contains a group=
+#   FLNK - (Optional) link after scanning counters
+
+record(longin, "$(acc):$(sys)_$(sub)_$(num):Cnt:RX-I") {
+    field(DESC, "# of good packets")
+    field(DTYP, "TCLK Counter")
+    field(INP , "@$(TCAST=)")
+    info(tclk:conf, "counter=rx")
+    field(SCAN, "1 second")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Cnt:ERR-I")
+}
+
+record(longin, "$(acc):$(sys)_$(sub)_$(num):Cnt:ERR-I") {
+    field(DESC, "# of bad packets")
+    field(DTYP, "TCLK Counter")
+    field(INP , "@$(TCAST=)")
+    info(tclk:conf, "counter=err")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Cnt:TMO-I")
+}
+
+record(longin, "$(acc):$(sys)_$(sub)_$(num):Cnt:TMO-I") {
+    field(DESC, "# of timeouts")
+    field(DTYP, "TCLK Counter")
+    field(INP , "@$(TCAST=)")
+    info(tclk:conf, "counter=tmo")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Cnt:SKP-I")
+}
+
+record(longin, "$(acc):$(sys)_$(sub)_$(num):Cnt:SKP-I") {
+    field(DESC, "# of seq# skips")
+    field(DTYP, "TCLK Counter")
+    field(INP , "@$(TCAST=)")
+    info(tclk:conf, "counter=skip")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Cnt:PB-I")
+}
+
+record(longin, "$(acc):$(sys)_$(sub)_$(num):Cnt:PB-I") {
+    field(DESC, "# of seq# skip recoveries")
+    field(DTYP, "TCLK Counter")
+    field(INP , "@$(TCAST=)")
+    info(tclk:conf, "counter=playback")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Rate:RX-I")
+}
+
+record(calc, "$(acc):$(sys)_$(sub)_$(num):Rate:RX-I") {
+    field(INPA, "$(acc):$(sys)_$(sub)_$(num):Cnt:RX-I")
+    field(CALC, "C:=A-B;B:=A;C")
+    field(EGU , "Hz")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Rate:ERR-I")
+}
+
+record(calc, "$(acc):$(sys)_$(sub)_$(num):Rate:ERR-I") {
+    field(INPA, "$(acc):$(sys)_$(sub)_$(num):Cnt:ERR-I")
+    field(CALC, "C:=A-B;B:=A;C")
+    field(EGU , "Hz")
+    field(HIGH, "0.1")
+    field(HSV , "MAJOR")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Rate:TMO-I")
+}
+
+record(calc, "$(acc):$(sys)_$(sub)_$(num):Rate:TMO-I") {
+    field(INPA, "$(acc):$(sys)_$(sub)_$(num):Cnt:TMO-I")
+    field(CALC, "C:=A-B;B:=A;C")
+    field(EGU , "Hz")
+    field(HIGH, "0.1")
+    field(HSV , "MAJOR")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Rate:SKP-I")
+}
+
+record(calc, "$(acc):$(sys)_$(sub)_$(num):Rate:SKP-I") {
+    field(INPA, "$(acc):$(sys)_$(sub)_$(num):Cnt:SKP-I")
+    field(CALC, "C:=A-B;B:=A;C")
+    field(EGU , "Hz")
+    field(HIGH, "0.1")
+    field(HSV , "MINOR")
+    field(FLNK, "$(acc):$(sys)_$(sub)_$(num):Rate:PB-I")
+}
+
+record(calc, "$(acc):$(sys)_$(sub)_$(num):Rate:PB-I") {
+    field(INPA, "$(acc):$(sys)_$(sub)_$(num):Cnt:PB-I")
+    field(CALC, "C:=A-B;B:=A;C")
+    field(EGU , "Hz")
+    field(HIGH, "0.1")
+    field(HSV , "MINOR")
+    field(FLNK, "$(FLNK=)")
+}

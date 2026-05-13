@@ -1,5 +1,5 @@
 #include <stddef.h>
-#include <signal.h>
+#include <csignal>
 #include <unistd.h>
 
 #include "epicsExit.h"
@@ -8,31 +8,40 @@
 
 namespace {
 
-volatile sig_atomic_t shutdownRequested = 0;
-
-void requestShutdown(int)
+void addShutdownSignals(sigset_t& signals)
 {
-    shutdownRequested = 1;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
 }
 
-} // namespace
+void waitForShutdownSignal(const sigset_t& signals)
+{
+    int signalNumber = 0;
+    sigwait(&signals, &signalNumber);
+}
+
+}  // namespace
 
 int main(int argc, char* argv[])
 {
+    const bool interactive = isatty(STDIN_FILENO) != 0;
+    sigset_t shutdownSignals;
+
+    if (!interactive) {
+        addShutdownSignals(shutdownSignals);
+        sigprocmask(SIG_BLOCK, &shutdownSignals, nullptr);
+    }
+
     if (argc >= 2) {
         iocsh(argv[1]);
         epicsThreadSleep(.2);
     }
 
-    if (isatty(STDIN_FILENO)) {
+    if (interactive) {
         iocsh(nullptr);
     } else {
-        signal(SIGTERM, requestShutdown);
-        signal(SIGINT, requestShutdown);
-
-        while (!shutdownRequested) {
-            epicsThreadSleep(1.0);
-        }
+        waitForShutdownSignal(shutdownSignals);
     }
 
     epicsExit(0);

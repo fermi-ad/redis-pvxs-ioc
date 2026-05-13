@@ -33,6 +33,7 @@
 - Scalar numeric PVs evaluate warning/alarm thresholds locally in the runtime.
 - Alarm transitions are reflected in the PVA `alarm` fields.
 - Alarm transitions are also published to a Redis stream on the configured `alarms.backend`, default `acorn:alarms`.
+- Redis alarm stream events follow the `fermi-ad/epics-alarm-push` schema from commit `cfbee1e110cf8b08c79c5faf604e0a859bcffbfe`: `device`, `source`, `severity`, `timestamp`, `detail`, and optional `message`.
 - With one configured backend, `alarms.backend` defaults to that backend. With multiple configured backends, `alarms.backend` is required.
 - Array PVs do not evaluate threshold alarms in the MVP.
 

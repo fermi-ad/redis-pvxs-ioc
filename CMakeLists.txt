@@ -174,6 +174,10 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME model_tests COMMAND model_tests)
 
+  add_executable(alarm_publisher_tests tests/alarm_publisher_tests.cpp)
+  target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME alarm_publisher_tests COMMAND alarm_publisher_tests)
+
   add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
   target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME channelfinder_tests COMMAND channelfinder_tests)

@@ -1,4 +1,3 @@
-#include <stddef.h>
 #include <csignal>
 #include <unistd.h>
 

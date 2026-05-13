@@ -56,7 +56,7 @@ void AlarmPublisher::publishTransition(const std::string& pvName, const AlarmSta
 
   const auto fields = makeAlarmStreamFields(pvName, state, std::time(nullptr));
   std::vector<std::string> args{"XADD", stream_, "MAXLEN", "99999", "*"};
-  args.reserve(5 + fields.size() * 2);
+  args.reserve(args.size() + fields.size() * 2);
   for (const auto& field : fields) {
     args.push_back(field.first);
     args.push_back(field.second);

@@ -74,7 +74,7 @@ LEGACY_IOC_ENABLE_CA=YES \
 
 ## Optional linStat, tcast, And acnetPV
 
-`linStat`, `tcast`, and `acnetPV` are compiled into the sample sidecar so projects can opt in without rebuilding the base compatibility image.
+`linStat`, `tcast`, and `acnetPV` are compiled into source-built sidecar images and release images after `v0.4.0` so projects can opt in without rebuilding the base compatibility image.
 
 They are inactive by default. To use them, provide a startup script that loads the relevant records or calls the relevant IOC shell commands:
 

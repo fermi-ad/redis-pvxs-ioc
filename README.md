@@ -63,7 +63,7 @@ The main runtime serves `NTScalar` and `NTScalarArray` PVs with the Phoebus-faci
 
 Legacy IOC support is handled as a sidecar, not by loading `.dbd` files into the Redis-first runtime. The included sidecar image runs a small conventional IOC with `pvxsIoc` and RecCaster, so users can see base records over PVA and advertise conventional records through RecCeiver/ChannelFinder.
 
-The sample sidecar now ships a prelinked controls compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, `linStat`, RecCaster, `tcast`, and `acnetPV`. `linStat`, `tcast`, `acnetPV`, and CA behavior are inactive by default; enable them only through an explicit sidecar startup script/environment.
+Source-built sidecar images and release images after `v0.4.0` ship a prelinked controls compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, `linStat`, RecCaster, `tcast`, and `acnetPV`. `linStat`, `tcast`, `acnetPV`, and CA behavior are inactive by default; enable them only through an explicit sidecar startup script/environment.
 
 Teams that need modules outside this bundle should derive their own sidecar image, link the required module code there, publish it to the registry, and run it next to `redis-pvxs-ioc` on the same PVA network. That keeps support-module behavior available without compromising the hot-reload Redis runtime.
 

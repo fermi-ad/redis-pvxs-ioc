@@ -81,6 +81,7 @@ ALIVE="$SUPPORT/alive"
 AUTOSAVE="$SUPPORT/autosave"
 BUSY="$SUPPORT/busy"
 CAPUTLOG="$SUPPORT/caPutLog"
+LINSTAT="$SUPPORT/linStat"
 TCAST="$FNAL/tcast"
 ACNETPV="$FNAL/acnetPV"
 
@@ -176,6 +177,11 @@ build_dir "$BUSY/busyApp/Db" install
 
 write_release "$CAPUTLOG"
 build_module "$CAPUTLOG" configure.install caPutLogApp.install
+
+write_release "$LINSTAT"
+write_config_site "$LINSTAT" \
+  "LINSTAT_BUILD_EXAMPLE=NO"
+build_module "$LINSTAT" configure.install statApp.install
 
 write_release "$TCAST"
 write_config_site "$TCAST" \

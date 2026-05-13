@@ -49,3 +49,6 @@
 [submodule "third_party/support/caPutLog"]
 	path = third_party/support/caPutLog
 	url = https://github.com/epics-modules/caPutLog.git
+[submodule "third_party/support/linStat"]
+	path = third_party/support/linStat
+	url = https://github.com/mdavidsaver/linStat.git

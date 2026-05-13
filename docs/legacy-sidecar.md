@@ -12,7 +12,7 @@ The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-
 - base records from `.db` files
 - PVA exposure through `pvxsIoc` / QSRV2
 - RecCaster status records and RecCeiver/ChannelFinder advertisement for conventional IOC records
-- a prelinked compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, `tcast`, and `acnetPV`
+- a prelinked compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, `linStat`, `tcast`, and `acnetPV`
 - an optional compose service on the same PVA network as `redis-pvxs-ioc`
 - a template that teams can derive from for real support-module images
 
@@ -72,18 +72,20 @@ LEGACY_IOC_ENABLE_CA=YES \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-## Optional tcast And acnetPV
+## Optional linStat, tcast, And acnetPV
 
-`tcast` and `acnetPV` are compiled into the sample sidecar so Fermilab projects can opt in without rebuilding the base compatibility image.
+`linStat`, `tcast`, and `acnetPV` are compiled into the sample sidecar so projects can opt in without rebuilding the base compatibility image.
 
 They are inactive by default. To use them, provide a startup script that loads the relevant records or calls the relevant IOC shell commands:
 
 ```sh
-LEGACY_IOC_STARTUP_HOST=/path/to/tcast-or-acnet/st.cmd \
+LEGACY_IOC_STARTUP_HOST=/path/to/linstat-tcast-or-acnet.st.cmd \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-The default `st.cmd` does not load tcast/acnet records or start acnet/tcast-specific behavior.
+For `linStat`, load the specific Linux/container statistics databases you want, such as `linStatHost.db`, `linStatProc.db`, `linStatNIC.db`, or `linStatFS.db`.
+
+The default `st.cmd` does not load linStat/tcast/acnet records or start linStat/acnet/tcast-specific behavior.
 
 ## Deriving A Real Support-Module Sidecar
 

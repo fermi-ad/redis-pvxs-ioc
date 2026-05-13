@@ -60,6 +60,7 @@ RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" &
       third_party/support/autosave \
       third_party/support/busy \
       third_party/support/caPutLog \
+      third_party/support/linStat \
       third_party/fnal/tcast \
       third_party/fnal/acnetPV; do \
       name="$(basename "$module")"; \

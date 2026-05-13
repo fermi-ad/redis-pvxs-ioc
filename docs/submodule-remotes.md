@@ -63,6 +63,7 @@ These public support modules are pinned for the registry-built legacy IOC sideca
 | `third_party/support/autosave` | `https://github.com/epics-modules/autosave.git` | `800c2d600908cf300c9b1c8beedd090991e8d554` | `R5-10-2` |
 | `third_party/support/busy` | `https://github.com/epics-modules/busy.git` | `569a6b6fb1288c067ac2b22a998aa7de5375ddc4` | `R1-7-4` |
 | `third_party/support/caPutLog` | `https://github.com/epics-modules/caPutLog.git` | `062998a1d4b9c4ccacf3277e9097a63c5db4c28e` | `R4.0` |
+| `third_party/support/linStat` | `https://github.com/mdavidsaver/linStat.git` | `a470a5954ff7be81bb35e10fa09597e8bf8d6722` | `1.2.0` |
 
 Vendored non-submodule trees:
 

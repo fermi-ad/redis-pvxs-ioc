@@ -42,6 +42,8 @@ docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10
 docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1 | xxd -p -c 256"
 ```
 
+Alarm stream entries use the `epics-alarm-push` field set: `device`, `source`, `severity`, `timestamp`, `detail`, and optional `message`.
+
 ## Reload
 
 Edit [`demo/config.yaml`](../demo/config.yaml), then reload:

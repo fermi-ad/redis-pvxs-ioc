@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- keep the legacy sidecar IOC alive in non-interactive Docker/Compose mode while preserving an interactive IOC shell for TTY-attached runs
+
 ## v0.4.0 - 2026-05-12
 
 - major legacy sidecar compatibility release for controls EPICS ecosystem adoption

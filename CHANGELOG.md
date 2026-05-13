@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 - 2026-05-13
 
 - keep the legacy sidecar IOC alive in non-interactive Docker/Compose mode while preserving an interactive IOC shell for TTY-attached runs
 - make Redis alarm stream events schema-compatible with `fermi-ad/epics-alarm-push` commit `cfbee1e110cf8b08c79c5faf604e0a859bcffbfe`

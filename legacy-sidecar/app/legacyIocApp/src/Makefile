@@ -24,6 +24,7 @@ legacyIoc_DBD += asSupport.dbd
 legacyIoc_DBD += busySupport.dbd
 legacyIoc_DBD += caPutLog.dbd
 legacyIoc_DBD += caPutJsonLog.dbd
+legacyIoc_DBD += linStat.dbd
 legacyIoc_DBD += tcast.dbd
 legacyIoc_DBD += acnetPV.dbd
 
@@ -32,6 +33,7 @@ legacyIoc_SRCS_DEFAULT += legacyMain.cpp
 
 legacyIoc_LIBS += acnetPV
 legacyIoc_LIBS += tcast
+legacyIoc_LIBS += linStat
 legacyIoc_LIBS += caPutLog
 legacyIoc_LIBS += busy
 legacyIoc_LIBS += autosave

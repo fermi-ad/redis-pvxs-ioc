@@ -16,6 +16,7 @@ ALIVE = $(REDIS_PVXS_IOC_TOP)/third_party/support/alive
 AUTOSAVE = $(REDIS_PVXS_IOC_TOP)/third_party/support/autosave
 BUSY = $(REDIS_PVXS_IOC_TOP)/third_party/support/busy
 CAPUTLOG = $(REDIS_PVXS_IOC_TOP)/third_party/support/caPutLog
+LINSTAT = $(REDIS_PVXS_IOC_TOP)/third_party/support/linStat
 
 TCAST = $(REDIS_PVXS_IOC_TOP)/third_party/fnal/tcast
 ACNETPV = $(REDIS_PVXS_IOC_TOP)/third_party/fnal/acnetPV

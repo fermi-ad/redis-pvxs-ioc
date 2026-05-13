@@ -66,7 +66,7 @@ namespace:
 ```yaml
 services:
   ioc:
-    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.4.0
+    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.5.0@sha256:29555f32863f103c7d6e636970cbf1a053f682e7f95319f9af7a85414b89a674
     hostname: redis-pvxs-ioc.example.fnal.gov
     environment:
       - EPICS_HOST_INTERFACE=eth0
@@ -83,7 +83,7 @@ If the IOC shares another service's network namespace with
 `network_mode: "service:<name>"`, `EPICS_HOST_INTERFACE` still refers to the
 interface inside that shared namespace. In the Booster DCCT deployment, the IOC
 shares the Redis service namespace on an `ipvlan` network, sets
-`EPICS_HOST_INTERFACE=eth0`, and relies on the v0.4.0 entrypoint defaults. With
+`EPICS_HOST_INTERFACE=eth0`, and relies on the release entrypoint defaults. With
 the container reachable by its controls-network hostname, a remote controls host
 can see the IOC in `pvxhosts`.
 

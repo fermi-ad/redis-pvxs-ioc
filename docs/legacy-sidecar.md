@@ -177,7 +177,7 @@ services:
 Maintainers only:
 
 ```sh
-LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.4.0 \
+LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.5.0@sha256:91848ceecca14f65195be671a5fd78982366d9e28ad93bd91e046b69f75bd401 \
   docker compose \
     -f docker-compose.yml \
     -f docker-compose.legacy-sidecar.yml \
@@ -185,7 +185,7 @@ LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidec
     --profile legacy \
     build legacy-ioc
 
-LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.4.0 \
+LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.5.0@sha256:91848ceecca14f65195be671a5fd78982366d9e28ad93bd91e046b69f75bd401 \
   docker compose \
     -f docker-compose.yml \
     -f docker-compose.legacy-sidecar.yml \

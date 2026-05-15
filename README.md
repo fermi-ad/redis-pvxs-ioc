@@ -33,7 +33,7 @@ docker exec redis-pvxs-ioc-demo sh -lc \
   'EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=239.128.1.6 /opt/redis-pvxs-ioc/bin/pvxs/pvxget LEGACY:readback'
 ```
 
-See [`docs/demo.md`](docs/demo.md) for the complete validation flow and [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the support-module sidecar adoption path.
+See [`docs/redis-only-quickstart.md`](docs/redis-only-quickstart.md) for the fastest Redis-only project adoption path, [`docs/demo.md`](docs/demo.md) for the complete validation flow, and [`docs/legacy-sidecar.md`](docs/legacy-sidecar.md) for the support-module sidecar adoption path.
 
 ## What works today
 
@@ -82,6 +82,7 @@ The detailed product/roadmap state is tracked in [`docs/feature-state-roadmap.md
 - [`docs/mvp-spec.md`](docs/mvp-spec.md) is the implementation contract.
 - [`docs/normative-types-roadmap.md`](docs/normative-types-roadmap.md) breaks down the long-term EPICS normative-types coverage goal.
 - [`docs/channelfinder-sync.md`](docs/channelfinder-sync.md) documents Redis PV catalog publishing.
+- [`docs/redis-only-quickstart.md`](docs/redis-only-quickstart.md) is the short project adoption path for Redis-backed PVAccess-only deployments.
 - [`docs/pva-networking.md`](docs/pva-networking.md) documents PVAccess discovery expectations for Docker bridge demos and routable deployments.
 - [`docs/reccaster.md`](docs/reccaster.md) documents RecCaster in the legacy sidecar.
 - [`docs/submodule-remotes.md`](docs/submodule-remotes.md) lists the submodules that still need published remotes before the repo is pushed outside this workspace.

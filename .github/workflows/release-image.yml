@@ -1,0 +1,136 @@
+name: Publish redis-pvxs-ioc release image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish, for example v0.5.0.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    runs-on: adlinux3
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      IMAGE_REPO: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          submodules: recursive
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Verify release identity
+        id: meta
+        run: |
+          VERSION="$(tr -d '\n' < VERSION)"
+          EXPECTED_TAG="v${VERSION}"
+
+          if [ "${RELEASE_TAG}" != "${EXPECTED_TAG}" ]; then
+            echo "Release tag ${RELEASE_TAG} must match VERSION ${VERSION} (${EXPECTED_TAG})" >&2
+            exit 1
+          fi
+
+          git fetch origin main --tags
+          TAG_COMMIT="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "${HEAD_COMMIT}" != "${TAG_COMMIT}" ]; then
+            echo "Checked-out commit ${HEAD_COMMIT} does not match ${RELEASE_TAG} commit ${TAG_COMMIT}" >&2
+            exit 1
+          fi
+
+          git merge-base --is-ancestor "${TAG_COMMIT}" origin/main
+
+          REVISION="$(git rev-parse --short=12 "${TAG_COMMIT}")"
+          IMAGE="${IMAGE_REPO}:${RELEASE_TAG}"
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
+          echo "tag_commit=${TAG_COMMIT}" >> "${GITHUB_OUTPUT}"
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Registry login
+        run: docker login -u "${{ secrets.ADREGISTRY_INST_USERNAME }}" -p "${{ secrets.ADREGISTRY_INST_SECRET }}" adregistry.fnal.gov
+
+      - name: Build and push release image
+        id: publish
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          REVISION="${{ steps.meta.outputs.revision }}"
+
+          docker build \
+            --platform linux/amd64 \
+            --build-arg REDIS_PVXS_IOC_VERSION="${VERSION}" \
+            --build-arg REDIS_PVXS_IOC_REVISION="${REVISION}" \
+            --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
+            -t "${IMAGE}" \
+            -t "${IMAGE_REPO}:latest" \
+            .
+
+          docker push "${IMAGE}"
+          docker push "${IMAGE_REPO}:latest"
+
+          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep "${IMAGE_REPO}@sha256:" | head -n 1)"
+          test -n "${DIGEST_REF}"
+          DIGEST="${DIGEST_REF#*@}"
+          IMMUTABLE_IMAGE="${IMAGE_REPO}@${DIGEST}"
+
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "digest_ref=${DIGEST_REF}" >> "${GITHUB_OUTPUT}"
+          echo "immutable_image=${IMMUTABLE_IMAGE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate release image
+        run: |
+          IMAGE="${{ steps.publish.outputs.immutable_image }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          REVISION="${{ steps.meta.outputs.revision }}"
+
+          docker run --rm "${IMAGE}" --version | tee /tmp/redis-pvxs-ioc-version.txt
+          grep -F "redis-pvxs-ioc ${VERSION} (${REVISION})" /tmp/redis-pvxs-ioc-version.txt
+          docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES_FILE="$(mktemp)"
+          cat > "${NOTES_FILE}" <<EOF
+          # ${RELEASE_TAG}
+
+          Release image for redis-pvxs-ioc.
+
+          ## Image
+
+          - \`${{ steps.meta.outputs.image }}@${{ steps.publish.outputs.digest }}\`
+          - Source revision: \`${{ steps.meta.outputs.tag_commit }}\`
+          - \`latest\` was updated to the same digest for development and smoke-test use only.
+
+          ## Validation
+
+          - Built on \`adlinux3\` from the checked-out \`${RELEASE_TAG}\` tag.
+          - Verified \`${RELEASE_TAG}\` matches \`VERSION=${{ steps.meta.outputs.version }}\`.
+          - Verified the tag commit is contained in \`origin/main\`.
+          - Verified \`redis-pvxs-ioc --version\` reports \`${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.revision }})\`.
+          - Verified the default runtime config with \`--check-config /etc/redis-pvxs-ioc/config.yaml\`.
+          EOF
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --title "${RELEASE_TAG}" --notes-file "${NOTES_FILE}"
+          else
+            gh release create "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --target "${{ steps.meta.outputs.tag_commit }}" --title "${RELEASE_TAG}" --notes-file "${NOTES_FILE}"
+          fi
+
+      - name: Docker logout
+        if: always()
+        run: docker logout adregistry.fnal.gov

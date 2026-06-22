@@ -1,0 +1,91 @@
+name: Publish redis-pvxs-ioc candidate image
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: Optional candidate tag. Defaults to candidate-<ref>-<sha>.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-candidate:
+    runs-on: adlinux3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Select candidate tag
+        id: meta
+        run: |
+          VERSION="$(tr -d '\n' < VERSION)"
+          REVISION="$(git rev-parse --short=12 HEAD)"
+          INPUT_TAG="${{ inputs.candidate_tag }}"
+
+          if [ -n "${INPUT_TAG}" ]; then
+            CANDIDATE_TAG="${INPUT_TAG}"
+          else
+            SAFE_REF="$(printf '%s' "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+|-+$//g')"
+            CANDIDATE_TAG="candidate-${SAFE_REF}-${REVISION}"
+          fi
+
+          case "${CANDIDATE_TAG}" in
+            latest|v[0-9]*)
+              echo "Candidate tag must not be latest or a semver release tag: ${CANDIDATE_TAG}" >&2
+              exit 1
+              ;;
+          esac
+
+          if ! printf '%s' "${CANDIDATE_TAG}" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+            echo "Invalid Docker tag: ${CANDIDATE_TAG}" >&2
+            exit 1
+          fi
+
+          IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:${CANDIDATE_TAG}"
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${CANDIDATE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Registry login
+        run: docker login -u "${{ secrets.ADREGISTRY_INST_USERNAME }}" -p "${{ secrets.ADREGISTRY_INST_SECRET }}" adregistry.fnal.gov
+
+      - name: Build and push candidate image
+        id: publish
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          REVISION="${{ steps.meta.outputs.revision }}"
+
+          docker build \
+            --platform linux/amd64 \
+            --build-arg REDIS_PVXS_IOC_VERSION="${VERSION}" \
+            --build-arg REDIS_PVXS_IOC_REVISION="${REVISION}" \
+            --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
+            -t "${IMAGE}" \
+            .
+
+          docker push "${IMAGE}"
+          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep 'adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:' | head -n 1)"
+          test -n "${DIGEST_REF}"
+
+          echo "digest_ref=${DIGEST_REF}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "## redis-pvxs-ioc candidate image"
+            echo
+            echo "- Image: \`${IMAGE}\`"
+            echo "- Digest: \`${DIGEST_REF}\`"
+            echo "- Source revision: \`${REVISION}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Docker logout
+        if: always()
+        run: docker logout adregistry.fnal.gov

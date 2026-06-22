@@ -34,6 +34,8 @@ jobs:
             CANDIDATE_TAG="${INPUT_TAG}"
           else
             SAFE_REF="$(printf '%s' "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+|-+$//g')"
+            SAFE_REF="${SAFE_REF:-ref}"
+            SAFE_REF="$(printf '%.105s' "${SAFE_REF}")"
             CANDIDATE_TAG="candidate-${SAFE_REF}-${REVISION}"
           fi
 
@@ -56,7 +58,7 @@ jobs:
           echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
 
       - name: Registry login
-        run: docker login -u "${{ secrets.ADREGISTRY_INST_USERNAME }}" -p "${{ secrets.ADREGISTRY_INST_SECRET }}" adregistry.fnal.gov
+        run: printf '%s' "${{ secrets.ADREGISTRY_INST_SECRET }}" | docker login adregistry.fnal.gov --username "${{ secrets.ADREGISTRY_INST_USERNAME }}" --password-stdin
 
       - name: Build and push candidate image
         id: publish
@@ -74,7 +76,7 @@ jobs:
             .
 
           docker push "${IMAGE}"
-          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep 'adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:' | head -n 1)"
+          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F 'adregistry.fnal.gov/instrumentation/redis-pvxs-ioc@sha256:' | head -n 1)"
           test -n "${DIGEST_REF}"
 
           echo "digest_ref=${DIGEST_REF}" >> "${GITHUB_OUTPUT}"

@@ -49,7 +49,10 @@ jobs:
             exit 1
           fi
 
-          git merge-base --is-ancestor "${TAG_COMMIT}" origin/main
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "Release tag ${RELEASE_TAG} commit ${TAG_COMMIT} is not contained in origin/main" >&2
+            exit 1
+          fi
 
           REVISION="$(git rev-parse --short=12 "${TAG_COMMIT}")"
           IMAGE="${IMAGE_REPO}:${RELEASE_TAG}"
@@ -60,7 +63,7 @@ jobs:
           echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
 
       - name: Registry login
-        run: docker login -u "${{ secrets.ADREGISTRY_INST_USERNAME }}" -p "${{ secrets.ADREGISTRY_INST_SECRET }}" adregistry.fnal.gov
+        run: printf '%s' "${{ secrets.ADREGISTRY_INST_SECRET }}" | docker login adregistry.fnal.gov --username "${{ secrets.ADREGISTRY_INST_USERNAME }}" --password-stdin
 
       - name: Build and push release image
         id: publish
@@ -81,7 +84,7 @@ jobs:
           docker push "${IMAGE}"
           docker push "${IMAGE_REPO}:latest"
 
-          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep "${IMAGE_REPO}@sha256:" | head -n 1)"
+          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F "${IMAGE_REPO}@sha256:" | head -n 1)"
           test -n "${DIGEST_REF}"
           DIGEST="${DIGEST_REF#*@}"
           IMMUTABLE_IMAGE="${IMAGE_REPO}@${DIGEST}"
@@ -89,6 +92,14 @@ jobs:
           echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "digest_ref=${DIGEST_REF}" >> "${GITHUB_OUTPUT}"
           echo "immutable_image=${IMMUTABLE_IMAGE}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "## redis-pvxs-ioc release image"
+            echo
+            echo "- Image: \`${IMAGE}\`"
+            echo "- Digest: \`${DIGEST_REF}\`"
+            echo "- Immutable image: \`${IMMUTABLE_IMAGE}\`"
+            echo "- Source revision: \`${REVISION}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Validate release image
         run: |

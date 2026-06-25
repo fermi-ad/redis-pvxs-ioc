@@ -17,6 +17,7 @@
 
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/rpc_pv.h"
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/util.h"
 
@@ -235,6 +236,22 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 }
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
+using RpcMap = std::unordered_map<std::string, std::shared_ptr<RpcPV>>;
+
+// Build the RPC-forwarding PVs from config. Construction connects the gRPC
+// channel (lazy/insecure) and installs the onRPC handler.
+RpcMap buildRpcPVs(const AppConfig& config) {
+  RpcMap rpcPVs;
+  for (const auto& pv : config.pvs) {
+    if (!pv.rpc) {
+      continue;
+    }
+    const auto name = fullPVName(config.server, pv);
+    const auto endpoint = resolveRpcEndpoint(config.server, *pv.rpc);
+    rpcPVs.emplace(name, std::make_shared<RpcPV>(name, *pv.rpc, endpoint));
+  }
+  return rpcPVs;
+}
 
 }  // namespace
 
@@ -247,6 +264,7 @@ struct Application::Impl {
   RedisBackendRegistry redisBackends;
   std::shared_ptr<AlarmPublisher> alarmPublisher;
   RuntimeMap runtimes;
+  RpcMap rpcPVs;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
 };
 
@@ -334,6 +352,10 @@ void Application::stop() {
     impl_->server.removePV(item.first);
   }
   impl_->runtimes.clear();
+  for (auto& item : impl_->rpcPVs) {
+    impl_->server.removePV(item.first);
+  }
+  impl_->rpcPVs.clear();
   impl_->redisBackends.clear();
   impl_->alarmPublisher.reset();
 
@@ -370,6 +392,9 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
     RuntimeMap staged;
     try {
       for (const auto& pv : config.pvs) {
+        if (pv.rpc) {
+          continue;  // RPC PVs are installed separately (no Redis runtime)
+        }
         const auto name = fullPVName(config.server, pv);
         staged.emplace(name, makeRuntime(config.server, pv, newRedisBackends, newAlarmPublisher, generation));
       }
@@ -393,6 +418,16 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
       impl_->runtimes.emplace(item.first, item.second);
     }
 
+    // Rebuild RPC-forwarding PVs (simple full-replace; they hold no Redis
+    // reader state, so there is no in-flight subscription to preserve).
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.removePV(item.first);
+    }
+    impl_->rpcPVs = buildRpcPVs(config);
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.addPV(item.first, item.second->sharedPV());
+    }
+
     impl_->redisBackends = std::move(newRedisBackends);
     impl_->alarmPublisher = std::move(newAlarmPublisher);
     impl_->currentConfig = config;
@@ -401,7 +436,7 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
 
     if (impl_->admin) {
       impl_->admin->setGeneration(generation);
-      impl_->admin->setPvCount(impl_->runtimes.size());
+      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
@@ -417,6 +452,9 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
   try {
     std::map<std::string, PVConfig> desired;
     for (const auto& pv : config.pvs) {
+      if (pv.rpc) {
+        continue;  // RPC PVs handled by the full-rebuild block below
+      }
       desired.emplace(fullPVName(config.server, pv), pv);
     }
 
@@ -489,12 +527,21 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
       impl_->runtimes.emplace(item.first, item.second);
     }
 
+    // Full-replace the RPC-forwarding PVs.
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.removePV(item.first);
+    }
+    impl_->rpcPVs = buildRpcPVs(config);
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.addPV(item.first, item.second->sharedPV());
+    }
+
     impl_->currentConfig = config;
     impl_->generation = generation;
 
     if (impl_->admin) {
       impl_->admin->setGeneration(generation);
-      impl_->admin->setPvCount(impl_->runtimes.size());
+      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));

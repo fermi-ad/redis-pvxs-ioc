@@ -26,6 +26,13 @@ set(PVXS_ROOT "${CMAKE_SOURCE_DIR}/third_party/pvxs" CACHE PATH "Path to built p
 find_package(Perl REQUIRED)
 find_package(CURL REQUIRED)
 
+# ---- gRPC + protobuf for the RPC->gRPC forwarding feature ------------------
+# Provided by the dev packages installed in the Dockerfile
+# (libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc) or a
+# source build. Same CONFIG-package pattern as orbit/CMakeLists.txt.
+find_package(Protobuf CONFIG REQUIRED)
+find_package(gRPC CONFIG REQUIRED)
+
 set(
   REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE
   ""
@@ -124,12 +131,38 @@ set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "Build yaml-cpp as a static library" F
 add_subdirectory(third_party/yaml-cpp)
 add_subdirectory(third_party/redis-adapter)
 
+# ---- Generated BpmQuery proto + gRPC stubs ---------------------------------
+set(BPM_QUERY_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/bpm_query.proto")
+set(BPM_QUERY_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
+file(MAKE_DIRECTORY "${BPM_QUERY_GEN_DIR}")
+
+add_library(bpm-query-proto STATIC "${BPM_QUERY_PROTO}")
+target_link_libraries(bpm-query-proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
+target_include_directories(bpm-query-proto PUBLIC "${BPM_QUERY_GEN_DIR}")
+set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+protobuf_generate(
+  TARGET bpm-query-proto
+  LANGUAGE cpp
+  PROTOC_OUT_DIR "${BPM_QUERY_GEN_DIR}"
+  IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/proto")
+
+protobuf_generate(
+  TARGET bpm-query-proto
+  LANGUAGE grpc
+  GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
+  PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
+  PROTOC_OUT_DIR "${BPM_QUERY_GEN_DIR}"
+  IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/proto")
+
 add_library(redis-pvxs-ioc-core STATIC
   src/config.cpp
   src/channelfinder.cpp
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
+  src/grpc_query_client.cpp
+  src/rpc_pv.cpp
   src/app.cpp
   ${REDIS_ADAPTER_SOURCES}
 )
@@ -149,6 +182,9 @@ target_include_directories(redis-pvxs-ioc-core
 target_link_libraries(redis-pvxs-ioc-core
   PUBLIC
     yaml-cpp
+    bpm-query-proto
+    gRPC::grpc++
+    protobuf::libprotobuf
     ${REDIS_ADAPTER_LIBRARIES}
     ${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}
     ${PVXS_LIB}/libpvxs${SHARED_LIB_EXT}

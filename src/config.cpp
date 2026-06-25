@@ -382,8 +382,65 @@ std::optional<LinearTransformConfig> parseTransform(const YAML::Node& node, cons
   return transform;
 }
 
+RpcMethod parseRpcMethod(const YAML::Node& node, const std::string& path) {
+  const auto method = lowerCopy(parseString(node, path));
+  if (method == "average") return RpcMethod::Average;
+  if (method == "orbit") return RpcMethod::Orbit;
+  if (method == "onevent") return RpcMethod::OnEvent;
+  if (method == "oneventtime") return RpcMethod::OnEventTime;
+  fail(path, "unsupported rpc method '" + method + "' (Average|Orbit|OnEvent|OnEventTime)");
+}
+
+RpcConfig parseRpcConfig(const YAML::Node& node, const std::string& path) {
+  requireMap(node, path);
+  RpcConfig rpc;
+  rpc.method = parseRpcMethod(requireNode(node, "method", path), path + ".method");
+  if (node["endpoint"]) {
+    rpc.endpoint = parseString(node["endpoint"], path + ".endpoint");
+  }
+
+  // Optional fixed defaults for the method's fields. All are tolerant: any
+  // field may instead be supplied by the pvxcall argument structure.
+  if (node["digitizer"]) rpc.digitizer = parseString(node["digitizer"], path + ".digitizer");
+  if (node["subkey"]) rpc.subkey = parseString(node["subkey"], path + ".subkey");
+  if (node["event"]) rpc.event = parseNumeric<uint32_t>(node["event"], path + ".event");
+  if (node["delta_ns"]) rpc.deltaNs = parseNumeric<int64_t>(node["delta_ns"], path + ".delta_ns");
+  if (node["event_time_ns"]) rpc.eventTimeNs = parseNumeric<int64_t>(node["event_time_ns"], path + ".event_time_ns");
+  if (node["start_ns"]) rpc.startNs = parseNumeric<int64_t>(node["start_ns"], path + ".start_ns");
+  if (node["end_ns"]) rpc.endNs = parseNumeric<int64_t>(node["end_ns"], path + ".end_ns");
+  if (node["length_ns"]) rpc.lengthNs = parseNumeric<int64_t>(node["length_ns"], path + ".length_ns");
+  if (node["per_entry_mean"]) rpc.perEntryMean = node["per_entry_mean"].as<bool>();
+  if (node["machine"]) rpc.machine = parseString(node["machine"], path + ".machine");
+  if (node["section"]) rpc.section = parseString(node["section"], path + ".section");
+  if (node["start_index"]) rpc.startIndex = parseNumeric<int32_t>(node["start_index"], path + ".start_index");
+  if (node["end_index"]) rpc.endIndex = parseNumeric<int32_t>(node["end_index"], path + ".end_index");
+  return rpc;
+}
+
+PVConfig parseRpcPV(const YAML::Node& node, const std::string& path) {
+  PVConfig pv;
+  pv.name = parseString(requireNode(node, "name", path), path + ".name");
+  if (pv.name.empty()) {
+    fail(path + ".name", "must not be empty");
+  }
+  pv.rpc = parseRpcConfig(node["rpc"], path + ".rpc");
+  // RPC PVs do not subscribe to Redis. type/shape carry no meaning here; the
+  // reply structure is determined by the gRPC method. Reject Redis routes that
+  // would otherwise be silently ignored.
+  if (node["read"] || node["write"] || node["confirm"] || node["transform"] ||
+      node["initial"] || node["type"] || node["shape"]) {
+    fail(path, "an rpc PV must not declare read/write/confirm/type/shape/transform/initial");
+  }
+  pv.metadata = parseMetadata(node["metadata"], path + ".metadata");
+  return pv;
+}
+
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   requireMap(node, path);
+
+  if (node["rpc"]) {
+    return parseRpcPV(node, path);
+  }
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -463,6 +520,10 @@ AppConfig parseConfig(const YAML::Node& root) {
   if (serverNode["auto_beacon"]) {
     config.server.autoBeacon = serverNode["auto_beacon"].as<bool>();
   }
+  if (serverNode["rpc_default_endpoint"]) {
+    config.server.rpcDefaultEndpoint =
+        parseString(serverNode["rpc_default_endpoint"], "root.server.rpc_default_endpoint");
+  }
 
   config.channelFinder = parseChannelFinderConfig(root["channelfinder"], "root.channelfinder");
 
@@ -511,6 +572,21 @@ AppConfig parseConfig(const YAML::Node& root) {
   std::set<std::pair<std::string, std::string>> subscribedKeys;
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
+
+    // RPC PVs forward to gRPC and never touch Redis, so skip backend
+    // resolution and subscribed-key uniqueness; only the PV name must be unique.
+    if (pv.rpc) {
+      if (pv.rpc->endpoint.empty() && config.server.rpcDefaultEndpoint.empty()) {
+        fail("root.pvs[" + std::to_string(index) + "].rpc",
+             "endpoint required (set rpc.endpoint or server.rpc_default_endpoint)");
+      }
+      if (!pvNames.insert(pv.name).second) {
+        fail("root.pvs[" + std::to_string(index) + "].name", "duplicate PV name '" + pv.name + "'");
+      }
+      config.pvs.push_back(std::move(pv));
+      continue;
+    }
+
     resolveBackendAlias(pv.read.backend,
                         "root.pvs[" + std::to_string(index) + "].read.backend",
                         config.redisBackends,
@@ -568,6 +644,13 @@ std::string summarizeConfig(const AppConfig& config) {
            << " base_key=" << entry.second.baseKey;
   }
   for (const auto& pv : config.pvs) {
+    if (pv.rpc) {
+      stream << "\n- " << fullPVName(config.server, pv)
+             << " [rpc " << toString(pv.rpc->method) << "]"
+             << " endpoint="
+             << (pv.rpc->endpoint.empty() ? config.server.rpcDefaultEndpoint : pv.rpc->endpoint);
+      continue;
+    }
     stream << "\n- " << fullPVName(config.server, pv)
            << " [" << toString(pv.shape) << " " << toString(pv.type) << "]"
            << " read=" << pv.read.backend << ":" << pv.read.key;
@@ -619,6 +702,16 @@ std::string toString(const Shape shape) {
   return "unknown";
 }
 
+std::string toString(const RpcMethod method) {
+  switch (method) {
+  case RpcMethod::Average: return "Average";
+  case RpcMethod::Orbit: return "Orbit";
+  case RpcMethod::OnEvent: return "OnEvent";
+  case RpcMethod::OnEventTime: return "OnEventTime";
+  }
+  return "unknown";
+}
+
 std::string toString(const DisplayForm form) {
   switch (form) {
   case DisplayForm::Default: return "default";
@@ -665,7 +758,8 @@ bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs) {
          lhs.interfaces == rhs.interfaces &&
          lhs.tcpPort == rhs.tcpPort &&
          lhs.udpPort == rhs.udpPort &&
-         lhs.autoBeacon == rhs.autoBeacon;
+         lhs.autoBeacon == rhs.autoBeacon &&
+         lhs.rpcDefaultEndpoint == rhs.rpcDefaultEndpoint;
 }
 
 bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs) {

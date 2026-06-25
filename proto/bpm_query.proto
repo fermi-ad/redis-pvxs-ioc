@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package bpm.query.v1;
+
+// BpmQuery answers on-demand, time-windowed reads against the per-digitizer
+// Redis streams. The EPICS IOC forwards a PVA `pvxcall` RPC to these methods.
+//
+// All times are int64 nanoseconds (the RedisAdapterLite RAL_Time domain, which
+// is also the Redis stream-ID key). 0 means "unset".
+service BpmQuery {
+  // Mean of all stream points of `source` within the window.
+  rpc Average(AverageRequest) returns (QueryReply);
+
+  // Per-BPM averaged H/V position + intensity across a machine/section.
+  rpc Orbit(OrbitRequest) returns (OrbitReply);
+
+  // Resolve `event` to a time t from the clock stream, then return the
+  // window [t - delta_ns, t] of `source`.
+  rpc OnEvent(OnEventRequest) returns (QueryReply);
+
+  // Return the window [event_time_ns + start_ns,
+  //                     event_time_ns + start_ns + length_ns] of `source`.
+  rpc OnEventTime(OnEventTimeRequest) returns (QueryReply);
+}
+
+// A Redis stream address: digitizer name + subkey.
+// Full key = "<RedisBase>:<digitizer>:<subkey>", host resolved from config.
+message Source {
+  string digitizer = 1;   // e.g. "MTCA1-1"
+  string subkey = 2;      // e.g. "BPM_H1_POS"
+}
+
+// A time window. Provide either [start_ns, end_ns] OR start_ns + length_ns.
+message Window {
+  int64 start_ns = 1;
+  int64 end_ns = 2;       // if 0 and length_ns > 0, end = start + length
+  int64 length_ns = 3;
+}
+
+message AverageRequest {
+  Source source = 1;
+  Window window = 2;
+  bool per_entry_mean = 3;  // false = flat mean over all samples (default)
+}
+
+message OnEventRequest {
+  Source source = 1;
+  uint32 event = 2;         // TCLK event id, e.g. 0xFF
+  int64 delta_ns = 3;       // look-back window length
+}
+
+message OnEventTimeRequest {
+  Source source = 1;
+  int64 event_time_ns = 2;
+  int64 start_ns = 3;       // offset from event_time
+  int64 length_ns = 4;
+}
+
+message OrbitRequest {
+  string machine = 1;       // e.g. "BOOSTER"
+  string section = 2;       // optional sub-selector; empty = whole machine
+  Window window = 3;
+  int32 start_index = 4;    // waveform averaging window (0 = config default)
+  int32 end_index = 5;
+}
+
+message QueryReply {
+  Status status = 1;
+  repeated double values = 2;
+  repeated int64 times_ns = 3;   // stream-entry times for `values`
+  int64 event_time_ns = 4;       // resolved event time (OnEvent), else 0
+  string units = 5;
+}
+
+message OrbitReply {
+  Status status = 1;
+  int64 time_ns = 2;             // computation time
+  repeated string h_names = 3;   // per-point BPM labels (digi+bpm)
+  repeated double h_orbit = 4;
+  repeated double h_intensity = 5;
+  repeated string v_names = 6;
+  repeated double v_orbit = 7;
+  repeated double v_intensity = 8;
+}
+
+message Status {
+  bool ok = 1;
+  string message = 2;
+}

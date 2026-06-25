@@ -80,6 +80,48 @@ struct LinearTransformConfig {
   double offset = 0.0;
 };
 
+// One of the four BpmQuery gRPC RPCs forwarded by a `pvxcall` to this PV.
+enum class RpcMethod {
+  Average,
+  Orbit,
+  OnEvent,
+  OnEventTime,
+};
+
+// Optional fixed defaults for an RPC PV. Any field left unset here may be
+// supplied at call time by the pvxcall argument structure; if neither the
+// config default nor the call argument is present, a sensible zero/empty is
+// used. See docs/rpc-forwarding.md.
+struct RpcConfig {
+  RpcMethod method = RpcMethod::OnEvent;
+  // gRPC server "host:port". Empty -> falls back to the IOC-wide default
+  // (ServerConfig::rpcDefaultEndpoint).
+  std::string endpoint;
+
+  // Source (Average / OnEvent / OnEventTime)
+  std::optional<std::string> digitizer;
+  std::optional<std::string> subkey;
+
+  // OnEvent
+  std::optional<uint32_t> event;
+  std::optional<int64_t> deltaNs;
+
+  // OnEventTime / Window offsets
+  std::optional<int64_t> eventTimeNs;
+  std::optional<int64_t> startNs;
+  std::optional<int64_t> endNs;
+  std::optional<int64_t> lengthNs;
+
+  // Average window / per-entry mean
+  std::optional<bool> perEntryMean;
+
+  // Orbit
+  std::optional<std::string> machine;
+  std::optional<std::string> section;
+  std::optional<int32_t> startIndex;
+  std::optional<int32_t> endIndex;
+};
+
 using TypedValue = std::variant<
   std::monostate,
   bool,
@@ -116,6 +158,9 @@ struct PVConfig {
   AlarmConfig alarms;
   std::optional<LinearTransformConfig> transform;
   TypedValue initialValue;
+  // When set, this PV is an RPC-forwarding PV (no Redis read route required);
+  // a `pvxcall <name>` is forwarded to the BpmQuery gRPC server.
+  std::optional<RpcConfig> rpc;
 };
 
 struct ServerConfig {
@@ -125,6 +170,9 @@ struct ServerConfig {
   std::optional<unsigned short> tcpPort;
   std::optional<unsigned short> udpPort;
   bool autoBeacon = true;
+  // IOC-wide default gRPC endpoint ("host:port") used by RPC PVs that do not
+  // specify their own `rpc.endpoint`.
+  std::string rpcDefaultEndpoint;
 };
 
 struct RedisConfig {
@@ -170,6 +218,7 @@ bool isArrayElementTypeSupported(PrimitiveType type);
 std::string toString(PrimitiveType type);
 std::string toString(Shape shape);
 std::string toString(DisplayForm form);
+std::string toString(RpcMethod method);
 
 bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);
 bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs);

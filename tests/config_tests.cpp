@@ -187,6 +187,64 @@ pvs:
       key: rb
 )YAML";
 
+const char* const kRpcConfig = R"YAML(
+server:
+  instance: rpc
+  namespace: BI
+  rpc_default_endpoint: bpm-query-server:50051
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: live:rb
+    type: float64
+    shape: scalar
+    read:
+      key: rb
+  - name: ORBIT
+    rpc:
+      method: OnEvent
+      digitizer: MTCA1-1
+      subkey: BPM_H1_POS
+      event: 0xFF
+      delta_ns: 1000000000
+  - name: ORBIT:TABLE
+    rpc:
+      method: Orbit
+      endpoint: other:50052
+      machine: BOOSTER
+)YAML";
+
+const char* const kRpcNoEndpoint = R"YAML(
+server:
+  instance: rpc
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: ORBIT
+    rpc:
+      method: OnEvent
+)YAML";
+
+const char* const kRpcWithRead = R"YAML(
+server:
+  instance: rpc
+  rpc_default_endpoint: host:1
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: ORBIT
+    rpc:
+      method: OnEvent
+    read:
+      key: rb
+)YAML";
+
 }  // namespace
 
 int main() {
@@ -226,6 +284,24 @@ int main() {
   assert(!throwsConfig(kDuplicateReadersDifferentBackends));
   assert(throwsConfig(kUnknownBackend));
   assert(throwsConfig(kMultiBackendMissingAlarmBackend));
+
+  // RPC-forwarding PVs.
+  const auto rpc = loadConfigString(kRpcConfig);
+  assert(rpc.server.rpcDefaultEndpoint == "bpm-query-server:50051");
+  assert(rpc.pvs.size() == 3u);
+  assert(!rpc.pvs[0].rpc.has_value());           // normal Redis PV unaffected
+  assert(rpc.pvs[1].rpc.has_value());
+  assert(rpc.pvs[1].rpc->method == RpcMethod::OnEvent);
+  assert(rpc.pvs[1].rpc->endpoint.empty());      // falls back to default
+  assert(rpc.pvs[1].rpc->digitizer.value() == "MTCA1-1");
+  assert(rpc.pvs[1].rpc->event.value() == 0xFFu);
+  assert(rpc.pvs[1].rpc->deltaNs.value() == 1000000000);
+  assert(rpc.pvs[2].rpc->method == RpcMethod::Orbit);
+  assert(rpc.pvs[2].rpc->endpoint == "other:50052");
+  assert(rpc.pvs[2].rpc->machine.value() == "BOOSTER");
+
+  assert(throwsConfig(kRpcNoEndpoint));          // no endpoint and no default
+  assert(throwsConfig(kRpcWithRead));            // rpc + read is rejected
 
   std::cout << "config tests passed\n";
   return 0;

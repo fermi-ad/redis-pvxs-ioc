@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline-dev \
     perl \
     pkg-config \
+    # gRPC + protobuf for the RPC->gRPC forwarding feature (find_package CONFIG)
+    libgrpc++-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    protobuf-compiler-grpc \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/redis-pvxs-ioc
@@ -65,6 +70,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline8 \
     libstdc++6 \
     perl \
+    # gRPC + protobuf runtime shared libs for the RPC->gRPC forwarding feature
+    libgrpc++1.51t64 \
+    libprotobuf32t64 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/redis-pvxs-ioc

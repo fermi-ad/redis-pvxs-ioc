@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -26,7 +27,10 @@ pvxs::Value findArg(const pvxs::Value& request, const std::string& name) {
       return field;
     }
   }
-  if (auto field = request[name]; field.valid() && field.isMarked()) {
+  // Top-level fallback for hand-built (non-NTURI) pvRequests that place args at
+  // the root. NTURI has no top-level arg fields, so accepting valid-but-unmarked
+  // here cannot shadow the query[] path above or pick up an NTURI default.
+  if (auto field = request[name]; field.valid()) {
     return field;
   }
   return {};
@@ -105,11 +109,12 @@ SourceArgs buildSource(const pvxs::Value& request, const RpcConfig& rpc) {
 
 // ---- Reply builders --------------------------------------------------------
 
-// QueryReply -> NTScalar (1 value) or NTScalarArray (otherwise). The auxiliary
-// fields (times_ns, event_time_ns, units) are attached as extra members so a
-// single normative type carries the whole reply.
-pvxs::Value buildQueryReply(const QueryResult& result) {
-  const bool scalar = result.values.size() == 1;
+// QueryReply -> NTScalar (scalar) or NTScalarArray (array). The normative type
+// is chosen by the CALLER per RPC method (not by the result size), so a PV's
+// type is stable across calls even when an array method happens to return one
+// element. The auxiliary fields (times_ns, event_time_ns, units) are attached
+// as extra members so a single normative type carries the whole reply.
+pvxs::Value buildQueryReply(const QueryResult& result, bool scalar) {
   const auto valueCode = scalar ? pvxs::TypeCode::Float64 : pvxs::TypeCode::Float64A;
 
   auto def = pvxs::nt::NTScalar{valueCode, true}.build();
@@ -120,7 +125,9 @@ pvxs::Value buildQueryReply(const QueryResult& result) {
   auto value = def.create();
 
   if (scalar) {
-    value["value"] = result.values.front();
+    value["value"] = result.values.empty()
+                         ? std::numeric_limits<double>::quiet_NaN()
+                         : result.values.front();
   } else {
     pvxs::shared_array<double> arr(result.values.begin(), result.values.end());
     value["value"] = arr.freeze();
@@ -203,7 +210,7 @@ RpcPV::RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint)
           op->error("Average failed: " + result.status.message);
           return;
         }
-        op->reply(buildQueryReply(result));
+        op->reply(buildQueryReply(result, /*scalar=*/true));
         return;
       }
       case RpcMethod::OnEvent: {
@@ -216,7 +223,7 @@ RpcPV::RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint)
           op->error("OnEvent failed: " + result.status.message);
           return;
         }
-        op->reply(buildQueryReply(result));
+        op->reply(buildQueryReply(result, /*scalar=*/false));
         return;
       }
       case RpcMethod::OnEventTime: {
@@ -230,7 +237,7 @@ RpcPV::RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint)
           op->error("OnEventTime failed: " + result.status.message);
           return;
         }
-        op->reply(buildQueryReply(result));
+        op->reply(buildQueryReply(result, /*scalar=*/false));
         return;
       }
       case RpcMethod::Orbit: {
@@ -262,7 +269,7 @@ RpcPV::RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint)
           op->error("Slice failed: " + result.status.message);
           return;
         }
-        op->reply(buildQueryReply(result));
+        op->reply(buildQueryReply(result, /*scalar=*/false));
         return;
       }
       case RpcMethod::Decimate: {
@@ -276,7 +283,7 @@ RpcPV::RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint)
           op->error("Decimate failed: " + result.status.message);
           return;
         }
-        op->reply(buildQueryReply(result));
+        op->reply(buildQueryReply(result, /*scalar=*/false));
         return;
       }
       }

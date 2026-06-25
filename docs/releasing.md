@@ -28,25 +28,53 @@ ctest --test-dir build --output-on-failure
 ```
 
 4. Commit the release prep and push the branch.
-5. Tag the release commit with `v$(cat VERSION)`.
-6. Build and push the production image.
-7. Build and push the legacy sidecar sample image when `legacy-sidecar/` changes.
-8. Record the pushed digests.
-9. Create the GitHub Release and include:
+5. Let CI and downstream candidate-image testing pass on the PR branch.
+6. Merge the release prep to `main`.
+7. Tag the merged `main` release commit with `v$(cat VERSION)`.
+8. Let the release workflow build and push the production image from that tag.
+9. Build and push the legacy sidecar sample image when `legacy-sidecar/` changes.
+10. Record the pushed digests from the workflow summary, GitHub Release, or manual sidecar push.
+11. Confirm the GitHub Release includes:
    - the semver tag
    - the immutable image digest for each published image
    - the validation commands used
-10. Pin production compose defaults as `image:v${VERSION}@sha256:<digest>`.
+12. Pin production compose defaults as `image:v${VERSION}@sha256:<digest>`.
+
+## Automated workflows
+
+The primary runtime image release process is split into three workflows:
+
+- `Validate redis-pvxs-ioc image` runs on PRs, pushes to `main`, and manual
+  dispatch. It builds the image from the repo root with
+  `REDIS_PVXS_IOC_VERSION=$(cat VERSION)` and
+  `REDIS_PVXS_IOC_REVISION=<source revision>`, validates image labels, checks
+  `redis-pvxs-ioc --version`, and validates the default runtime config with
+  `--check-config`. It does not push registry tags.
+- `Publish redis-pvxs-ioc candidate image` is manual-only. Use it for
+  integration testing before merge. It pushes only a non-production candidate
+  tag such as `candidate-<ref>-<sha>` and never updates `latest` or `vX.Y.Z`.
+- `Publish redis-pvxs-ioc release image` runs on `v*` tag pushes or manual
+  dispatch with an existing tag. It verifies `vX.Y.Z` matches `VERSION`,
+  verifies the tag commit is contained in `origin/main`, builds and pushes
+  `vX.Y.Z` plus `latest`, captures the digest, validates the pushed image, and
+  creates or updates the GitHub Release.
+
+The legacy sidecar image is still published with the manual sidecar commands
+below when `legacy-sidecar/` changes. Standardizing that sidecar into the same
+automated release workflow should be handled as a separate scoped change.
 
 ## Image reference policy
 
 - Development and local experiments may use `:latest` or branch/test tags.
-- Integration may use `:v${VERSION}` while validating a release.
+- Integration may use candidate tags while validating a PR or release branch.
 - Production compose files must use `:v${VERSION}@sha256:<digest>`.
 
 Tags describe releases. Digests define deployments. The tag keeps the human-readable release intent visible; the digest guarantees the exact artifact that runs.
 
-## Manual build and publish
+## Manual build and publish fallback
+
+Prefer the release workflow for normal runtime image releases. Use this fallback
+only when the workflow is unavailable, and keep the same release identity checks.
 
 ```sh
 VERSION="$(cat VERSION)"

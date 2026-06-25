@@ -1,0 +1,63 @@
+name: Validate redis-pvxs-ioc image
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: adlinux3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Build validation image
+        id: build
+        run: |
+          VERSION="$(tr -d '\n' < VERSION)"
+          REVISION="$(git rev-parse --short=12 HEAD)"
+          IMAGE="redis-pvxs-ioc:ci-${GITHUB_SHA}"
+
+          docker build \
+            --platform linux/amd64 \
+            --build-arg REDIS_PVXS_IOC_VERSION="${VERSION}" \
+            --build-arg REDIS_PVXS_IOC_REVISION="${REVISION}" \
+            --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
+            -t "${IMAGE}" \
+            .
+
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate image metadata
+        run: |
+          IMAGE="${{ steps.build.outputs.image }}"
+          VERSION="${{ steps.build.outputs.version }}"
+          REVISION="${{ steps.build.outputs.revision }}"
+
+          test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${VERSION}"
+          test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${REVISION}"
+
+      - name: Validate runtime image
+        run: |
+          IMAGE="${{ steps.build.outputs.image }}"
+          VERSION="${{ steps.build.outputs.version }}"
+          REVISION="${{ steps.build.outputs.revision }}"
+
+          docker run --rm "${IMAGE}" --version | tee /tmp/redis-pvxs-ioc-version.txt
+          grep -F "redis-pvxs-ioc ${VERSION} (${REVISION})" /tmp/redis-pvxs-ioc-version.txt
+          docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml

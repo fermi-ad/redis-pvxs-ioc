@@ -21,7 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/redis-pvxs-ioc
-COPY . .
+
+# Build the heavy third-party deps (EPICS base + pvxs) from the submodule tree
+# FIRST, so that editing the IOC sources (src/, include/, proto/, CMakeLists)
+# does not invalidate these layers. Only VERSION + third_party are needed here.
+COPY VERSION ./
+COPY third_party/ third_party/
 
 RUN VERSION_FROM_FILE="$(tr -d '\n' < VERSION)" && \
     if [ "${REDIS_PVXS_IOC_VERSION}" != "dev" ] && [ "${REDIS_PVXS_IOC_VERSION}" != "${VERSION_FROM_FILE}" ]; then \
@@ -38,6 +43,11 @@ RUN make -C third_party/epics-base configure.install src.install -j"$(nproc)" &&
 RUN printf 'EPICS_BASE=%s/third_party/epics-base\n' "$(pwd)" > third_party/pvxs/configure/RELEASE.local
 RUN make -C third_party/pvxs/bundle libevent
 RUN make -C third_party/pvxs configure.install setup.install src.install tools.install -j"$(nproc)"
+
+# Now the IOC sources (this COPY merges over third_party without disturbing the
+# built artifacts created by the RUN layers above).
+COPY . .
+
 RUN cmake -S . -B build \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"

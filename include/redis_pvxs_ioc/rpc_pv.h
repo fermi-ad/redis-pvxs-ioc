@@ -1,36 +1,35 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 
 #include <pvxs/sharedpv.h>
 
-#include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/grpc_bridge.h"
 
 namespace redis_pvxs_ioc {
 
-class GrpcQueryClient;
-
-// Owns a SharedPV with an installed onRPC() handler that forwards a `pvxcall`
-// to the BpmQuery gRPC server and maps the reply into a PVA structure. One
-// instance per configured RPC PV.
+// A SharedPV whose onRPC handler forwards a `pvxcall` to one method of a backend
+// gRPC service via a GrpcBridge. Generic: it has no knowledge of the method's
+// request/reply schema — that comes from reflection at runtime.
 class RpcPV {
 public:
-  RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint);
+  RpcPV(std::shared_ptr<GrpcBridge> bridge, BridgeMethod method,
+        std::map<std::string, std::string> defaults);
   ~RpcPV();
 
-  const std::string& fullName() const { return fullName_; }
   pvxs::server::SharedPV& sharedPV() { return pv_; }
 
 private:
-  std::string fullName_;
-  RpcConfig rpc_;
-  std::shared_ptr<GrpcQueryClient> client_;
+  std::shared_ptr<GrpcBridge> bridge_;
+  BridgeMethod method_;
+  std::map<std::string, std::string> defaults_;
   pvxs::server::SharedPV pv_;
 };
 
-// Resolve the effective gRPC endpoint for an RPC PV (rpc.endpoint, else the
-// server-wide default).
-std::string resolveRpcEndpoint(const ServerConfig& server, const RpcConfig& rpc);
+// Derive a PV-name leaf from a gRPC method name: CamelCase -> UPPER_SNAKE.
+// "Average" -> "AVERAGE", "OnEventTime" -> "ON_EVENT_TIME".
+std::string methodToPvLeaf(const std::string& method);
 
 }  // namespace redis_pvxs_ioc

@@ -80,54 +80,18 @@ struct LinearTransformConfig {
   double offset = 0.0;
 };
 
-// One of the four BpmQuery gRPC RPCs forwarded by a `pvxcall` to this PV.
-enum class RpcMethod {
-  Average,
-  Orbit,
-  OnEvent,
-  OnEventTime,
-  Slice,
-  Decimate,
-};
-
-// Optional fixed defaults for an RPC PV. Any field left unset here may be
-// supplied at call time by the pvxcall argument structure; if neither the
-// config default nor the call argument is present, a sensible zero/empty is
-// used. See docs/rpc-forwarding.md.
-struct RpcConfig {
-  RpcMethod method = RpcMethod::OnEvent;
-  // gRPC server "host:port". Empty -> falls back to the IOC-wide default
-  // (ServerConfig::rpcDefaultEndpoint).
-  std::string endpoint;
-
-  // Source (Average / OnEvent / OnEventTime)
-  std::optional<std::string> digitizer;
-  std::optional<std::string> subkey;
-
-  // OnEvent
-  std::optional<uint32_t> event;
-  std::optional<int64_t> deltaNs;
-
-  // OnEventTime / Window offsets
-  std::optional<int64_t> eventTimeNs;
-  std::optional<int64_t> startNs;
-  std::optional<int64_t> endNs;
-  std::optional<int64_t> lengthNs;
-
-  // Average window / per-entry mean
-  std::optional<bool> perEntryMean;
-
-  // Orbit
-  std::optional<std::string> machine;
-  std::optional<std::string> section;
-  std::optional<int32_t> startIndex;
-  std::optional<int32_t> endIndex;
-
-  // Slice (index-based) / Decimate
-  std::optional<int32_t> length;     // Slice: sample count
-  std::optional<int32_t> stride;     // Slice: sample stride
-  std::optional<int32_t> factor;     // Decimate: keep every Nth
-  std::optional<int32_t> maxPoints;  // Decimate: cap on returned points
+// A backend gRPC service to expose as RPC PVs. The IOC reflects the service at
+// startup and creates one RPC PV per method; it has NO compiled-in knowledge of
+// the service's methods or message types (see docs/rpc-forwarding.md). Each PV
+// is named  <server.namespace>:<UPPER_SNAKE(MethodName)><suffix>.
+struct RpcServiceConfig {
+  std::string endpoint;   // gRPC "host:port"
+  std::string service;    // fully-qualified, e.g. "bpm.query.v1.BpmQuery"
+  std::string suffix;     // appended to each derived PV name (e.g. "_RPC")
+  // Fixed request-field defaults applied (by proto field name / dotted path /
+  // unique leaf) before per-call pvxcall args. Fields that a given method's
+  // request doesn't have are ignored, so one map can serve every method.
+  std::map<std::string, std::string> defaults;
 };
 
 using TypedValue = std::variant<
@@ -166,9 +130,6 @@ struct PVConfig {
   AlarmConfig alarms;
   std::optional<LinearTransformConfig> transform;
   TypedValue initialValue;
-  // When set, this PV is an RPC-forwarding PV (no Redis read route required);
-  // a `pvxcall <name>` is forwarded to the BpmQuery gRPC server.
-  std::optional<RpcConfig> rpc;
 };
 
 struct ServerConfig {
@@ -178,9 +139,6 @@ struct ServerConfig {
   std::optional<unsigned short> tcpPort;
   std::optional<unsigned short> udpPort;
   bool autoBeacon = true;
-  // IOC-wide default gRPC endpoint ("host:port") used by RPC PVs that do not
-  // specify their own `rpc.endpoint`.
-  std::string rpcDefaultEndpoint;
 };
 
 struct RedisConfig {
@@ -213,6 +171,7 @@ struct AppConfig {
   AlarmStreamConfig alarms;
   ChannelFinderConfig channelFinder;
   std::vector<PVConfig> pvs;
+  std::vector<RpcServiceConfig> rpcServices;
 };
 
 AppConfig loadConfigFile(const std::string& path);
@@ -226,7 +185,6 @@ bool isArrayElementTypeSupported(PrimitiveType type);
 std::string toString(PrimitiveType type);
 std::string toString(Shape shape);
 std::string toString(DisplayForm form);
-std::string toString(RpcMethod method);
 
 bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);
 bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs);

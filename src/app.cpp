@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -238,17 +240,42 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
 using RpcMap = std::unordered_map<std::string, std::shared_ptr<RpcPV>>;
 
-// Build the RPC-forwarding PVs from config. Construction connects the gRPC
-// channel (lazy/insecure) and installs the onRPC handler.
+// Build RPC-forwarding PVs by reflecting each configured gRPC service and
+// creating one PV per method, named <namespace>:<UPPER_SNAKE(Method)><suffix>.
+// The IOC has no compiled-in knowledge of the methods or message schema.
 RpcMap buildRpcPVs(const AppConfig& config) {
   RpcMap rpcPVs;
-  for (const auto& pv : config.pvs) {
-    if (!pv.rpc) {
+  for (const auto& svc : config.rpcServices) {
+    auto bridge = std::make_shared<GrpcBridge>(svc.endpoint);
+
+    // The backend may not be up yet at IOC startup; retry reflection briefly.
+    std::vector<BridgeMethod> methods;
+    std::string lastErr;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+      try {
+        methods = bridge->discover(svc.service);
+        break;
+      } catch (const std::exception& e) {
+        lastErr = e.what();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+      }
+    }
+    if (methods.empty()) {
+      std::fprintf(stderr,
+                   "[redis-pvxs-ioc] rpc_service %s @ %s: reflection failed (%s); "
+                   "no RPC PVs created for it\n",
+                   svc.service.c_str(), svc.endpoint.c_str(), lastErr.c_str());
       continue;
     }
-    const auto name = fullPVName(config.server, pv);
-    const auto endpoint = resolveRpcEndpoint(config.server, *pv.rpc);
-    rpcPVs.emplace(name, std::make_shared<RpcPV>(name, *pv.rpc, endpoint));
+
+    for (const auto& m : methods) {
+      std::string leaf = methodToPvLeaf(m.method) + svc.suffix;
+      std::string name =
+          config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
+      rpcPVs.emplace(name, std::make_shared<RpcPV>(bridge, m, svc.defaults));
+      std::fprintf(stderr, "[redis-pvxs-ioc] rpc PV %s -> %s/%s\n",
+                   name.c_str(), m.service.c_str(), m.method.c_str());
+    }
   }
   return rpcPVs;
 }
@@ -392,9 +419,6 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
     RuntimeMap staged;
     try {
       for (const auto& pv : config.pvs) {
-        if (pv.rpc) {
-          continue;  // RPC PVs are installed separately (no Redis runtime)
-        }
         const auto name = fullPVName(config.server, pv);
         staged.emplace(name, makeRuntime(config.server, pv, newRedisBackends, newAlarmPublisher, generation));
       }
@@ -452,9 +476,6 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
   try {
     std::map<std::string, PVConfig> desired;
     for (const auto& pv : config.pvs) {
-      if (pv.rpc) {
-        continue;  // RPC PVs handled by the full-rebuild block below
-      }
       desired.emplace(fullPVName(config.server, pv), pv);
     }
 

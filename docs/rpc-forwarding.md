@@ -1,122 +1,93 @@
-# PVA RPC -> gRPC forwarding
+# Generic PVA RPC -> gRPC forwarding
 
-A PVA client runs `pvxcall <PVName> <args>`. The IOC receives the RPC on a
-`pvxs::server::SharedPV` (via `onRPC`), forwards it to the BpmQuery gRPC server,
-maps the gRPC reply back to a PVA normative type, and returns it.
+The IOC can act as a generic bridge between PVA `pvxcall` and any gRPC service.
+A client runs `pvxcall <PVName> <args>`; the IOC forwards it to one method of a
+backend gRPC service and maps the reply back into a PVA value.
 
-The gRPC contract is vendored at [`proto/bpm_query.proto`](../proto/bpm_query.proto)
-(copied from `orbit/proto/bpm_query.proto`). Service `bpm.query.v1.BpmQuery`
-with RPCs `Average`, `Orbit`, `OnEvent`, `OnEventTime`, `Slice`, `Decimate`.
+**The IOC has no compiled-in knowledge of any application service.** It learns a
+service's methods and message schema at runtime via gRPC **server reflection**,
+so the same IOC image works against any reflection-enabled backend — you only
+tell it *which service, at which endpoint*. The only proto compiled into the IOC
+is the standard gRPC reflection proto (`proto/reflection.proto`).
 
-## pvxs RPC mechanism used
+## How it works
 
-`pvxs::server::SharedPV::onRPC(std::function<void(SharedPV&,
-std::unique_ptr<ExecOp>&&, Value&&)>)`. The handler receives the client-supplied
-argument `Value` (for `pvxcall` this is an `NTURI`, whose `name=value` arguments
-land under a `query` sub-structure). It replies with `op->reply(value)` on
-success or `op->error(message)` on failure. This is the only RPC entry point the
-vendored pvxs exposes for a server-side `SharedPV`, and it fits the existing
-IOC, which already registers every PV as a `SharedPV` via `Server::addPV`.
+1. At startup, for each configured `rpc_services` entry, the IOC opens the
+   backend's `ServerReflection` service and fetches the `FileDescriptorProto`s
+   for the named service (and its dependencies), building a `DescriptorPool`.
+2. For each method it creates a PVA `SharedPV` named
+   `<server.namespace>:<UPPER_SNAKE(MethodName)><suffix>` with an `onRPC`
+   handler. (`Average` -> `AVERAGE`, `OnEventTime` -> `ON_EVENT_TIME`.)
+3. On a call, the handler builds the method's request as a protobuf
+   `DynamicMessage`, sets fields from the merged `{defaults + pvxcall args}` map,
+   makes a generic unary call (`grpc::GenericStub`), parses the reply into a
+   `DynamicMessage`, and converts it to a pvxs `Value` mirroring the reply.
+
+The backend must enable reflection (one line:
+`grpc::reflection::InitProtoReflectionServerBuilderPlugin()` + link
+`grpc++_reflection`). If the backend is down at IOC startup, reflection is
+retried for ~30 s before that service's PVs are skipped.
 
 ## Config schema
 
-An RPC PV is any `pvs[]` entry that has an `rpc:` block. It does **not** take
-`type`/`shape`/`read`/`write`/`confirm`/`transform`/`initial` (those are
-rejected) because it never touches Redis.
-
 ```yaml
 server:
-  instance: demo
-  # Optional IOC-wide default gRPC endpoint for RPC PVs without rpc.endpoint.
-  rpc_default_endpoint: bpm-query-server:50051
+  namespace: BI:BPM          # prefixes every derived PV name
 
-pvs:
-  - name: BI:ORBIT
-    rpc:
-      method: OnEvent          # Average|Orbit|OnEvent|OnEventTime|Slice|Decimate
-      endpoint: host:port      # optional; falls back to rpc_default_endpoint
-      # Optional fixed defaults for the method's fields. Any of these may be
-      # overridden at call time by a matching pvxcall argument.
-      digitizer: MTCA1-1       # Source.digitizer (all but Orbit)
-      subkey: BPM_H1_POS       # Source.subkey
-      event: 0xFF              # OnEvent.event (uint32)
-      delta_ns: 1000000000     # OnEvent.delta_ns (int64 ns)
-      event_time_ns: 0         # OnEventTime.event_time_ns
-      start_ns: 0              # window/offset (int64 ns)
-      end_ns: 0
-      length_ns: 0
-      per_entry_mean: false    # Average.per_entry_mean
-      machine: BOOSTER         # Orbit.machine
-      section: ""              # Orbit.section
-      start_index: 0           # Orbit/Slice.start_index (int32)
-      end_index: 0             # Orbit.end_index
-      length: 1024             # Slice.length (samples, int32)
-      stride: 1                # Slice.stride (int32)
-      factor: 10               # Decimate.factor (int32)
-      max_points: 1000         # Decimate.max_points (int32)
+rpc_services:
+  - endpoint: bpm-query-server:50051   # gRPC host:port
+    service: bpm.query.v1.BpmQuery     # fully-qualified service name (reflected)
+    suffix: _RPC                       # optional; appended to each PV name
+    defaults:                          # optional fixed request-field defaults
+      digitizer: MTCA1-1               #   applied before per-call args; a method
+      subkey: BPM_H1_POS               #   ignores fields it does not have, so one
+      length_ns: 1000000000            #   map can serve every method
+      event: 0xFF
 ```
 
-`Slice` and `Decimate` operate on the latest waveform of the source (the stream
-entry at/before `end_ns`, `0` = now): `Slice` returns samples
-`[start_index, start_index+length)` with `stride`; `Decimate` keeps every
-`factor`-th sample, capped at `max_points`.
+`pvs` and `rpc_services` are both optional individually, but at least one must be
+present. RPC services never touch Redis.
 
-Either `rpc.endpoint` or `server.rpc_default_endpoint` must be set.
+## Argument mapping
 
-## Argument resolution
+A request field is addressed by its proto field name. Because pvxcall args are
+flat `name=value` pairs, the handler resolves each name as:
+1. an exact top-level field, else
+2. a dotted path (`source.digitizer`), else
+3. a **unique** leaf field name anywhere in the request message.
 
-For each gRPC field the handler uses, in order:
-1. the matching `pvxcall` argument (looked up as `query.<name>`, or top-level
-   `<name>`), if the caller supplied it;
-2. the fixed default from the `rpc:` config block;
-3. a zero / empty fallback.
+So for `AverageRequest{ Source source; Window window; }`, you can pass
+`digitizer=MTCA1-1 subkey=BPM_H1_POS length_ns=...` (unique leaves) or the
+explicit `source.digitizer=... window.length_ns=...`. Values arrive as strings
+(pvxcall) and are converted to the field's type; integers use `strtoll` base 0,
+so `0xFF` works. Per-call args override `defaults`.
 
-Argument names match the proto field names: `digitizer`, `subkey`, `event`,
-`delta_ns`, `event_time_ns`, `start_ns`, `end_ns`, `length_ns`,
-`per_entry_mean`, `machine`, `section`, `start_index`, `end_index`, `length`,
-`stride`, `factor`, `max_points`. Numeric arguments are accepted either natively
-or as strings (`pvxcall` sends strings), parsed with `strtoll` (so `0xFF` hex
-works).
+## Reply mapping
 
-## Example invocations and reply shapes
+The reply pvxs `Value` mirrors the protobuf reply message generically:
+scalar -> scalar field, `repeated` scalar -> array field, singular message ->
+sub-struct (recursively). Field names are the proto field names. (Repeated
+*message* fields are not supported and raise an error.)
+
+This is generic, so the reply is a plain struct, not a hand-shaped normative type
+(`NTScalar`/`NTTable`) — if a normative shape matters, shape the **reply message**
+on the server. A non-OK gRPC status or transport failure becomes a PVA error
+(`op->error`), which `pvxcall` reports.
+
+## Example
 
 ```sh
-# OnEvent: window [t-delta, t] of a source, t resolved from TCLK event 0xFF
-pvxcall DEMO:BI:ORBIT event=255 delta_ns=1000000000
-
-# Average over an explicit length window
-pvxcall DEMO:BI:AVG length_ns=1000000000
-
-# Orbit table for a machine
-pvxcall DEMO:BI:ORBIT:TABLE machine=BOOSTER length_ns=1000000000
+pvxcall BI:BPM:AVERAGE_RPC digitizer=MTCA1-1 subkey=BPM_H1_POS length_ns=1000000000
+pvxcall BI:BPM:ORBIT_RPC   machine=BOOSTER
+pvxcall BI:BPM:SLICE_RPC   digitizer=MTCA1-1 subkey=BPM_H1_I_A start_index=0 length=16
 ```
-
-Reply mapping (the normative type is fixed per *method*, not per result size, so
-a PV's type is stable across calls):
-
-- `Average` -> **NTScalar** (`epics:nt/NTScalar:1.0`), `value` = the double
-  (`NaN` if the window held no data).
-- `OnEvent` / `OnEventTime` / `Slice` / `Decimate` -> **NTScalarArray** of
-  doubles, `value` = the array (even for a single element).
-  - All `QueryReply` types carry extra members `times_ns` (int64 array) and
-    `event_time_ns` (int64), plus `display.units` from the reply's `units`.
-- `Orbit` -> **NTTable** (`epics:nt/NTTable:1.0`) with scalar-typed columns
-  `h_name`, `h_orbit`, `h_intensity`, `v_name`, `v_orbit`, `v_intensity`.
-
-If the gRPC reply's `status.ok` is false, or the transport fails, the handler
-returns a PVA error (`op->error(...)`) and `pvxcall` reports it.
 
 ## Build / run requirements
 
-The IOC now links gRPC and protobuf. The `Dockerfile` builder stage installs
+The IOC links gRPC + protobuf. The `Dockerfile` builder installs
 `libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc`; the
-runtime stage installs `libgrpc++1.51t64 libprotobuf32t64`. CMake uses
-**module-mode** `find_package(Protobuf)` (Ubuntu 24.04 ships no
-`ProtobufConfig.cmake`) + `find_package(gRPC CONFIG)`, and invokes `protoc`
-directly (via `Protobuf_PROTOC_EXECUTABLE` + `gRPC::grpc_cpp_plugin`) to build
-`proto/bpm_query.proto` into a `bpm-query-proto` static lib that the core links
-against (same pattern as `orbit/CMakeLists.txt`).
-
-Locally (outside the container) you need the same dev packages plus the existing
-EPICS-base/pvxs bootstrap (see [../README.md](../README.md)) before
-`cmake -S . -B build && cmake --build build`.
+runtime installs `libgrpc++1.51t64 libprotobuf32t64`. CMake uses module-mode
+`find_package(Protobuf)` (Ubuntu ships no `ProtobufConfig.cmake`) +
+`find_package(gRPC CONFIG)` and invokes `protoc` directly on
+`proto/reflection.proto`. The generic dynamic call uses `grpc::GenericStub` +
+`google::protobuf::DynamicMessage` (no per-service generated stubs).

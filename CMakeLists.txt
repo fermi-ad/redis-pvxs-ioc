@@ -133,33 +133,33 @@ set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "Build yaml-cpp as a static library" F
 add_subdirectory(third_party/yaml-cpp)
 add_subdirectory(third_party/redis-adapter)
 
-# ---- Generated BpmQuery proto + gRPC stubs ---------------------------------
-set(BPM_QUERY_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/bpm_query.proto")
-set(BPM_QUERY_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
-file(MAKE_DIRECTORY "${BPM_QUERY_GEN_DIR}")
+# ---- Generated gRPC server-reflection stubs --------------------------------
+# The IOC compiles in only the standard gRPC reflection proto; it discovers any
+# backend service's schema at runtime, so it carries no application proto.
+set(REFLECTION_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/reflection.proto")
+set(BRIDGE_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
+file(MAKE_DIRECTORY "${BRIDGE_GEN_DIR}")
 
-# Generate by invoking protoc directly (portable; does not depend on the
-# protobuf_generate() helper, which needs the Protobuf CONFIG package).
-set(BPM_QUERY_PB_CC   "${BPM_QUERY_GEN_DIR}/bpm_query.pb.cc")
-set(BPM_QUERY_PB_H    "${BPM_QUERY_GEN_DIR}/bpm_query.pb.h")
-set(BPM_QUERY_GRPC_CC "${BPM_QUERY_GEN_DIR}/bpm_query.grpc.pb.cc")
-set(BPM_QUERY_GRPC_H  "${BPM_QUERY_GEN_DIR}/bpm_query.grpc.pb.h")
+set(REFLECTION_PB_CC   "${BRIDGE_GEN_DIR}/reflection.pb.cc")
+set(REFLECTION_PB_H    "${BRIDGE_GEN_DIR}/reflection.pb.h")
+set(REFLECTION_GRPC_CC "${BRIDGE_GEN_DIR}/reflection.grpc.pb.cc")
+set(REFLECTION_GRPC_H  "${BRIDGE_GEN_DIR}/reflection.grpc.pb.h")
 
 add_custom_command(
-  OUTPUT "${BPM_QUERY_PB_CC}" "${BPM_QUERY_PB_H}"
-         "${BPM_QUERY_GRPC_CC}" "${BPM_QUERY_GRPC_H}"
+  OUTPUT "${REFLECTION_PB_CC}" "${REFLECTION_PB_H}"
+         "${REFLECTION_GRPC_CC}" "${REFLECTION_GRPC_H}"
   COMMAND ${Protobuf_PROTOC_EXECUTABLE}
           --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
-          --cpp_out=${BPM_QUERY_GEN_DIR}
-          --grpc_out=${BPM_QUERY_GEN_DIR}
+          --cpp_out=${BRIDGE_GEN_DIR}
+          --grpc_out=${BRIDGE_GEN_DIR}
           --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
-          ${BPM_QUERY_PROTO}
-  DEPENDS "${BPM_QUERY_PROTO}"
-  COMMENT "Generating bpm_query protobuf + gRPC C++")
+          ${REFLECTION_PROTO}
+  DEPENDS "${REFLECTION_PROTO}"
+  COMMENT "Generating gRPC reflection protobuf + gRPC C++")
 
-add_library(bpm-query-proto STATIC "${BPM_QUERY_PB_CC}" "${BPM_QUERY_GRPC_CC}")
+add_library(bpm-query-proto STATIC "${REFLECTION_PB_CC}" "${REFLECTION_GRPC_CC}")
 target_link_libraries(bpm-query-proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
-target_include_directories(bpm-query-proto PUBLIC "${BPM_QUERY_GEN_DIR}" ${Protobuf_INCLUDE_DIRS})
+target_include_directories(bpm-query-proto PUBLIC "${BRIDGE_GEN_DIR}" ${Protobuf_INCLUDE_DIRS})
 set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(redis-pvxs-ioc-core STATIC
@@ -168,7 +168,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
-  src/grpc_query_client.cpp
+  src/grpc_bridge.cpp
   src/rpc_pv.cpp
   src/app.cpp
   ${REDIS_ADAPTER_SOURCES}

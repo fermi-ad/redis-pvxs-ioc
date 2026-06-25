@@ -2,8 +2,6 @@ server:
   instance: demo
   namespace: DEMO
   auto_beacon: true
-  # Default gRPC "BPM query server" endpoint for RPC PVs that omit rpc.endpoint.
-  rpc_default_endpoint: bpm-query-server:50051
 
 redis:
   base_key: demo
@@ -103,28 +101,17 @@ pvs:
         high: 10
     initial: [0.0, 1.5, 3.0, 1.5, 0.0]
 
-  # ---- RPC-forwarding PVs (pvxcall -> BpmQuery gRPC server) ----------------
-  # `pvxcall DEMO:BI:ORBIT event=255 delta_ns=1000000000` forwards to the
-  # gRPC server's OnEvent RPC. Call-time args override the fixed defaults below.
-  - name: BI:ORBIT
-    rpc:
-      method: OnEvent
-      # endpoint omitted -> uses server.rpc_default_endpoint
+# ---- RPC-forwarding services (pvxcall -> backend gRPC, via reflection) ------
+# The IOC reflects each service at startup and creates one PV per method, named
+# <server.namespace>:<UPPER_SNAKE(Method)><suffix>. It has no compiled-in
+# knowledge of the methods/messages. Call-time pvxcall args override `defaults`.
+# e.g.  pvxcall DEMO:AVERAGE_RPC digitizer=MTCA1-1 subkey=BPM_H1_POS length_ns=1000000000
+rpc_services:
+  - endpoint: bpm-query-server:50051
+    service: bpm.query.v1.BpmQuery
+    suffix: _RPC
+    defaults:
       digitizer: MTCA1-1
       subkey: BPM_H1_POS
+      length_ns: 1000000000
       event: 0xFF
-      delta_ns: 1000000000
-
-  - name: BI:AVG
-    rpc:
-      method: Average
-      endpoint: bpm-query-server:50051
-      digitizer: MTCA1-1
-      subkey: BPM_H1_POS
-      length_ns: 1000000000
-
-  - name: BI:ORBIT:TABLE
-    rpc:
-      method: Orbit
-      machine: BOOSTER
-      length_ns: 1000000000

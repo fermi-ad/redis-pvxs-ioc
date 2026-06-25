@@ -147,13 +147,15 @@ pvxs::Value buildQueryReply(const QueryResult& result, bool scalar) {
 // OrbitReply -> NTTable with string name columns + double orbit/intensity
 // columns for both planes.
 pvxs::Value buildOrbitReply(const OrbitResult& result) {
+  // NTTable columns take the SCALAR element TypeCode; each column is implicitly
+  // an array of that type (passing StringA/Float64A is rejected at runtime).
   auto value = pvxs::nt::NTTable{}
-                   .add_column(pvxs::TypeCode::StringA, "h_name", "H BPM")
-                   .add_column(pvxs::TypeCode::Float64A, "h_orbit", "H Orbit")
-                   .add_column(pvxs::TypeCode::Float64A, "h_intensity", "H Intensity")
-                   .add_column(pvxs::TypeCode::StringA, "v_name", "V BPM")
-                   .add_column(pvxs::TypeCode::Float64A, "v_orbit", "V Orbit")
-                   .add_column(pvxs::TypeCode::Float64A, "v_intensity", "V Intensity")
+                   .add_column(pvxs::TypeCode::String, "h_name", "H BPM")
+                   .add_column(pvxs::TypeCode::Float64, "h_orbit", "H Orbit")
+                   .add_column(pvxs::TypeCode::Float64, "h_intensity", "H Intensity")
+                   .add_column(pvxs::TypeCode::String, "v_name", "V BPM")
+                   .add_column(pvxs::TypeCode::Float64, "v_orbit", "V Orbit")
+                   .add_column(pvxs::TypeCode::Float64, "v_intensity", "V Intensity")
                    .create();
 
   const auto strCol = [&](const char* col, const std::vector<std::string>& src) {

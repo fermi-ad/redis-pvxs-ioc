@@ -29,8 +29,10 @@ find_package(CURL REQUIRED)
 # ---- gRPC + protobuf for the RPC->gRPC forwarding feature ------------------
 # Provided by the dev packages installed in the Dockerfile
 # (libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc) or a
-# source build. Same CONFIG-package pattern as orbit/CMakeLists.txt.
-find_package(Protobuf CONFIG REQUIRED)
+# source build. Protobuf in MODULE mode (Ubuntu ships no ProtobufConfig.cmake;
+# CMake's FindProtobuf provides Protobuf_PROTOC_EXECUTABLE + protobuf::libprotobuf).
+# gRPC ships gRPCConfig.cmake (gRPC::grpc++ + gRPC::grpc_cpp_plugin).
+find_package(Protobuf REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 
 set(
@@ -136,24 +138,29 @@ set(BPM_QUERY_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/bpm_query.proto")
 set(BPM_QUERY_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
 file(MAKE_DIRECTORY "${BPM_QUERY_GEN_DIR}")
 
-add_library(bpm-query-proto STATIC "${BPM_QUERY_PROTO}")
+# Generate by invoking protoc directly (portable; does not depend on the
+# protobuf_generate() helper, which needs the Protobuf CONFIG package).
+set(BPM_QUERY_PB_CC   "${BPM_QUERY_GEN_DIR}/bpm_query.pb.cc")
+set(BPM_QUERY_PB_H    "${BPM_QUERY_GEN_DIR}/bpm_query.pb.h")
+set(BPM_QUERY_GRPC_CC "${BPM_QUERY_GEN_DIR}/bpm_query.grpc.pb.cc")
+set(BPM_QUERY_GRPC_H  "${BPM_QUERY_GEN_DIR}/bpm_query.grpc.pb.h")
+
+add_custom_command(
+  OUTPUT "${BPM_QUERY_PB_CC}" "${BPM_QUERY_PB_H}"
+         "${BPM_QUERY_GRPC_CC}" "${BPM_QUERY_GRPC_H}"
+  COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+          --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+          --cpp_out=${BPM_QUERY_GEN_DIR}
+          --grpc_out=${BPM_QUERY_GEN_DIR}
+          --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
+          ${BPM_QUERY_PROTO}
+  DEPENDS "${BPM_QUERY_PROTO}"
+  COMMENT "Generating bpm_query protobuf + gRPC C++")
+
+add_library(bpm-query-proto STATIC "${BPM_QUERY_PB_CC}" "${BPM_QUERY_GRPC_CC}")
 target_link_libraries(bpm-query-proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
-target_include_directories(bpm-query-proto PUBLIC "${BPM_QUERY_GEN_DIR}")
+target_include_directories(bpm-query-proto PUBLIC "${BPM_QUERY_GEN_DIR}" ${Protobuf_INCLUDE_DIRS})
 set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-protobuf_generate(
-  TARGET bpm-query-proto
-  LANGUAGE cpp
-  PROTOC_OUT_DIR "${BPM_QUERY_GEN_DIR}"
-  IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/proto")
-
-protobuf_generate(
-  TARGET bpm-query-proto
-  LANGUAGE grpc
-  GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
-  PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
-  PROTOC_OUT_DIR "${BPM_QUERY_GEN_DIR}"
-  IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/proto")
 
 add_library(redis-pvxs-ioc-core STATIC
   src/config.cpp

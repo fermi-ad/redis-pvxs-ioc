@@ -6,7 +6,7 @@ maps the gRPC reply back to a PVA normative type, and returns it.
 
 The gRPC contract is vendored at [`proto/bpm_query.proto`](../proto/bpm_query.proto)
 (copied from `orbit/proto/bpm_query.proto`). Service `bpm.query.v1.BpmQuery`
-with RPCs `Average`, `Orbit`, `OnEvent`, `OnEventTime`.
+with RPCs `Average`, `Orbit`, `OnEvent`, `OnEventTime`, `Slice`, `Decimate`.
 
 ## pvxs RPC mechanism used
 
@@ -33,24 +33,33 @@ server:
 pvs:
   - name: BI:ORBIT
     rpc:
-      method: OnEvent          # Average | Orbit | OnEvent | OnEventTime
+      method: OnEvent          # Average|Orbit|OnEvent|OnEventTime|Slice|Decimate
       endpoint: host:port      # optional; falls back to rpc_default_endpoint
       # Optional fixed defaults for the method's fields. Any of these may be
       # overridden at call time by a matching pvxcall argument.
-      digitizer: MTCA1-1       # Source.digitizer (Average/OnEvent/OnEventTime)
+      digitizer: MTCA1-1       # Source.digitizer (all but Orbit)
       subkey: BPM_H1_POS       # Source.subkey
       event: 0xFF              # OnEvent.event (uint32)
       delta_ns: 1000000000     # OnEvent.delta_ns (int64 ns)
       event_time_ns: 0         # OnEventTime.event_time_ns
-      start_ns: 0              # window/offset
+      start_ns: 0              # window/offset (int64 ns)
       end_ns: 0
       length_ns: 0
       per_entry_mean: false    # Average.per_entry_mean
       machine: BOOSTER         # Orbit.machine
       section: ""              # Orbit.section
-      start_index: 0           # Orbit.start_index (int32)
+      start_index: 0           # Orbit/Slice.start_index (int32)
       end_index: 0             # Orbit.end_index
+      length: 1024             # Slice.length (samples, int32)
+      stride: 1                # Slice.stride (int32)
+      factor: 10               # Decimate.factor (int32)
+      max_points: 1000         # Decimate.max_points (int32)
 ```
+
+`Slice` and `Decimate` operate on the latest waveform of the source (the stream
+entry at/before `end_ns`, `0` = now): `Slice` returns samples
+`[start_index, start_index+length)` with `stride`; `Decimate` keeps every
+`factor`-th sample, capped at `max_points`.
 
 Either `rpc.endpoint` or `server.rpc_default_endpoint` must be set.
 
@@ -64,9 +73,10 @@ For each gRPC field the handler uses, in order:
 
 Argument names match the proto field names: `digitizer`, `subkey`, `event`,
 `delta_ns`, `event_time_ns`, `start_ns`, `end_ns`, `length_ns`,
-`per_entry_mean`, `machine`, `section`, `start_index`, `end_index`. Numeric
-arguments are accepted either natively or as strings (`pvxcall` sends strings),
-parsed with `strtoll` (so `0xFF` hex works).
+`per_entry_mean`, `machine`, `section`, `start_index`, `end_index`, `length`,
+`stride`, `factor`, `max_points`. Numeric arguments are accepted either natively
+or as strings (`pvxcall` sends strings), parsed with `strtoll` (so `0xFF` hex
+works).
 
 ## Example invocations and reply shapes
 
@@ -81,14 +91,16 @@ pvxcall DEMO:BI:AVG length_ns=1000000000
 pvxcall DEMO:BI:ORBIT:TABLE machine=BOOSTER length_ns=1000000000
 ```
 
-Reply mapping:
+Reply mapping (the normative type is fixed per *method*, not per result size, so
+a PV's type is stable across calls):
 
-- `QueryReply` (Average / OnEvent / OnEventTime) ->
-  - 1 value: **NTScalar** (`epics:nt/NTScalar:1.0`), `value` = the double.
-  - otherwise: **NTScalarArray** of doubles, `value` = the array.
-  - Both carry extra members `times_ns` (int64 array) and `event_time_ns`
-    (int64), plus `display.units` from the reply's `units`.
-- `OrbitReply` (Orbit) -> **NTTable** (`epics:nt/NTTable:1.0`) with columns
+- `Average` -> **NTScalar** (`epics:nt/NTScalar:1.0`), `value` = the double
+  (`NaN` if the window held no data).
+- `OnEvent` / `OnEventTime` / `Slice` / `Decimate` -> **NTScalarArray** of
+  doubles, `value` = the array (even for a single element).
+  - All `QueryReply` types carry extra members `times_ns` (int64 array) and
+    `event_time_ns` (int64), plus `display.units` from the reply's `units`.
+- `Orbit` -> **NTTable** (`epics:nt/NTTable:1.0`) with scalar-typed columns
   `h_name`, `h_orbit`, `h_intensity`, `v_name`, `v_orbit`, `v_intensity`.
 
 If the gRPC reply's `status.ok` is false, or the transport fails, the handler
@@ -99,9 +111,11 @@ returns a PVA error (`op->error(...)`) and `pvxcall` reports it.
 The IOC now links gRPC and protobuf. The `Dockerfile` builder stage installs
 `libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc`; the
 runtime stage installs `libgrpc++1.51t64 libprotobuf32t64`. CMake uses
-`find_package(Protobuf CONFIG)` + `find_package(gRPC CONFIG)` and
-`protobuf_generate` to build `proto/bpm_query.proto` into a `bpm-query-proto`
-static lib that the core links against (same pattern as `orbit/CMakeLists.txt`).
+**module-mode** `find_package(Protobuf)` (Ubuntu 24.04 ships no
+`ProtobufConfig.cmake`) + `find_package(gRPC CONFIG)`, and invokes `protoc`
+directly (via `Protobuf_PROTOC_EXECUTABLE` + `gRPC::grpc_cpp_plugin`) to build
+`proto/bpm_query.proto` into a `bpm-query-proto` static lib that the core links
+against (same pattern as `orbit/CMakeLists.txt`).
 
 Locally (outside the container) you need the same dev packages plus the existing
 EPICS-base/pvxs bootstrap (see [../README.md](../README.md)) before

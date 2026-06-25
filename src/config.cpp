@@ -388,7 +388,11 @@ RpcMethod parseRpcMethod(const YAML::Node& node, const std::string& path) {
   if (method == "orbit") return RpcMethod::Orbit;
   if (method == "onevent") return RpcMethod::OnEvent;
   if (method == "oneventtime") return RpcMethod::OnEventTime;
-  fail(path, "unsupported rpc method '" + method + "' (Average|Orbit|OnEvent|OnEventTime)");
+  if (method == "slice") return RpcMethod::Slice;
+  if (method == "decimate") return RpcMethod::Decimate;
+  fail(path,
+       "unsupported rpc method '" + method +
+           "' (Average|Orbit|OnEvent|OnEventTime|Slice|Decimate)");
 }
 
 RpcConfig parseRpcConfig(const YAML::Node& node, const std::string& path) {
@@ -414,6 +418,10 @@ RpcConfig parseRpcConfig(const YAML::Node& node, const std::string& path) {
   if (node["section"]) rpc.section = parseString(node["section"], path + ".section");
   if (node["start_index"]) rpc.startIndex = parseNumeric<int32_t>(node["start_index"], path + ".start_index");
   if (node["end_index"]) rpc.endIndex = parseNumeric<int32_t>(node["end_index"], path + ".end_index");
+  if (node["length"]) rpc.length = parseNumeric<int32_t>(node["length"], path + ".length");
+  if (node["stride"]) rpc.stride = parseNumeric<int32_t>(node["stride"], path + ".stride");
+  if (node["factor"]) rpc.factor = parseNumeric<int32_t>(node["factor"], path + ".factor");
+  if (node["max_points"]) rpc.maxPoints = parseNumeric<int32_t>(node["max_points"], path + ".max_points");
   return rpc;
 }
 
@@ -708,6 +716,8 @@ std::string toString(const RpcMethod method) {
   case RpcMethod::Orbit: return "Orbit";
   case RpcMethod::OnEvent: return "OnEvent";
   case RpcMethod::OnEventTime: return "OnEventTime";
+  case RpcMethod::Slice: return "Slice";
+  case RpcMethod::Decimate: return "Decimate";
   }
   return "unknown";
 }

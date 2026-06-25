@@ -86,6 +86,8 @@ enum class RpcMethod {
   Orbit,
   OnEvent,
   OnEventTime,
+  Slice,
+  Decimate,
 };
 
 // Optional fixed defaults for an RPC PV. Any field left unset here may be
@@ -120,6 +122,12 @@ struct RpcConfig {
   std::optional<std::string> section;
   std::optional<int32_t> startIndex;
   std::optional<int32_t> endIndex;
+
+  // Slice (index-based) / Decimate
+  std::optional<int32_t> length;     // Slice: sample count
+  std::optional<int32_t> stride;     // Slice: sample stride
+  std::optional<int32_t> factor;     // Decimate: keep every Nth
+  std::optional<int32_t> maxPoints;  // Decimate: cap on returned points
 };
 
 using TypedValue = std::variant<

@@ -250,6 +250,35 @@ RpcPV::RpcPV(std::string fullName, const RpcConfig& rpc, std::string endpoint)
         op->reply(buildOrbitReply(result));
         return;
       }
+      case RpcMethod::Slice: {
+        SliceArgs args;
+        args.source = buildSource(request, config);
+        args.endNs = pickInt(argInt<int64_t>(request, "end_ns"), config.endNs);
+        args.startIndex = pickInt<int32_t>(argInt<int32_t>(request, "start_index"), config.startIndex);
+        args.length = pickInt<int32_t>(argInt<int32_t>(request, "length"), config.length);
+        args.stride = pickInt<int32_t>(argInt<int32_t>(request, "stride"), config.stride);
+        const auto result = client->slice(args);
+        if (!result.status.ok) {
+          op->error("Slice failed: " + result.status.message);
+          return;
+        }
+        op->reply(buildQueryReply(result));
+        return;
+      }
+      case RpcMethod::Decimate: {
+        DecimateArgs args;
+        args.source = buildSource(request, config);
+        args.endNs = pickInt(argInt<int64_t>(request, "end_ns"), config.endNs);
+        args.factor = pickInt<int32_t>(argInt<int32_t>(request, "factor"), config.factor);
+        args.maxPoints = pickInt<int32_t>(argInt<int32_t>(request, "max_points"), config.maxPoints);
+        const auto result = client->decimate(args);
+        if (!result.status.ok) {
+          op->error("Decimate failed: " + result.status.message);
+          return;
+        }
+        op->reply(buildQueryReply(result));
+        return;
+      }
       }
       op->error("unsupported RPC method");
     } catch (const std::exception& ex) {

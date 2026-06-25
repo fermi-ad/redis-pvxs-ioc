@@ -21,6 +21,15 @@ service BpmQuery {
   // Return the window [event_time_ns + start_ns,
   //                     event_time_ns + start_ns + length_ns] of `source`.
   rpc OnEventTime(OnEventTimeRequest) returns (QueryReply);
+
+  // Return a contiguous slice of the latest waveform of `source` (the entry
+  // at/before window.end_ns; 0 = now): samples [start_index, start_index+length)
+  // with the given stride.
+  rpc Slice(SliceRequest) returns (QueryReply);
+
+  // Downsample the latest waveform of `source` (entry at/before window.end_ns;
+  // 0 = now): keep every `factor`-th sample, optionally capped at max_points.
+  rpc Decimate(DecimateRequest) returns (QueryReply);
 }
 
 // A Redis stream address: digitizer name + subkey.
@@ -54,6 +63,21 @@ message OnEventTimeRequest {
   int64 event_time_ns = 2;
   int64 start_ns = 3;       // offset from event_time
   int64 length_ns = 4;
+}
+
+message SliceRequest {
+  Source source = 1;
+  Window window = 2;        // selects the entry: latest at/before window.end_ns
+  int32 start_index = 3;    // first sample index within the waveform
+  int32 length = 4;         // sample count (0 = to end of waveform)
+  int32 stride = 5;         // sample stride within the slice (0 or 1 = every sample)
+}
+
+message DecimateRequest {
+  Source source = 1;
+  Window window = 2;        // selects the entry: latest at/before window.end_ns
+  int32 factor = 3;         // keep every factor-th sample (<=1 means no decimation)
+  int32 max_points = 4;     // cap on returned points (0 = no cap)
 }
 
 message OrbitRequest {

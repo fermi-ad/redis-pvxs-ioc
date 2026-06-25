@@ -104,6 +104,39 @@ QueryResult GrpcQueryClient::onEventTime(const OnEventTimeArgs& args) {
   return toResult(reply);
 }
 
+QueryResult GrpcQueryClient::slice(const SliceArgs& args) {
+  bq::SliceRequest request;
+  fillSource(request.mutable_source(), args.source);
+  fillWindow(request.mutable_window(), 0, args.endNs, 0);
+  request.set_start_index(args.startIndex);
+  request.set_length(args.length);
+  request.set_stride(args.stride);
+
+  bq::QueryReply reply;
+  grpc::ClientContext context;
+  const auto status = impl_->stub->Slice(&context, request, &reply);
+  if (!status.ok()) {
+    return transportError(status);
+  }
+  return toResult(reply);
+}
+
+QueryResult GrpcQueryClient::decimate(const DecimateArgs& args) {
+  bq::DecimateRequest request;
+  fillSource(request.mutable_source(), args.source);
+  fillWindow(request.mutable_window(), 0, args.endNs, 0);
+  request.set_factor(args.factor);
+  request.set_max_points(args.maxPoints);
+
+  bq::QueryReply reply;
+  grpc::ClientContext context;
+  const auto status = impl_->stub->Decimate(&context, request, &reply);
+  if (!status.ok()) {
+    return transportError(status);
+  }
+  return toResult(reply);
+}
+
 OrbitResult GrpcQueryClient::orbit(const OrbitArgs& args) {
   bq::OrbitRequest request;
   request.set_machine(args.machine);

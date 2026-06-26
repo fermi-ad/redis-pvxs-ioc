@@ -56,6 +56,7 @@ The main runtime serves `NTScalar` and `NTScalarArray` PVs with the Phoebus-faci
 - scalar alarm evaluation with `epics-alarm-push`-compatible Redis alarm-stream publishing
 - linear transforms for floating-point PVs and arrays
 - manual hot reload via `SIGHUP` and admin PVs
+- always-on read-only `<server.instance>:version` PV with the running release version
 - standard EPICS/PVA network defaults at container startup, with environment overrides
 - one-shot ChannelFinder dry-run/publish tooling for Redis PV definitions
 

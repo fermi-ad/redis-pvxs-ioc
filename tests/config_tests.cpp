@@ -187,6 +187,21 @@ pvs:
       key: rb
 )YAML";
 
+const char* const kReservedVersionPvName = R"YAML(
+server:
+  instance: test
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: test:version
+    type: string
+    shape: scalar
+    read:
+      key: version
+)YAML";
+
 }  // namespace
 
 int main() {
@@ -201,6 +216,7 @@ int main() {
   assert(legacy.pvs[0].confirm == std::nullopt);
   assert(legacy.pvs[0].transform.has_value());
   assert(legacy.pvs[1].shape == Shape::Array);
+  assert(versionPVName(legacy.server) == "test:version");
 
   const auto multi = loadConfigString(kMultiBackendConfig);
   assert(multi.server.instance == "multi");
@@ -226,6 +242,7 @@ int main() {
   assert(!throwsConfig(kDuplicateReadersDifferentBackends));
   assert(throwsConfig(kUnknownBackend));
   assert(throwsConfig(kMultiBackendMissingAlarmBackend));
+  assert(throwsConfig(kReservedVersionPvName));
 
   std::cout << "config tests passed\n";
   return 0;

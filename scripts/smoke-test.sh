@@ -46,13 +46,13 @@ IOC_CONTAINER="$(docker compose ps -q ioc)"
 REDIS_CONTAINER="$(docker compose ps -q redis)"
 
 for _ in {1..30}; do
-  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -q 'value string = "connected"'; then
+  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -Eq 'value string = "[0-9]+/[0-9]+ connected'; then
     break
   fi
   sleep 2
 done
 
-run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep 'value string = "connected"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -E 'value string = "[0-9]+/[0-9]+ connected'
 
 if [ "$CHECK_VERSION_PV" -eq 1 ]; then
   run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget demo:version" | grep "value string = \"redis-pvxs-ioc v${EXPECTED_VERSION}\""

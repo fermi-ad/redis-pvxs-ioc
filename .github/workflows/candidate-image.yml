@@ -57,6 +57,41 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
 
+      - name: Report registry secret metadata
+        env:
+          ADREGISTRY_INST_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          ADREGISTRY_INST_SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        run: |
+          set -euo pipefail
+
+          sha256_fingerprint() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum | awk '{print $1}'
+            else
+              shasum -a 256 | awk '{print $1}'
+            fi
+          }
+
+          report_secret() {
+            name="$1"
+            value="$2"
+
+            if [ -z "${value}" ]; then
+              echo "${name}: empty or unset"
+              return
+            fi
+
+            length_bytes="$(LC_ALL=C printf '%s' "${value}" | wc -c | tr -d ' ')"
+            fingerprint="$(printf '%s' "${value}" | sha256_fingerprint)"
+
+            echo "${name}: set"
+            echo "${name} length bytes: ${length_bytes}"
+            echo "${name} sha256: ${fingerprint}"
+          }
+
+          report_secret ADREGISTRY_INST_USERNAME "${ADREGISTRY_INST_USERNAME}"
+          report_secret ADREGISTRY_INST_SECRET "${ADREGISTRY_INST_SECRET}"
+
       - name: Registry login
         run: printf '%s' "${{ secrets.ADREGISTRY_INST_SECRET }}" | docker login adregistry.fnal.gov --username "${{ secrets.ADREGISTRY_INST_USERNAME }}" --password-stdin
 

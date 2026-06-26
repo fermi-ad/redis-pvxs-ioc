@@ -103,7 +103,7 @@ services:
       retries: 15
 
   redis-pvxs-ioc:
-    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.5.0@sha256:29555f32863f103c7d6e636970cbf1a053f682e7f95319f9af7a85414b89a674
+    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.5.1@sha256:6c473e996d0091994868ac00f63b1b80f5b4ede067165c3a66182ef5dd5efc69
     networks:
       - controls
     depends_on:

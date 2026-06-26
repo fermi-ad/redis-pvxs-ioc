@@ -175,4 +175,5 @@ Full example: [`../demo/config.yaml`](../demo/config.yaml).
 3. Update your project compose file.
 4. Run `docker compose pull`.
 5. Run `docker compose up -d`.
-6. Validate `SYS:<instance>:backend:health` and representative PVs.
+6. Validate `SYS:<instance>:version`, `SYS:<instance>:revision`,
+   `SYS:<instance>:backend:health`, and representative PVs.

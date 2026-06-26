@@ -48,11 +48,22 @@ void setAdminScalar(pvxs::server::SharedPV& pv, const T& input) {
   pv.post(value);
 }
 
+void openStringPV(pvxs::server::SharedPV& pv,
+                  const std::string& scalar,
+                  const std::string& description) {
+  auto value = makeAdminValue(pvxs::TypeCode::String, description);
+  value["value"] = scalar;
+  pv.open(value);
+}
+
 class AdminNamespace {
 public:
   explicit AdminNamespace(const ServerConfig& serverConfig)
       : reloadCommand_(pvxs::server::SharedPV::buildMailbox()),
         version_(pvxs::server::SharedPV::buildReadonly()),
+        revision_(pvxs::server::SharedPV::buildReadonly()),
+        sysVersion_(pvxs::server::SharedPV::buildReadonly()),
+        sysRevision_(pvxs::server::SharedPV::buildReadonly()),
         generation_(pvxs::server::SharedPV::buildReadonly()),
         lastStatus_(pvxs::server::SharedPV::buildReadonly()),
         lastError_(pvxs::server::SharedPV::buildReadonly()),
@@ -60,6 +71,9 @@ public:
         backendHealth_(pvxs::server::SharedPV::buildReadonly()),
         reloadName_(adminPVName(serverConfig, "config:reload")),
         versionName_(versionPVName(serverConfig)),
+        revisionName_(revisionPVName(serverConfig)),
+        sysVersionName_(adminPVName(serverConfig, "version")),
+        sysRevisionName_(adminPVName(serverConfig, "revision")),
         generationName_(adminPVName(serverConfig, "config:generation")),
         lastStatusName_(adminPVName(serverConfig, "config:lastStatus")),
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
@@ -79,9 +93,12 @@ public:
     });
     reloadCommand_.open(reloadValue);
 
-    auto versionValue = makeAdminValue(pvxs::TypeCode::String, "redis-pvxs-ioc version");
-    versionValue["value"] = std::string("redis-pvxs-ioc v") + REDIS_PVXS_IOC_VERSION;
-    version_.open(versionValue);
+    const std::string version = std::string("redis-pvxs-ioc v") + REDIS_PVXS_IOC_VERSION;
+    const std::string revision = std::string("redis-pvxs-ioc ") + REDIS_PVXS_IOC_GIT_REVISION;
+    openStringPV(version_, version, "redis-pvxs-ioc version");
+    openStringPV(sysVersion_, version, "redis-pvxs-ioc version");
+    openStringPV(revision_, revision, "redis-pvxs-ioc git revision");
+    openStringPV(sysRevision_, revision, "redis-pvxs-ioc git revision");
 
     auto generationValue = makeAdminValue(pvxs::TypeCode::Int64, "Current config generation");
     generationValue["value"] = static_cast<int64_t>(0);
@@ -107,6 +124,9 @@ public:
   void install(pvxs::server::Server& server) {
     server.addPV(reloadName_, reloadCommand_)
           .addPV(versionName_, version_)
+          .addPV(revisionName_, revision_)
+          .addPV(sysVersionName_, sysVersion_)
+          .addPV(sysRevisionName_, sysRevision_)
           .addPV(generationName_, generation_)
           .addPV(lastStatusName_, lastStatus_)
           .addPV(lastErrorName_, lastError_)
@@ -117,6 +137,9 @@ public:
   void remove(pvxs::server::Server& server) {
     server.removePV(reloadName_)
           .removePV(versionName_)
+          .removePV(revisionName_)
+          .removePV(sysVersionName_)
+          .removePV(sysRevisionName_)
           .removePV(generationName_)
           .removePV(lastStatusName_)
           .removePV(lastErrorName_)
@@ -152,6 +175,9 @@ private:
   std::atomic<bool> reloadRequested_{false};
   pvxs::server::SharedPV reloadCommand_;
   pvxs::server::SharedPV version_;
+  pvxs::server::SharedPV revision_;
+  pvxs::server::SharedPV sysVersion_;
+  pvxs::server::SharedPV sysRevision_;
   pvxs::server::SharedPV generation_;
   pvxs::server::SharedPV lastStatus_;
   pvxs::server::SharedPV lastError_;
@@ -159,6 +185,9 @@ private:
   pvxs::server::SharedPV backendHealth_;
   std::string reloadName_;
   std::string versionName_;
+  std::string revisionName_;
+  std::string sysVersionName_;
+  std::string sysRevisionName_;
   std::string generationName_;
   std::string lastStatusName_;
   std::string lastErrorName_;

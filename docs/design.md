@@ -196,6 +196,9 @@ Redis is the first implementation of that abstraction.
 The server should expose its own operational PVs under a reserved namespace, for example:
 
 - `<instance>:version`
+- `<instance>:revision`
+- `SYS:<instance>:version`
+- `SYS:<instance>:revision`
 - `SYS:<instance>:config:reload`
 - `SYS:<instance>:config:generation`
 - `SYS:<instance>:config:lastStatus`

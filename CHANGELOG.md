@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- publish read-only main-runtime metadata aliases for the release version and git revision:
+  `<server.instance>:revision`, `SYS:<server.instance>:version`, and `SYS:<server.instance>:revision`
+
 ## v0.5.1 - 2026-06-26
 
 - publish an always-on read-only `<server.instance>:version` PVA string with the running `redis-pvxs-ioc` release version

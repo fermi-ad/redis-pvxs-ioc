@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.1 - 2026-06-26
+
+- publish an always-on read-only `<server.instance>:version` PVA string with the running `redis-pvxs-ioc` release version
+
 ## v0.5.0 - 2026-05-13
 
 - keep the legacy sidecar IOC alive in non-interactive Docker/Compose mode while preserving an interactive IOC shell for TTY-attached runs

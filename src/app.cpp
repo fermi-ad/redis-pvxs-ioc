@@ -19,6 +19,7 @@
 #include "redis_pvxs_ioc/config.h"
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/util.h"
+#include "redis_pvxs_ioc/version.h"
 
 namespace redis_pvxs_ioc {
 namespace {
@@ -51,12 +52,14 @@ class AdminNamespace {
 public:
   explicit AdminNamespace(const ServerConfig& serverConfig)
       : reloadCommand_(pvxs::server::SharedPV::buildMailbox()),
+        version_(pvxs::server::SharedPV::buildReadonly()),
         generation_(pvxs::server::SharedPV::buildReadonly()),
         lastStatus_(pvxs::server::SharedPV::buildReadonly()),
         lastError_(pvxs::server::SharedPV::buildReadonly()),
         pvCount_(pvxs::server::SharedPV::buildReadonly()),
         backendHealth_(pvxs::server::SharedPV::buildReadonly()),
         reloadName_(adminPVName(serverConfig, "config:reload")),
+        versionName_(versionPVName(serverConfig)),
         generationName_(adminPVName(serverConfig, "config:generation")),
         lastStatusName_(adminPVName(serverConfig, "config:lastStatus")),
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
@@ -75,6 +78,10 @@ public:
       op->reply();
     });
     reloadCommand_.open(reloadValue);
+
+    auto versionValue = makeAdminValue(pvxs::TypeCode::String, "redis-pvxs-ioc version");
+    versionValue["value"] = std::string("redis-pvxs-ioc v") + REDIS_PVXS_IOC_VERSION;
+    version_.open(versionValue);
 
     auto generationValue = makeAdminValue(pvxs::TypeCode::Int64, "Current config generation");
     generationValue["value"] = static_cast<int64_t>(0);
@@ -99,6 +106,7 @@ public:
 
   void install(pvxs::server::Server& server) {
     server.addPV(reloadName_, reloadCommand_)
+          .addPV(versionName_, version_)
           .addPV(generationName_, generation_)
           .addPV(lastStatusName_, lastStatus_)
           .addPV(lastErrorName_, lastError_)
@@ -108,6 +116,7 @@ public:
 
   void remove(pvxs::server::Server& server) {
     server.removePV(reloadName_)
+          .removePV(versionName_)
           .removePV(generationName_)
           .removePV(lastStatusName_)
           .removePV(lastErrorName_)
@@ -142,12 +151,14 @@ public:
 private:
   std::atomic<bool> reloadRequested_{false};
   pvxs::server::SharedPV reloadCommand_;
+  pvxs::server::SharedPV version_;
   pvxs::server::SharedPV generation_;
   pvxs::server::SharedPV lastStatus_;
   pvxs::server::SharedPV lastError_;
   pvxs::server::SharedPV pvCount_;
   pvxs::server::SharedPV backendHealth_;
   std::string reloadName_;
+  std::string versionName_;
   std::string generationName_;
   std::string lastStatusName_;
   std::string lastErrorName_;

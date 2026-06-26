@@ -530,6 +530,10 @@ AppConfig parseConfig(const YAML::Node& root) {
     if (!pvNames.insert(pv.name).second) {
       fail("root.pvs[" + std::to_string(index) + "].name", "duplicate PV name '" + pv.name + "'");
     }
+    if (fullPVName(config.server, pv) == versionPVName(config.server)) {
+      fail("root.pvs[" + std::to_string(index) + "].name",
+           "PV name conflicts with reserved version PV '" + versionPVName(config.server) + "'");
+    }
     if (!subscribedKeys.insert({pv.read.backend, pv.read.key}).second) {
       fail("root.pvs[" + std::to_string(index) + "].read.key",
            "duplicate subscribed key '" + pv.read.backend + ":" + pv.read.key + "'");
@@ -707,6 +711,10 @@ std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
 
 std::string adminPVName(const ServerConfig& server, const std::string& suffix) {
   return "SYS:" + server.instance + ":" + suffix;
+}
+
+std::string versionPVName(const ServerConfig& server) {
+  return server.instance + ":version";
 }
 
 }  // namespace redis_pvxs_ioc

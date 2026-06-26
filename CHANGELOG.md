@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.2 - 2026-06-26
 
 - publish read-only main-runtime metadata aliases for the release version and git revision:
   `<server.instance>:revision`, `SYS:<server.instance>:version`, and `SYS:<server.instance>:revision`

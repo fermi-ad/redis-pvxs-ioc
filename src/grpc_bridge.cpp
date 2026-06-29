@@ -1,5 +1,6 @@
 #include "redis_pvxs_ioc/grpc_bridge.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -19,6 +20,11 @@ namespace refl = grpc::reflection::v1alpha;
 
 namespace redis_pvxs_ioc {
 namespace {
+
+// Per-attempt deadlines so a stalled/broken backend cannot block startup, reload,
+// or a call thread indefinitely (reflection discovery and generic unary calls).
+constexpr auto kDiscoverTimeout = std::chrono::seconds(10);
+constexpr auto kCallTimeout = std::chrono::seconds(10);
 
 // ---- string -> proto field ----
 
@@ -238,6 +244,7 @@ GrpcBridge::~GrpcBridge() = default;
 
 std::vector<BridgeMethod> GrpcBridge::discover(const std::string& service) {
   grpc::ClientContext ctx;
+  ctx.set_deadline(std::chrono::system_clock::now() + kDiscoverTimeout);
   auto stream = impl_->reflStub->ServerReflectionInfo(&ctx);
 
   refl::ServerReflectionRequest req;
@@ -258,13 +265,17 @@ std::vector<BridgeMethod> GrpcBridge::discover(const std::string& service) {
   for (const auto& bytes : resp.file_descriptor_response().file_descriptor_proto()) {
     gpb::FileDescriptorProto fdp;
     if (!fdp.ParseFromString(bytes)) throw std::runtime_error("bad FileDescriptorProto");
-    sc.db->Add(fdp);
+    if (!sc.db->Add(fdp))
+      throw std::runtime_error("failed to add reflected descriptor " + fdp.name() +
+                               " for " + service);
   }
   stream->WritesDone();
   ctx.TryCancel();  // single round-trip; no more reads needed
 
   sc.pool = std::make_unique<gpb::DescriptorPool>(sc.db.get());
-  sc.factory = std::make_unique<gpb::DynamicMessageFactory>();
+  // Bind the factory to the same pool the descriptors were reflected into, so
+  // GetPrototype()/New() resolve nested and extension types from that pool.
+  sc.factory = std::make_unique<gpb::DynamicMessageFactory>(sc.pool.get());
   sc.service = sc.pool->FindServiceByName(service);
   if (!sc.service) throw std::runtime_error("service not found via reflection: " + service);
 
@@ -295,17 +306,29 @@ pvxs::Value GrpcBridge::call(const BridgeMethod& method,
   const std::string path = "/" + method.service + "/" + method.method;
   grpc::ByteBuffer reqBuf = toByteBuffer(*reqMsg);
   grpc::ClientContext ctx;
+  ctx.set_deadline(std::chrono::system_clock::now() + kCallTimeout);
   grpc::CompletionQueue cq;
   grpc::ByteBuffer repBuf;
   grpc::Status status;
 
+  void* const kFinishTag = reinterpret_cast<void*>(1);
   std::unique_ptr<grpc::GenericClientAsyncResponseReader> rpc(
       impl_->genericStub->PrepareUnaryCall(&ctx, path, reqBuf, &cq));
   rpc->StartCall();
-  rpc->Finish(&repBuf, &status, reinterpret_cast<void*>(1));
+  rpc->Finish(&repBuf, &status, kFinishTag);
+
+  // Wait for the single Finish completion, then shut the queue down and drain it
+  // so cq destructs cleanly. The deadline above guarantees Next() returns even if
+  // the backend stalls (the op then completes with DEADLINE_EXCEEDED).
   void* tag = nullptr;
   bool ok = false;
-  cq.Next(&tag, &ok);
+  const bool gotEvent = cq.Next(&tag, &ok);
+  cq.Shutdown();
+  while (cq.Next(&tag, &ok)) {}
+
+  if (!gotEvent || tag != kFinishTag || !ok)
+    throw std::runtime_error("gRPC " + method.method +
+                             " did not complete cleanly for " + endpoint_);
 
   if (!status.ok())
     throw std::runtime_error("gRPC " + method.method + " failed: " + status.error_message() +

@@ -194,5 +194,7 @@ bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv);
 std::string adminPVName(const ServerConfig& server, const std::string& suffix);
+std::string versionPVName(const ServerConfig& server);
+std::string revisionPVName(const ServerConfig& server);
 
 }  // namespace redis_pvxs_ioc

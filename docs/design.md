@@ -195,11 +195,15 @@ Redis is the first implementation of that abstraction.
 
 The server should expose its own operational PVs under a reserved namespace, for example:
 
-- `SYS:<instance>:config:version`
-- `SYS:<instance>:config:apply`
-- `SYS:<instance>:config:last_error`
-- `SYS:<instance>:backend:state`
-- `SYS:<instance>:stats:pv_count`
+- `<instance>:version`
+- `<instance>:revision`
+- `SYS:<instance>:version`
+- `SYS:<instance>:revision`
+- `SYS:<instance>:config:reload`
+- `SYS:<instance>:config:generation`
+- `SYS:<instance>:config:lastStatus`
+- `SYS:<instance>:backend:health`
+- `SYS:<instance>:stats:pvCount`
 - `SYS:<instance>:stats:update_rate`
 
 This keeps the product observable without needing an IOC shell.

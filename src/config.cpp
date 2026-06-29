@@ -549,6 +549,19 @@ AppConfig parseConfig(const YAML::Node& root) {
     if (!pvNames.insert(pv.name).second) {
       fail("root.pvs[" + std::to_string(index) + "].name", "duplicate PV name '" + pv.name + "'");
     }
+    const auto pvName = fullPVName(config.server, pv);
+    const std::vector<std::string> reservedNames{
+      versionPVName(config.server),
+      revisionPVName(config.server),
+      adminPVName(config.server, "version"),
+      adminPVName(config.server, "revision"),
+    };
+    for (const auto& reservedName : reservedNames) {
+      if (pvName == reservedName) {
+        fail("root.pvs[" + std::to_string(index) + "].name",
+             "PV name conflicts with reserved metadata PV '" + reservedName + "'");
+      }
+    }
     if (!subscribedKeys.insert({pv.read.backend, pv.read.key}).second) {
       fail("root.pvs[" + std::to_string(index) + "].read.key",
            "duplicate subscribed key '" + pv.read.backend + ":" + pv.read.key + "'");
@@ -745,6 +758,14 @@ std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
 
 std::string adminPVName(const ServerConfig& server, const std::string& suffix) {
   return "SYS:" + server.instance + ":" + suffix;
+}
+
+std::string versionPVName(const ServerConfig& server) {
+  return server.instance + ":version";
+}
+
+std::string revisionPVName(const ServerConfig& server) {
+  return server.instance + ":revision";
 }
 
 }  // namespace redis_pvxs_ioc

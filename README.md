@@ -102,6 +102,7 @@ The detailed product/roadmap state is tracked in [`docs/feature-state-roadmap.md
 - `read.backend`, `write.backend`, `confirm.backend`, and `alarms.backend` select which Redis backend each operation uses.
 - When multiple backends are configured, every PV route must resolve to an explicit backend alias.
 - When multiple backends are configured, set `alarms.backend` explicitly as well. The runtime does not choose a default alarm-stream backend when more than one backend is present.
+- Top-level `rpc_services` entries expose reflected gRPC service methods as RPC-forwarding PVs: `pvxcall <name>` is forwarded to the configured backend, and the reply is mapped to a generic PVA struct mirroring the protobuf message. See [`docs/rpc-forwarding.md`](docs/rpc-forwarding.md). These PVs require gRPC/protobuf at build time (`libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc`).
 
 ## Dependency bootstrap
 

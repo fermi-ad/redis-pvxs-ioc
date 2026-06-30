@@ -13,10 +13,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline-dev \
     perl \
     pkg-config \
+    # gRPC + protobuf for the RPC->gRPC forwarding feature (find_package CONFIG)
+    libgrpc++-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    protobuf-compiler-grpc \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/redis-pvxs-ioc
-COPY . .
+
+# Build the heavy third-party deps (EPICS base + pvxs) from the submodule tree
+# FIRST, so that editing the IOC sources (src/, include/, proto/, CMakeLists)
+# does not invalidate these layers. Only VERSION + third_party are needed here.
+COPY VERSION ./
+COPY third_party/ third_party/
 
 RUN VERSION_FROM_FILE="$(tr -d '\n' < VERSION)" && \
     if [ "${REDIS_PVXS_IOC_VERSION}" != "dev" ] && [ "${REDIS_PVXS_IOC_VERSION}" != "${VERSION_FROM_FILE}" ]; then \
@@ -33,6 +43,11 @@ RUN make -C third_party/epics-base configure.install src.install -j"$(nproc)" &&
 RUN printf 'EPICS_BASE=%s/third_party/epics-base\n' "$(pwd)" > third_party/pvxs/configure/RELEASE.local
 RUN make -C third_party/pvxs/bundle libevent
 RUN make -C third_party/pvxs configure.install setup.install src.install tools.install -j"$(nproc)"
+
+# Now the IOC sources (this COPY merges over third_party without disturbing the
+# built artifacts created by the RUN layers above).
+COPY . .
+
 RUN cmake -S . -B build \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
@@ -65,6 +80,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline8 \
     libstdc++6 \
     perl \
+    # gRPC + protobuf runtime shared libs for the RPC->gRPC forwarding feature
+    libgrpc++1.51t64 \
+    libprotobuf32t64 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/redis-pvxs-ioc

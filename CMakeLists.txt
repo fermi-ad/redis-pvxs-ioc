@@ -26,6 +26,15 @@ set(PVXS_ROOT "${CMAKE_SOURCE_DIR}/third_party/pvxs" CACHE PATH "Path to built p
 find_package(Perl REQUIRED)
 find_package(CURL REQUIRED)
 
+# ---- gRPC + protobuf for the RPC->gRPC forwarding feature ------------------
+# Provided by the dev packages installed in the Dockerfile
+# (libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc) or a
+# source build. Protobuf in MODULE mode (Ubuntu ships no ProtobufConfig.cmake;
+# CMake's FindProtobuf provides Protobuf_PROTOC_EXECUTABLE + protobuf::libprotobuf).
+# gRPC ships gRPCConfig.cmake (gRPC::grpc++ + gRPC::grpc_cpp_plugin).
+find_package(Protobuf REQUIRED)
+find_package(gRPC CONFIG REQUIRED)
+
 set(
   REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE
   ""
@@ -124,12 +133,43 @@ set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "Build yaml-cpp as a static library" F
 add_subdirectory(third_party/yaml-cpp)
 add_subdirectory(third_party/redis-adapter)
 
+# ---- Generated gRPC server-reflection stubs --------------------------------
+# The IOC compiles in only the standard gRPC reflection proto; it discovers any
+# backend service's schema at runtime, so it carries no application proto.
+set(REFLECTION_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/reflection.proto")
+set(BRIDGE_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
+file(MAKE_DIRECTORY "${BRIDGE_GEN_DIR}")
+
+set(REFLECTION_PB_CC   "${BRIDGE_GEN_DIR}/reflection.pb.cc")
+set(REFLECTION_PB_H    "${BRIDGE_GEN_DIR}/reflection.pb.h")
+set(REFLECTION_GRPC_CC "${BRIDGE_GEN_DIR}/reflection.grpc.pb.cc")
+set(REFLECTION_GRPC_H  "${BRIDGE_GEN_DIR}/reflection.grpc.pb.h")
+
+add_custom_command(
+  OUTPUT "${REFLECTION_PB_CC}" "${REFLECTION_PB_H}"
+         "${REFLECTION_GRPC_CC}" "${REFLECTION_GRPC_H}"
+  COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+          --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+          --cpp_out=${BRIDGE_GEN_DIR}
+          --grpc_out=${BRIDGE_GEN_DIR}
+          --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
+          ${REFLECTION_PROTO}
+  DEPENDS "${REFLECTION_PROTO}"
+  COMMENT "Generating gRPC reflection protobuf + gRPC C++")
+
+add_library(bpm-query-proto STATIC "${REFLECTION_PB_CC}" "${REFLECTION_GRPC_CC}")
+target_link_libraries(bpm-query-proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
+target_include_directories(bpm-query-proto PUBLIC "${BRIDGE_GEN_DIR}" ${Protobuf_INCLUDE_DIRS})
+set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 add_library(redis-pvxs-ioc-core STATIC
   src/config.cpp
   src/channelfinder.cpp
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
+  src/grpc_bridge.cpp
+  src/rpc_pv.cpp
   src/app.cpp
   ${REDIS_ADAPTER_SOURCES}
 )
@@ -149,6 +189,9 @@ target_include_directories(redis-pvxs-ioc-core
 target_link_libraries(redis-pvxs-ioc-core
   PUBLIC
     yaml-cpp
+    bpm-query-proto
+    gRPC::grpc++
+    protobuf::libprotobuf
     ${REDIS_ADAPTER_LIBRARIES}
     ${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}
     ${PVXS_LIB}/libpvxs${SHARED_LIB_EXT}

@@ -187,6 +187,61 @@ pvs:
       key: rb
 )YAML";
 
+const char* const kRpcConfig = R"YAML(
+server:
+  instance: rpc
+  namespace: BI:BPM
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: live:rb
+    type: float64
+    shape: scalar
+    read:
+      key: rb
+rpc_services:
+  - endpoint: bpm-query-server:50051
+    service: bpm.query.v1.BpmQuery
+    suffix: _RPC
+    defaults:
+      digitizer: MTCA1-1
+      length_ns: 1000000000
+)YAML";
+
+const char* const kRpcOnly = R"YAML(
+server:
+  instance: rpc
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+rpc_services:
+  - endpoint: host:50051
+    service: pkg.Svc
+)YAML";
+
+const char* const kRpcMissingEndpoint = R"YAML(
+server:
+  instance: rpc
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+rpc_services:
+  - service: pkg.Svc
+)YAML";
+
+const char* const kNoPvsNoRpc = R"YAML(
+server:
+  instance: rpc
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+)YAML";
+
 const char* const kReservedVersionPvName = R"YAML(
 server:
   instance: test
@@ -294,6 +349,24 @@ int main() {
   assert(throwsConfig(kReservedRevisionPvName));
   assert(throwsConfig(kReservedSysVersionPvName));
   assert(throwsConfig(kReservedSysRevisionPvName));
+
+  // Generic gRPC RPC services (one PV per reflected method at runtime).
+  const auto rpc = loadConfigString(kRpcConfig);
+  assert(rpc.server.nameSpace == "BI:BPM");
+  assert(rpc.pvs.size() == 1u);                  // the Redis PV
+  assert(rpc.rpcServices.size() == 1u);
+  assert(rpc.rpcServices[0].endpoint == "bpm-query-server:50051");
+  assert(rpc.rpcServices[0].service == "bpm.query.v1.BpmQuery");
+  assert(rpc.rpcServices[0].suffix == "_RPC");
+  assert(rpc.rpcServices[0].defaults.at("digitizer") == "MTCA1-1");
+  assert(rpc.rpcServices[0].defaults.at("length_ns") == "1000000000");
+
+  const auto rpcOnly = loadConfigString(kRpcOnly);  // no pvs is allowed
+  assert(rpcOnly.pvs.empty());
+  assert(rpcOnly.rpcServices.size() == 1u);
+
+  assert(throwsConfig(kRpcMissingEndpoint));     // service without endpoint
+  assert(throwsConfig(kNoPvsNoRpc));             // neither pvs nor rpc_services
 
   std::cout << "config tests passed\n";
   return 0;

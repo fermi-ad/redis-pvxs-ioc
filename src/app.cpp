@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -17,6 +19,7 @@
 
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/rpc_pv.h"
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/util.h"
 #include "redis_pvxs_ioc/version.h"
@@ -275,6 +278,47 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 }
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
+using RpcMap = std::unordered_map<std::string, std::shared_ptr<RpcPV>>;
+
+// Build RPC-forwarding PVs by reflecting each configured gRPC service and
+// creating one PV per method, named <namespace>:<UPPER_SNAKE(Method)><suffix>.
+// The IOC has no compiled-in knowledge of the methods or message schema.
+RpcMap buildRpcPVs(const AppConfig& config) {
+  RpcMap rpcPVs;
+  for (const auto& svc : config.rpcServices) {
+    auto bridge = std::make_shared<GrpcBridge>(svc.endpoint);
+
+    // The backend may not be up yet at IOC startup; retry reflection briefly.
+    std::vector<BridgeMethod> methods;
+    std::string lastErr;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+      try {
+        methods = bridge->discover(svc.service);
+        break;
+      } catch (const std::exception& e) {
+        lastErr = e.what();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+      }
+    }
+    if (methods.empty()) {
+      std::fprintf(stderr,
+                   "[redis-pvxs-ioc] rpc_service %s @ %s: reflection failed (%s); "
+                   "no RPC PVs created for it\n",
+                   svc.service.c_str(), svc.endpoint.c_str(), lastErr.c_str());
+      continue;
+    }
+
+    for (const auto& m : methods) {
+      std::string leaf = methodToPvLeaf(m.method) + svc.suffix;
+      std::string name =
+          config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
+      rpcPVs.emplace(name, std::make_shared<RpcPV>(bridge, m, svc.defaults));
+      std::fprintf(stderr, "[redis-pvxs-ioc] rpc PV %s -> %s/%s\n",
+                   name.c_str(), m.service.c_str(), m.method.c_str());
+    }
+  }
+  return rpcPVs;
+}
 
 }  // namespace
 
@@ -287,6 +331,7 @@ struct Application::Impl {
   RedisBackendRegistry redisBackends;
   std::shared_ptr<AlarmPublisher> alarmPublisher;
   RuntimeMap runtimes;
+  RpcMap rpcPVs;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
 };
 
@@ -374,6 +419,10 @@ void Application::stop() {
     impl_->server.removePV(item.first);
   }
   impl_->runtimes.clear();
+  for (auto& item : impl_->rpcPVs) {
+    impl_->server.removePV(item.first);
+  }
+  impl_->rpcPVs.clear();
   impl_->redisBackends.clear();
   impl_->alarmPublisher.reset();
 
@@ -433,6 +482,16 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
       impl_->runtimes.emplace(item.first, item.second);
     }
 
+    // Rebuild RPC-forwarding PVs (simple full-replace; they hold no Redis
+    // reader state, so there is no in-flight subscription to preserve).
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.removePV(item.first);
+    }
+    impl_->rpcPVs = buildRpcPVs(config);
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.addPV(item.first, item.second->sharedPV());
+    }
+
     impl_->redisBackends = std::move(newRedisBackends);
     impl_->alarmPublisher = std::move(newAlarmPublisher);
     impl_->currentConfig = config;
@@ -441,7 +500,7 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
 
     if (impl_->admin) {
       impl_->admin->setGeneration(generation);
-      impl_->admin->setPvCount(impl_->runtimes.size());
+      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
@@ -529,12 +588,21 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
       impl_->runtimes.emplace(item.first, item.second);
     }
 
+    // Full-replace the RPC-forwarding PVs.
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.removePV(item.first);
+    }
+    impl_->rpcPVs = buildRpcPVs(config);
+    for (auto& item : impl_->rpcPVs) {
+      impl_->server.addPV(item.first, item.second->sharedPV());
+    }
+
     impl_->currentConfig = config;
     impl_->generation = generation;
 
     if (impl_->admin) {
       impl_->admin->setGeneration(generation);
-      impl_->admin->setPvCount(impl_->runtimes.size());
+      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));

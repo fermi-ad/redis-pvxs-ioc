@@ -80,6 +80,20 @@ struct LinearTransformConfig {
   double offset = 0.0;
 };
 
+// A backend gRPC service to expose as RPC PVs. The IOC reflects the service at
+// startup and creates one RPC PV per method; it has NO compiled-in knowledge of
+// the service's methods or message types (see docs/rpc-forwarding.md). Each PV
+// is named  <server.namespace>:<UPPER_SNAKE(MethodName)><suffix>.
+struct RpcServiceConfig {
+  std::string endpoint;   // gRPC "host:port"
+  std::string service;    // fully-qualified, e.g. "bpm.query.v1.BpmQuery"
+  std::string suffix;     // appended to each derived PV name (e.g. "_RPC")
+  // Fixed request-field defaults applied (by proto field name / dotted path /
+  // unique leaf) before per-call pvxcall args. Fields that a given method's
+  // request doesn't have are ignored, so one map can serve every method.
+  std::map<std::string, std::string> defaults;
+};
+
 using TypedValue = std::variant<
   std::monostate,
   bool,
@@ -157,6 +171,7 @@ struct AppConfig {
   AlarmStreamConfig alarms;
   ChannelFinderConfig channelFinder;
   std::vector<PVConfig> pvs;
+  std::vector<RpcServiceConfig> rpcServices;
 };
 
 AppConfig loadConfigFile(const std::string& path);

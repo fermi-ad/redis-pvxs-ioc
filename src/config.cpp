@@ -382,6 +382,25 @@ std::optional<LinearTransformConfig> parseTransform(const YAML::Node& node, cons
   return transform;
 }
 
+RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path) {
+  requireMap(node, path);
+  RpcServiceConfig svc;
+  svc.endpoint = parseString(requireNode(node, "endpoint", path), path + ".endpoint");
+  svc.service = parseString(requireNode(node, "service", path), path + ".service");
+  if (node["suffix"]) svc.suffix = parseString(node["suffix"], path + ".suffix");
+  if (node["defaults"]) {
+    const auto& d = node["defaults"];
+    requireMap(d, path + ".defaults");
+    for (const auto& kv : d) {
+      svc.defaults[kv.first.as<std::string>()] =
+          parseString(kv.second, path + ".defaults." + kv.first.as<std::string>());
+    }
+  }
+  if (svc.endpoint.empty()) fail(path + ".endpoint", "must not be empty");
+  if (svc.service.empty()) fail(path + ".service", "must not be empty");
+  return svc;
+}
+
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   requireMap(node, path);
 
@@ -502,15 +521,15 @@ AppConfig parseConfig(const YAML::Node& root) {
   }
   resolveBackendAlias(config.alarms.backend, "root.alarms.backend", config.redisBackends, hasLegacyRedis);
 
-  const auto pvsNode = requireSequence(requireNode(root, "pvs", "root"), "root.pvs");
-  if (pvsNode.size() == 0) {
-    fail("root.pvs", "must not be empty");
-  }
+  // `pvs` is optional: an IOC may expose only RPC services (rpc_services) and no
+  // Redis-backed PVs.
+  const auto pvsNode = root["pvs"] ? requireSequence(root["pvs"], "root.pvs") : YAML::Node();
 
   std::set<std::string> pvNames;
   std::set<std::pair<std::string, std::string>> subscribedKeys;
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
+
     resolveBackendAlias(pv.read.backend,
                         "root.pvs[" + std::to_string(index) + "].read.backend",
                         config.redisBackends,
@@ -556,6 +575,19 @@ AppConfig parseConfig(const YAML::Node& root) {
     config.pvs.push_back(std::move(pv));
   }
 
+  // Generic gRPC services exposed as RPC PVs (one PV per reflected method).
+  if (root["rpc_services"]) {
+    const auto svcNode = requireSequence(root["rpc_services"], "root.rpc_services");
+    for (size_t i = 0; i < svcNode.size(); ++i) {
+      config.rpcServices.push_back(
+          parseRpcService(svcNode[i], "root.rpc_services[" + std::to_string(i) + "]"));
+    }
+  }
+
+  if (config.pvs.empty() && config.rpcServices.empty()) {
+    fail("root", "must define at least one of 'pvs' or 'rpc_services'");
+  }
+
   return config;
 }
 
@@ -574,11 +606,17 @@ std::string summarizeConfig(const AppConfig& config) {
   stream << "instance=" << config.server.instance
          << " namespace=" << (config.server.nameSpace.empty() ? "<none>" : config.server.nameSpace)
          << " redis_backends=" << config.redisBackends.size()
-         << " pvs=" << config.pvs.size();
+         << " pvs=" << config.pvs.size()
+         << " rpc_services=" << config.rpcServices.size();
   for (const auto& entry : config.redisBackends) {
     stream << "\nbackend[" << entry.first << "]="
            << entry.second.host << ":" << entry.second.port
            << " base_key=" << entry.second.baseKey;
+  }
+  for (const auto& svc : config.rpcServices) {
+    stream << "\n- rpc_service " << svc.service << " @ " << svc.endpoint
+           << " -> " << (config.server.nameSpace.empty() ? "" : config.server.nameSpace + ":")
+           << "<METHOD>" << svc.suffix;
   }
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)

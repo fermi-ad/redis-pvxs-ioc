@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.0 - 2026-06-30
+
+- add generic reflection-based PVA `pvxcall` to gRPC forwarding with top-level `rpc_services` config
+- discover backend gRPC services at startup through server reflection and expose one RPC PV per reflected method
+- map gRPC request defaults and `pvxcall` arguments into dynamic protobuf requests, then return replies as generic PVA structs
+- add gRPC/protobuf build and runtime dependencies to the container image and document the RPC forwarding model
+- bump `third_party/redis-adapter` to include the data-mover crash fix from redis-adapter #96
+
 ## v0.5.2 - 2026-06-26
 
 - publish read-only main-runtime metadata aliases for the release version and git revision:

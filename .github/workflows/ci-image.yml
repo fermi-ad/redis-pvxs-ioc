@@ -64,4 +64,4 @@ jobs:
           grep -F "redis-pvxs-ioc ${VERSION} (${REVISION})" /tmp/redis-pvxs-ioc-version.txt
           docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
           docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
-            'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
+            'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/NOTICE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'

@@ -69,8 +69,6 @@ These public support modules are pinned for the registry-built legacy IOC sideca
 Vendored non-submodule trees:
 
 - `third_party/support/pcre`: copied from the local GHE support-module monorepo `pcre-8.44` tree because the EPICS build wrapper is local.
-- `third_party/fnal/tcast`: copied as-is from the local GHE support-module monorepo and disabled by default at runtime.
-- `third_party/fnal/acnetPV`: copied as-is from the local GHE support-module monorepo and disabled by default at runtime.
 
 ## Update checklist
 

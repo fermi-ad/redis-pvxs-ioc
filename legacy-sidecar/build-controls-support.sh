@@ -5,9 +5,7 @@ ROOT="${ROOT:-/opt/redis-pvxs-ioc}"
 JOBS="${JOBS:-$(nproc)}"
 
 BASE="$ROOT/third_party/epics-base"
-PVXS="$ROOT/third_party/pvxs"
 SUPPORT="$ROOT/third_party/support"
-FNAL="$ROOT/third_party/fnal"
 
 write_release() {
   module="$1"
@@ -82,8 +80,6 @@ AUTOSAVE="$SUPPORT/autosave"
 BUSY="$SUPPORT/busy"
 CAPUTLOG="$SUPPORT/caPutLog"
 LINSTAT="$SUPPORT/linStat"
-TCAST="$FNAL/tcast"
-ACNETPV="$FNAL/acnetPV"
 
 write_release "$SEQ"
 printf 'EPICS_BASE=%s\n' "$BASE" > "$SEQ/configure/RELEASE"
@@ -182,12 +178,3 @@ write_release "$LINSTAT"
 write_config_site "$LINSTAT" \
   "LINSTAT_BUILD_EXAMPLE=NO"
 build_module "$LINSTAT" configure.install statApp.install
-
-write_release "$TCAST"
-write_config_site "$TCAST" \
-  "BUILD_DEMO=NO"
-build_module "$TCAST" configure.install tcastApp.install
-
-write_release "$ACNETPV" \
-  "PVXS=$PVXS"
-build_module "$ACNETPV" configure.install acnetPVApp.install

@@ -60,9 +60,7 @@ RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" &
       third_party/support/autosave \
       third_party/support/busy \
       third_party/support/caPutLog \
-      third_party/support/linStat \
-      third_party/fnal/tcast \
-      third_party/fnal/acnetPV; do \
+      third_party/support/linStat; do \
       name="$(basename "$module")"; \
       mkdir -p "/opt/legacy-runtime/support/${name}/db" "/opt/legacy-runtime/support/${name}/dbd"; \
       if [ -d "${module}/lib/${EPICS_HOST_ARCH}" ]; then \

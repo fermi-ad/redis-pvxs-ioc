@@ -18,8 +18,7 @@
 1. Update `VERSION`.
 2. Add or update the matching entry in `CHANGELOG.md`.
 3. Confirm the project license and every vendored source tree are cleared for
-   public redistribution. `third_party/fnal/tcast` and `third_party/fnal/acnetPV`
-   require explicit approval or their own license notice.
+   public redistribution and inventoried in `THIRD_PARTY_NOTICES.md`.
 4. Run local verification:
 
 ```sh
@@ -65,9 +64,9 @@ The primary runtime image release process is split into three workflows:
   `vX.Y.Z` plus `latest`, captures the digest, validates the pushed image, and
   creates or updates the GitHub Release.
 
-The legacy sidecar has its own version and immutable digest. It is published only
-when `legacy-sidecar/` changes and its release gate is satisfied. Standardizing
-it into an automated workflow is a separate scoped change.
+The legacy sidecar has its own version and immutable digest. It is published
+only as a separate, intentional sidecar release. Standardizing it into an
+automated workflow is a separate scoped change.
 
 ## Image reference policy
 

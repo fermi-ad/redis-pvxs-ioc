@@ -2,8 +2,7 @@
 
 > **Status:** Optional and experimental. The sidecar is independently versioned
 > from the main runtime while [issue #68](https://github.com/fermi-ad/redis-pvxs-ioc/issues/68)
-> decides its long-term product ownership. Public redistribution also depends on
-> the vendored-source gate in [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+> decides its long-term product ownership.
 
 The legacy sidecar is an optional conventional EPICS IOC container that can run beside `redis-pvxs-ioc`.
 
@@ -17,7 +16,7 @@ The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-
 - base records from `.db` files
 - PVA exposure through `pvxsIoc` / QSRV2
 - RecCaster status records and RecCeiver/ChannelFinder advertisement for conventional IOC records
-- a prelinked compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, `linStat`, `tcast`, and `acnetPV`
+- a prelinked compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, and `linStat`
 - an optional compose service on the same PVA network as `redis-pvxs-ioc`
 - a template that teams can derive from for real support-module images
 
@@ -77,22 +76,24 @@ LEGACY_IOC_ENABLE_CA=YES \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-## Optional linStat, tcast, And acnetPV
+## Optional linStat
 
-`linStat`, `tcast`, and `acnetPV` are compiled into source-built sidecar images
-and the currently published `v0.5.0` sidecar. The sidecar has an independent
-release history; a main-runtime release does not imply a matching sidecar tag.
+`linStat` is compiled into source-built sidecar images. The sidecar has an
+independent release history; a main-runtime release does not imply a matching
+sidecar tag.
 
-They are inactive by default. To use them, provide a startup script that loads the relevant records or calls the relevant IOC shell commands:
+It is inactive by default. To use it, provide a startup script that loads the
+relevant records:
 
 ```sh
-LEGACY_IOC_STARTUP_HOST=/path/to/linstat-tcast-or-acnet.st.cmd \
+LEGACY_IOC_STARTUP_HOST=/path/to/linstat.st.cmd \
   docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
 ```
 
-For `linStat`, load the specific Linux/container statistics databases you want, such as `linStatHost.db`, `linStatProc.db`, `linStatNIC.db`, or `linStatFS.db`.
+Load the specific Linux/container statistics databases you want, such as
+`linStatHost.db`, `linStatProc.db`, `linStatNIC.db`, or `linStatFS.db`.
 
-The default `st.cmd` does not load linStat/tcast/acnet records or start linStat/acnet/tcast-specific behavior.
+The default `st.cmd` does not load linStat records.
 
 ## Deriving A Real Support-Module Sidecar
 

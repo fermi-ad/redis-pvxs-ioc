@@ -122,4 +122,4 @@ part of the core quick start while its long-term product boundary is decided in
 
 Project-authored code is available under the [BSD 3-Clause License](LICENSE).
 See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for bundled dependencies and
-the public-release gate covering vendored Fermilab compatibility sources.
+their license locations.

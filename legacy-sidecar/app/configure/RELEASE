@@ -18,7 +18,4 @@ BUSY = $(REDIS_PVXS_IOC_TOP)/third_party/support/busy
 CAPUTLOG = $(REDIS_PVXS_IOC_TOP)/third_party/support/caPutLog
 LINSTAT = $(REDIS_PVXS_IOC_TOP)/third_party/support/linStat
 
-TCAST = $(REDIS_PVXS_IOC_TOP)/third_party/fnal/tcast
-ACNETPV = $(REDIS_PVXS_IOC_TOP)/third_party/fnal/acnetPV
-
 EPICS_BASE = $(REDIS_PVXS_IOC_TOP)/third_party/epics-base

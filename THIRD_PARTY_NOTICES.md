@@ -37,8 +37,3 @@ the applicable notices.
 
 - PCRE is vendored under `third_party/support/pcre`; its license is
   `third_party/support/pcre/pcre/LICENCE`.
-- `third_party/fnal/tcast` and `third_party/fnal/acnetPV` were copied from the
-  Fermilab support-module source tree. A public release containing these trees
-  or binaries built from them requires confirmation that Fermi Forward Discovery
-  Group, LLC may redistribute them under the project license, or a separate
-  license/notice must be added. This confirmation is a release gate.

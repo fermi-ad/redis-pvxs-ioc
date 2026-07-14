@@ -6,9 +6,9 @@ cd "$ROOT_DIR"
 
 PVX_BIN_DIR="/opt/redis-pvxs-ioc/bin/pvxs"
 PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1'
-DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.5.1@sha256:6c473e996d0091994868ac00f63b1b80f5b4ede067165c3a66182ef5dd5efc69"
+DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.0@sha256:208002466ec3cc7db31ed5061938029ed2df90242ae2ccb5b0ab7de8792fbefb"
 USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE+x}"
-EXPECTED_VERSION="$(tr -d '\n' < VERSION)"
+SOURCE_VERSION="$(tr -d '\n' < VERSION)"
 
 export REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE:-$DEFAULT_REDIS_PVXS_IOC_IMAGE}"
 SOURCE_CONFIG="${REDIS_PVXS_IOC_CONFIG:-$ROOT_DIR/demo/config.yaml}"
@@ -61,32 +61,42 @@ done
 
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -E 'value string = "[0-9]+/[0-9]+ connected'
 
+VERSION_OUTPUT="$(docker exec "$IOC_CONTAINER" /opt/redis-pvxs-ioc/bin/redis-pvxs-ioc --version)"
+EXPECTED_VERSION="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n 's/^redis-pvxs-ioc \([^ ]*\).*$/\1/p')"
+EXPECTED_REVISION="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n 's/^redis-pvxs-ioc [^ ]* (\([^)]*\))$/\1/p')"
+if [ -z "$EXPECTED_VERSION" ] || [ -z "$EXPECTED_REVISION" ]; then
+  echo "could not determine redis-pvxs-ioc version and revision from: $VERSION_OUTPUT" >&2
+  exit 1
+fi
+if [ -n "$USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE" ] && [ "$EXPECTED_VERSION" != "$SOURCE_VERSION" ]; then
+  echo "user-supplied image version $EXPECTED_VERSION does not match VERSION=$SOURCE_VERSION" >&2
+  exit 1
+fi
+
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget demo:version" | grep "value string = \"redis-pvxs-ioc v${EXPECTED_VERSION}\""
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:version" | grep "value string = \"redis-pvxs-ioc v${EXPECTED_VERSION}\""
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget demo:revision" | grep "value string = \"redis-pvxs-ioc ${EXPECTED_REVISION}\""
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:revision" | grep "value string = \"redis-pvxs-ioc ${EXPECTED_REVISION}\""
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 1'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep 'value string = "generation 1 active"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastError" | grep 'value string = ""'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:stats:pvCount" | grep -E 'value int64_t = [1-9][0-9]*'
+
 if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput demo:version invalid"; then
   echo "version PV accepted a write unexpectedly" >&2
   exit 1
 fi
-if [ -n "$USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE" ]; then
-  EXPECTED_REVISION="$(docker exec "$IOC_CONTAINER" /opt/redis-pvxs-ioc/bin/redis-pvxs-ioc --version | sed -n 's/^redis-pvxs-ioc [^ ]* (\([^)]*\))$/\1/p')"
-  if [ -z "$EXPECTED_REVISION" ]; then
-    echo "could not determine redis-pvxs-ioc revision from --version" >&2
-    exit 1
-  fi
-  run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:version" | grep "value string = \"redis-pvxs-ioc v${EXPECTED_VERSION}\""
-  run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget demo:revision" | grep "value string = \"redis-pvxs-ioc ${EXPECTED_REVISION}\""
-  run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:revision" | grep "value string = \"redis-pvxs-ioc ${EXPECTED_REVISION}\""
-  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput demo:revision invalid"; then
-    echo "revision PV accepted a write unexpectedly" >&2
-    exit 1
-  fi
-  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:version invalid"; then
-    echo "SYS version PV accepted a write unexpectedly" >&2
-    exit 1
-  fi
-  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:revision invalid"; then
-    echo "SYS revision PV accepted a write unexpectedly" >&2
-    exit 1
-  fi
+if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput demo:revision invalid"; then
+  echo "revision PV accepted a write unexpectedly" >&2
+  exit 1
+fi
+if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:version invalid"; then
+  echo "SYS version PV accepted a write unexpectedly" >&2
+  exit 1
+fi
+if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:revision invalid"; then
+  echo "SYS revision PV accepted a write unexpectedly" >&2
+  exit 1
 fi
 
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature"'
@@ -100,10 +110,26 @@ LC_ALL=C LANG=C perl -0pi -e 's/description: Source temperature/description: Sou
 run_with_timeout docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'
 sleep 2
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep 'value string = "generation 2 active"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastError" | grep 'value string = ""'
 for _ in {1..10}; do
   if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep -q 'display.description string = "Source temperature reloaded"'; then
     break
   fi
   sleep 1
 done
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
+
+# A bad replacement must report the error without replacing generation 2.
+LC_ALL=C LANG=C perl -0pi -e 's/type: float64/type: unsupported/' "$REDIS_PVXS_IOC_CONFIG"
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:config:reload 1"
+for _ in {1..10}; do
+  if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep -q 'value string = "reload failed"'; then
+    break
+  fi
+  sleep 1
+done
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep 'value string = "reload failed"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastError" | grep 'unsupported primitive type'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'

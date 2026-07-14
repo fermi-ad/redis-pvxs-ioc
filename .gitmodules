@@ -1,12 +1,12 @@
 [submodule "third_party/epics-base"]
 	path = third_party/epics-base
-	url = git@github.com:derekste/epics-base.git
+	url = https://github.com/derekste/epics-base.git
 [submodule "third_party/pvxs"]
 	path = third_party/pvxs
-	url = git@github.com:derekste/pvxs.git
+	url = https://github.com/derekste/pvxs.git
 [submodule "third_party/redis-adapter"]
 	path = third_party/redis-adapter
-	url = git@github.com:fermi-ad/redis-adapter.git
+	url = https://github.com/fermi-ad/redis-adapter.git
 [submodule "third_party/yaml-cpp"]
 	path = third_party/yaml-cpp
 	url = https://github.com/jbeder/yaml-cpp.git

@@ -21,11 +21,11 @@ Reference specification:
 
 ### Umbrella
 
-- issue `#17`: full normative-types roadmap umbrella beyond `NTScalar` and `NTScalarArray`
+- [Issue #17](https://github.com/fermi-ad/redis-pvxs-ioc/issues/17): full normative-types roadmap umbrella beyond `NTScalar` and `NTScalarArray`
 
 ### Foundation
 
-- issue `#20`: reusable normative-type framework for type IDs, metadata, validation, and unions
+- [Issue #20](https://github.com/fermi-ad/redis-pvxs-ioc/issues/20): reusable normative-type framework for type IDs, metadata, validation, and unions
 
 This is the prerequisite track for broader coverage. It should establish:
 
@@ -36,19 +36,19 @@ This is the prerequisite track for broader coverage. It should establish:
 
 ### General Normative Types
 
-- issue `#18`: `NTEnum`, `NTMatrix`, `NTURI`, `NTNameValue`, `NTTable`, `NTAttribute`
+- [Issue #18](https://github.com/fermi-ad/redis-pvxs-ioc/issues/18): `NTEnum`, `NTMatrix`, `NTURI`, `NTNameValue`, `NTTable`, `NTAttribute`
 
 This track should cover the general types listed in the specification beyond scalar/scalar-array support.
 
 ### Specific Normative Types
 
-- issue `#19`: `NTMultiChannel`, `NTNDArray`, `NTContinuum`, `NTHistogram`, `NTAggregate`
+- [Issue #19](https://github.com/fermi-ad/redis-pvxs-ioc/issues/19): `NTMultiChannel`, `NTNDArray`, `NTContinuum`, `NTHistogram`, `NTAggregate`
 
 This track should cover the richer domain-specific structures in the specification, including array/image-heavy and structured aggregate payloads.
 
 ### Appendix A Additions
 
-- issue `#21`: `NTUnion`, `NTScalarMultiChannel`
+- [Issue #21](https://github.com/fermi-ad/redis-pvxs-ioc/issues/21): `NTUnion`, `NTScalarMultiChannel`
 
 The specification treats these as possible future additions. They remain part of the long-range goal, but they should stay separate from the current core/general/specific normative-type implementation tracks.
 

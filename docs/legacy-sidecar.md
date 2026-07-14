@@ -1,5 +1,10 @@
 # Legacy IOC Sidecar
 
+> **Status:** Optional and experimental. The sidecar is independently versioned
+> from the main runtime while [issue #68](https://github.com/fermi-ad/redis-pvxs-ioc/issues/68)
+> decides its long-term product ownership. Public redistribution also depends on
+> the vendored-source gate in [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+
 The legacy sidecar is an optional conventional EPICS IOC container that can run beside `redis-pvxs-ioc`.
 
 If you already have a working `.db` / `.dbd` IOC or a support module people depend on, start here. The sidecar lets that IOC join the PVA testbed without changing the Redis-first runtime.
@@ -74,7 +79,9 @@ LEGACY_IOC_ENABLE_CA=YES \
 
 ## Optional linStat, tcast, And acnetPV
 
-`linStat`, `tcast`, and `acnetPV` are compiled into source-built sidecar images and release images `v0.5.0` and later so projects can opt in without rebuilding the base compatibility image.
+`linStat`, `tcast`, and `acnetPV` are compiled into source-built sidecar images
+and the currently published `v0.5.0` sidecar. The sidecar has an independent
+release history; a main-runtime release does not imply a matching sidecar tag.
 
 They are inactive by default. To use them, provide a startup script that loads the relevant records or calls the relevant IOC shell commands:
 

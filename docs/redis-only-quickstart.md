@@ -83,6 +83,9 @@ docker exec redis-pvxs-ioc-demo sh -lc "$PV_ENV $PVX/pvxput SYS:my-ioc:config:re
 docker exec redis-pvxs-ioc-demo sh -lc "$PV_ENV $PVX/pvxget SYS:my-ioc:config:lastStatus"
 ```
 
+See [`operations.md`](operations.md) for the complete built-in PV table and
+rejected-reload behavior.
+
 ## Put It In Your Project
 
 Do not submodule this repo for normal deployment. Consume the published image by
@@ -103,7 +106,7 @@ services:
       retries: 15
 
   redis-pvxs-ioc:
-    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.5.1@sha256:6c473e996d0091994868ac00f63b1b80f5b4ede067165c3a66182ef5dd5efc69
+    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.0@sha256:208002466ec3cc7db31ed5061938029ed2df90242ae2ccb5b0ab7de8792fbefb
     networks:
       - controls
     depends_on:
@@ -170,7 +173,7 @@ Full example: [`../demo/config.yaml`](../demo/config.yaml).
 
 ## Upgrade
 
-1. Open the latest GitHub Release.
+1. Open the [latest GitHub Release](https://github.com/fermi-ad/redis-pvxs-ioc/releases/latest).
 2. Copy the new `redis-pvxs-ioc:vX.Y.Z@sha256:<digest>` image reference.
 3. Update your project compose file.
 4. Run `docker compose pull`.

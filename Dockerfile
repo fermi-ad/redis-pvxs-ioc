@@ -90,11 +90,13 @@ WORKDIR /opt/redis-pvxs-ioc
 LABEL org.opencontainers.image.title="redis-pvxs-ioc" \
       org.opencontainers.image.version="${REDIS_PVXS_IOC_VERSION}" \
       org.opencontainers.image.revision="${REDIS_PVXS_IOC_REVISION}" \
-      org.opencontainers.image.source="${REDIS_PVXS_IOC_SOURCE}"
+      org.opencontainers.image.source="${REDIS_PVXS_IOC_SOURCE}" \
+      org.opencontainers.image.licenses="BSD-3-Clause"
 
 COPY --from=builder /opt/runtime /opt/redis-pvxs-ioc
 COPY demo/config.yaml /etc/redis-pvxs-ioc/config.yaml
 COPY scripts/container-entrypoint.sh /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/redis-pvxs-ioc/
 
 RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 

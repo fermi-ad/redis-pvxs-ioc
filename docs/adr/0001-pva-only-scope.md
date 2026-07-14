@@ -1,5 +1,9 @@
 # ADR 0001: PVA-Only MVP Scope
 
+> **Historical wording:** “MVP” names the original milestone. The continuing
+> current decision is that the core runtime remains PVA-only; see
+> [`../feature-state-roadmap.md`](../feature-state-roadmap.md).
+
 ## Status
 
 Accepted

@@ -1,4 +1,9 @@
-# MVP Spec
+# Historical MVP Specification
+
+> **Status:** Historical implementation milestone. This file is preserved to
+> explain the initial product contract; it is not the current specification.
+> See [`../configuration.md`](../configuration.md), [`../operations.md`](../operations.md),
+> and [`../feature-state-roadmap.md`](../feature-state-roadmap.md) for current behavior.
 
 ## Product contract
 

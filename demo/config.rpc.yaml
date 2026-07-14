@@ -1,0 +1,23 @@
+server:
+  instance: demo-rpc
+  namespace: DEMO
+  auto_beacon: true
+
+# A Redis backend remains required by the current top-level config contract,
+# even when this process only exposes reflected RPC PVs.
+redis:
+  base_key: demo
+  host: redis
+  port: 6379
+
+# The backend must enable gRPC server reflection. One PVA RPC is created for
+# every reflected method using <namespace>:<UPPER_SNAKE(Method)><suffix>.
+rpc_services:
+  - endpoint: bpm-query-server:50051
+    service: bpm.query.v1.BpmQuery
+    suffix: _RPC
+    defaults:
+      digitizer: MTCA1-1
+      subkey: BPM_H1_POS
+      length_ns: 1000000000
+      event: 0xFF

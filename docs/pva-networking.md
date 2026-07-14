@@ -66,7 +66,7 @@ namespace:
 ```yaml
 services:
   ioc:
-    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.5.1@sha256:6c473e996d0091994868ac00f63b1b80f5b4ede067165c3a66182ef5dd5efc69
+    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.0@sha256:208002466ec3cc7db31ed5061938029ed2df90242ae2ccb5b0ab7de8792fbefb
     hostname: redis-pvxs-ioc.example.fnal.gov
     environment:
       - EPICS_HOST_INTERFACE=eth0

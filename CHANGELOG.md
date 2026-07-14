@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.1 - 2026-07-14
+
+- publish the project under the BSD 3-Clause License and package the license and third-party notices in the runtime image
+- reorganize the public documentation around current features, configuration, operations, architecture, and contribution paths
+- make public pull-request validation independent of Fermilab credentials and self-hosted infrastructure
+- refresh the default runtime image examples to the validated v0.6.0 release while preserving the independently versioned legacy sidecar
+- document and smoke-test the full built-in diagnostic PV surface and rejected hot-reload behavior
+- separate the optional gRPC reflection example from the default demo so core startup and reload validation do not wait on an absent backend
+
 ## v0.6.0 - 2026-06-30
 
 - add generic reflection-based PVA `pvxcall` to gRPC forwarding with top-level `rpc_services` config

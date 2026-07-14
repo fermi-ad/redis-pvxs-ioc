@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   validate:
-    runs-on: adlinux3
+    # Untrusted pull-request code must not run on Fermilab self-hosted runners.
+    # Push/manual validation remains on the release-equivalent adlinux3 host.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'adlinux3' }}
 
     steps:
       - name: Check out repository
@@ -22,7 +24,6 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Build validation image
         id: build
@@ -51,6 +52,7 @@ jobs:
 
           test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${VERSION}"
           test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${REVISION}"
+          test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "BSD-3-Clause"
 
       - name: Validate runtime image
         run: |
@@ -61,3 +63,5 @@ jobs:
           docker run --rm "${IMAGE}" --version | tee /tmp/redis-pvxs-ioc-version.txt
           grep -F "redis-pvxs-ioc ${VERSION} (${REVISION})" /tmp/redis-pvxs-ioc-version.txt
           docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
+          docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
+            'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'

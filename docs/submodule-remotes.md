@@ -59,10 +59,10 @@ These public support modules are pinned for the registry-built legacy IOC sideca
 | `third_party/support/asyn` | `https://github.com/epics-modules/asyn.git` | `0e6d2edfcefd2e53580f07ba159a0ef0f8a4bc55` | `R4-44` |
 | `third_party/support/std` | `https://github.com/epics-modules/std.git` | `5d9411f5c386f8ca1abd02e114bd6a77736d584f` | `R3-6-4-29-g5d9411f` |
 | `third_party/support/StreamDevice` | `https://github.com/paulscherrerinstitute/StreamDevice.git` | `668d1d525509604ab4ccd7382022dfb469c99841` | `2.8.26` |
-| `third_party/support/lua` | `https://github.com/epics-modules/lua.git` | `0091a141a9f708a47c87554a72da79da039f210b` | `R3-0-2` |
-| `third_party/support/iocStats` | `https://github.com/epics-modules/iocStats.git` | `4df9e87815f6a9432955a3ddb45fafa9fe4a4d40` | `3.1.16` |
+| `third_party/support/lua` | `https://github.com/epics-modules/lua.git` | `0091a141a9f708a47c87554a72da79da039f210b` | `R1-2-339-g0091a14` |
+| `third_party/support/iocStats` | `https://github.com/epics-modules/iocStats.git` | `4df9e87815f6a9432955a3ddb45fafa9fe4a4d40` | `3.1.15-22-g4df9e87` |
 | `third_party/support/alive` | `https://github.com/epics-modules/alive.git` | `4108a24d26e9d353a80e637f0dbea78fec1c3256` | `R1-4-1-11-g4108a24` |
-| `third_party/support/autosave` | `https://github.com/epics-modules/autosave.git` | `800c2d600908cf300c9b1c8beedd090991e8d554` | `R5-10-2` |
+| `third_party/support/autosave` | `https://github.com/epics-modules/autosave.git` | `800c2d600908cf300c9b1c8beedd090991e8d554` | `R5-10-21-g800c2d6` |
 | `third_party/support/busy` | `https://github.com/epics-modules/busy.git` | `569a6b6fb1288c067ac2b22a998aa7de5375ddc4` | `R1-7-4` |
 | `third_party/support/caPutLog` | `https://github.com/epics-modules/caPutLog.git` | `062998a1d4b9c4ccacf3277e9097a63c5db4c28e` | `R4.0` |
 | `third_party/support/linStat` | `https://github.com/mdavidsaver/linStat.git` | `b4729e43c8ee9791975abbc7e06b870f46fb9661` | `1.2.1` |

@@ -1,4 +1,4 @@
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:26.04 AS builder
 
 ARG REDIS_PVXS_IOC_VERSION=dev
 ARG REDIS_PVXS_IOC_REVISION=unknown
@@ -65,7 +65,7 @@ RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" &
     cp -R "third_party/epics-base/bin/${EPICS_HOST_ARCH}" /opt/runtime/bin/epics-base && \
     cp -R "third_party/pvxs/bin/${EPICS_HOST_ARCH}" /opt/runtime/bin/pvxs
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG REDIS_PVXS_IOC_VERSION=dev
 ARG REDIS_PVXS_IOC_REVISION=unknown

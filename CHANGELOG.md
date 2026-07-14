@@ -4,6 +4,7 @@
 
 - publish the project under the BSD 3-Clause License and package the license and third-party notices in the runtime image
 - remove the vendored `tcast` and `acnetPV` sources and their legacy-sidecar build integration from the public release tree
+- pin the redis-adapter HTTPS-submodule transport fix so recursive public clones do not require GitHub SSH credentials
 - reorganize the public documentation around current features, configuration, operations, architecture, and contribution paths
 - add a complete native source-build guide and Docker patterns for forwarding an existing `EPICS_*` environment
 - make public pull-request validation independent of Fermilab credentials and self-hosted infrastructure

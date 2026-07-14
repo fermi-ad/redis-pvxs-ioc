@@ -27,9 +27,10 @@ gitlink, verify that its public remote contains the exact pinned commit.
 ### `third_party/redis-adapter`
 
 - Published `.gitmodules` URL: `https://github.com/fermi-ad/redis-adapter.git`
-- Pinned commit: `fd26d57dd9146ae4898c8623c3994776101e91c5`
+- Pinned commit: `cbac503548de257c3d8cc07649b8562082cfa227`
 - Publish status: ready
-- Current known branch containing the commit: `origin/main`
+- Current known branch containing the commit: `dev/https-submodules`
+- Upstream review: [redis-adapter #98](https://github.com/fermi-ad/redis-adapter/pull/98)
 
 ### `third_party/yaml-cpp`
 

@@ -1,0 +1,51 @@
+name: Bug report
+description: Report reproducible incorrect runtime, configuration, or packaging behavior.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private hostnames, or sensitive configuration values.
+        Security vulnerabilities should be reported privately through the repository Security tab.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and revision
+      description: Values from `<instance>:version` and `<instance>:revision`, or `redis-pvxs-ioc --version`.
+      placeholder: redis-pvxs-ioc 0.6.1 (0123456789ab)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest sanitized config and command sequence that reproduces the issue.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Include relevant logs and the diagnostic PV values for generation, status, error, PV count, and backend health.
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Published container image
+        - Locally built container image
+        - Native build
+        - Legacy sidecar
+        - Other
+    validations:
+      required: true

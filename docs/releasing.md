@@ -17,7 +17,9 @@
 
 1. Update `VERSION`.
 2. Add or update the matching entry in `CHANGELOG.md`.
-3. Run local verification:
+3. Confirm the project license and every vendored source tree are cleared for
+   public redistribution and inventoried in `THIRD_PARTY_NOTICES.md`.
+4. Run local verification:
 
 ```sh
 cmake -S . -B build
@@ -27,25 +29,28 @@ ctest --test-dir build --output-on-failure
 ./scripts/smoke-test.sh
 ```
 
-4. Commit the release prep and push the branch.
-5. Let CI and downstream candidate-image testing pass on the PR branch.
-6. Merge the release prep to `main`.
-7. Tag the merged `main` release commit with `v$(cat VERSION)`.
-8. Let the release workflow build and push the production image from that tag.
-9. Build and push the legacy sidecar sample image when `legacy-sidecar/` changes.
-10. Record the pushed digests from the workflow summary, GitHub Release, or manual sidecar push.
+5. Commit the release prep and push the branch.
+6. Let public CI and downstream candidate-image testing pass on the PR branch.
+7. Merge the release prep to `main`.
+8. Tag the merged `main` release commit with `v$(cat VERSION)`.
+9. Let the release workflow build and push the production image from that tag.
+10. Record the runtime digest from the workflow summary and GitHub Release.
 11. Confirm the GitHub Release includes:
    - the semver tag
-   - the immutable image digest for each published image
+   - the immutable runtime image digest
    - the validation commands used
-12. Pin production compose defaults as `image:v${VERSION}@sha256:<digest>`.
+12. Open a post-release pin-sync PR that replaces every checked-in main-runtime
+    image example with `image:v${VERSION}@sha256:<digest>`.
+13. Validate and merge that PR. Do not change the legacy-sidecar tag unless a
+    separate sidecar release was intentionally built and validated.
 
 ## Automated workflows
 
 The primary runtime image release process is split into three workflows:
 
-- `Validate redis-pvxs-ioc image` runs on PRs, pushes to `main`, and manual
-  dispatch. It builds the image from the repo root with
+- `Validate redis-pvxs-ioc image` runs pull requests on a GitHub-hosted runner
+  without Fermilab credentials. Pushes to `main` and manual dispatches run on
+  `adlinux3`, matching release infrastructure. It builds the image with
   `REDIS_PVXS_IOC_VERSION=$(cat VERSION)` and
   `REDIS_PVXS_IOC_REVISION=<source revision>`, validates image labels, checks
   `redis-pvxs-ioc --version`, and validates the default runtime config with
@@ -59,9 +64,9 @@ The primary runtime image release process is split into three workflows:
   `vX.Y.Z` plus `latest`, captures the digest, validates the pushed image, and
   creates or updates the GitHub Release.
 
-The legacy sidecar image is still published with the manual sidecar commands
-below when `legacy-sidecar/` changes. Standardizing that sidecar into the same
-automated release workflow should be handled as a separate scoped change.
+The legacy sidecar has its own version and immutable digest. It is published
+only as a separate, intentional sidecar release. Standardizing it into an
+automated workflow is a separate scoped change.
 
 ## Image reference policy
 
@@ -80,7 +85,6 @@ only when the workflow is unavailable, and keep the same release identity checks
 VERSION="$(cat VERSION)"
 REVISION="$(git rev-parse --short=12 HEAD)"
 IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}"
-LEGACY_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v${VERSION}"
 
 git tag "v${VERSION}"
 git push origin HEAD
@@ -97,6 +101,8 @@ docker build \
 
 docker push "${IMAGE}"
 docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest
+
+LEGACY_IMAGE="${LEGACY_IOC_IMAGE:?set the independently versioned legacy sidecar image}"
 
 LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
   docker compose \
@@ -129,7 +135,7 @@ When updating deployment compose files, keep the tag and digest together:
 
 ```sh
 image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}@sha256:<digest>
-image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v${VERSION}@sha256:<digest>
+image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:<sidecar-version>@sha256:<digest>
 ```
 
 ## Manual GitHub release
@@ -143,3 +149,6 @@ gh release create "v${VERSION}" \
 ```
 
 After the release is created, edit the release notes to add the final image digests and the tested validation commands.
+
+Then open the post-release pin-sync PR. A tag identifies the intended release;
+only the published digest can identify the exact artifact in checked-in examples.

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.1 - 2026-07-14
+
+- publish the project under the BSD 3-Clause License and package the license and third-party notices in the runtime image
+- remove the vendored `tcast` and `acnetPV` sources and their legacy-sidecar build integration from the public release tree
+- pin the redis-adapter HTTPS-submodule transport fix so recursive public clones do not require GitHub SSH credentials
+- reorganize the public documentation around current features, configuration, operations, architecture, and contribution paths
+- add a complete native source-build guide and Docker patterns for forwarding an existing `EPICS_*` environment
+- make public pull-request validation independent of Fermilab credentials and self-hosted infrastructure
+- refresh the default runtime image examples to the validated v0.6.0 release while preserving the independently versioned legacy sidecar
+- document and smoke-test the full built-in diagnostic PV surface and rejected hot-reload behavior
+- separate the optional gRPC reflection example from the default demo so core startup and reload validation do not wait on an absent backend
+
 ## v0.6.0 - 2026-06-30
 
 - add generic reflection-based PVA `pvxcall` to gRPC forwarding with top-level `rpc_services` config

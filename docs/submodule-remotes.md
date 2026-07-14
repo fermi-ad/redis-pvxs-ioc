@@ -1,34 +1,36 @@
 # Published Submodule Remotes
 
-`.gitmodules` now points at published remotes.
-Before pushing `redis-pvxs-ioc`, verify that each remote contains the exact pinned commit recorded by the superproject.
+`.gitmodules` points at public HTTPS remotes so anonymous recursive clones and
+fork pull-request workflows do not need GitHub SSH credentials. Before changing a
+gitlink, verify that its public remote contains the exact pinned commit.
 
 ## Required remotes
 
 ### `third_party/epics-base`
 
-- Published `.gitmodules` URL: `git@github.com:derekste/epics-base.git`
+- Published `.gitmodules` URL: `https://github.com/derekste/epics-base.git`
 - Pinned commit: `c5333b5c88dc05bbb5a6bc641527f11f949953b8`
 - Publish status: ready
 - Current known branch containing the commit: `dev/as-hag-dns-ttl`
-- Verified remote branch head: `git@github.com:derekste/epics-base.git` `refs/heads/dev/as-hag-dns-ttl`
+- Verified remote branch: `https://github.com/derekste/epics-base.git` `refs/heads/dev/as-hag-dns-ttl`
 - Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
 
 ### `third_party/pvxs`
 
-- Published `.gitmodules` URL: `git@github.com:derekste/pvxs.git`
+- Published `.gitmodules` URL: `https://github.com/derekste/pvxs.git`
 - Pinned commit: `3c83f4bde9a36a3d06d65389b4f043de244464ac`
 - Publish status: ready
 - Current known branch containing the commit: `dev/client-stateful-dns`
-- Verified remote branch head: `git@github.com:derekste/pvxs.git` `refs/heads/dev/client-stateful-dns`
+- Verified remote branch: `https://github.com/derekste/pvxs.git` `refs/heads/dev/client-stateful-dns`
 - Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/pvxs` repo at the merged upstream commit
 
 ### `third_party/redis-adapter`
 
-- Published `.gitmodules` URL: `git@github.com:fermi-ad/redis-adapter.git`
-- Pinned commit: `31832be0ab6d38ed1296f39ab73334a8663c7e6a`
+- Published `.gitmodules` URL: `https://github.com/fermi-ad/redis-adapter.git`
+- Pinned commit: `cbac503548de257c3d8cc07649b8562082cfa227`
 - Publish status: ready
-- Current known branch containing the commit: `origin/main`
+- Current known branch containing the commit: `dev/https-submodules`
+- Upstream review: [redis-adapter #98](https://github.com/fermi-ad/redis-adapter/pull/98)
 
 ### `third_party/yaml-cpp`
 
@@ -68,10 +70,9 @@ These public support modules are pinned for the registry-built legacy IOC sideca
 Vendored non-submodule trees:
 
 - `third_party/support/pcre`: copied from the local GHE support-module monorepo `pcre-8.44` tree because the EPICS build wrapper is local.
-- `third_party/fnal/tcast`: copied as-is from the local GHE support-module monorepo and disabled by default at runtime.
-- `third_party/fnal/acnetPV`: copied as-is from the local GHE support-module monorepo and disabled by default at runtime.
 
-## Push checklist
+## Update checklist
 
 1. Run `git submodule sync --recursive`.
-2. Re-run `git submodule update --init --recursive` from a clean clone to verify the repo is self-bootstrapable.
+2. Re-run `git submodule update --init --recursive` from an anonymous clean clone
+   to verify the repo is self-bootstrapable.

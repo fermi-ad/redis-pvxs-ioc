@@ -1,5 +1,9 @@
 # ADR 0003: MVP Excludes ACF Enforcement
 
+> **Historical wording:** “MVP” names the original milestone. ACF remains
+> unimplemented and is tracked as current roadmap work in
+> [issue #5](https://github.com/fermi-ad/redis-pvxs-ioc/issues/5).
+
 ## Status
 
 Accepted
@@ -12,7 +16,7 @@ The MVP does not implement ACF parsing or access-security enforcement.
 
 - The first deliverable is a standalone writable hot-reload core with Redis-backed PV serving.
 - ACF support has meaningful product and dependency implications and should land on top of a proven runtime, not inside the initial bring-up.
-- The design doc keeps ACF as a first-class product requirement after MVP.
+- The original design proposal kept ACF as a first-class requirement for later work.
 
 ## Consequences
 

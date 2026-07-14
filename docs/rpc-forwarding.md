@@ -46,7 +46,10 @@ rpc_services:
 ```
 
 `pvs` and `rpc_services` are both optional individually, but at least one must be
-present. RPC services never touch Redis.
+present. RPC services never touch Redis, although the current top-level schema
+still requires a `redis` or `redis_backends` section. See
+[`../demo/config.rpc.yaml`](../demo/config.rpc.yaml) for a complete RPC-only
+example.
 
 ## Argument mapping
 

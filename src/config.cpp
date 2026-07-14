@@ -366,7 +366,7 @@ std::optional<LinearTransformConfig> parseTransform(const YAML::Node& node, cons
   if (node["kind"]) {
     const auto kind = lowerCopy(parseString(node["kind"], path + ".kind"));
     if (kind != "linear") {
-      fail(path + ".kind", "only linear transforms are supported in the MVP");
+      fail(path + ".kind", "only linear transforms are supported");
     }
   }
   LinearTransformConfig transform;
@@ -430,13 +430,13 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   pv.initialValue = parseInitialValue(node["initial"], pv.type, pv.shape, path + ".initial");
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
-    fail(path + ".type", "this array element type is unsupported in the MVP");
+    fail(path + ".type", "this array element type is unsupported");
   }
   if (pv.transform.has_value() && !isFloatingPointType(pv.type)) {
     fail(path + ".transform", "linear transforms are only supported for floating-point PVs");
   }
   if (pv.shape == Shape::Array && (pv.alarms.lowAlarm || pv.alarms.lowWarning || pv.alarms.highWarning || pv.alarms.highAlarm)) {
-    fail(path + ".alarm", "array threshold alarms are out of scope for the MVP");
+    fail(path + ".alarm", "array threshold alarms are unsupported");
   }
   if (!isNumericType(pv.type)) {
     if (pv.metadata.display.low || pv.metadata.display.high || pv.metadata.control.low || pv.metadata.control.high || pv.metadata.minStep) {

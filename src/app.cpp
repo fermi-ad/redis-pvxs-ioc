@@ -435,7 +435,7 @@ void Application::stop() {
 
 bool Application::applyConfig(const AppConfig& config, const bool initialLoad, std::string& error) {
   if (!initialLoad && impl_->hasConfig && !sameServerConfig(impl_->currentConfig.server, config.server)) {
-    error = "server namespace/bind settings are immutable after startup in the MVP";
+    error = "server namespace/bind settings are immutable after startup";
     return false;
   }
 

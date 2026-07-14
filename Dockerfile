@@ -96,7 +96,7 @@ LABEL org.opencontainers.image.title="redis-pvxs-ioc" \
 COPY --from=builder /opt/runtime /opt/redis-pvxs-ioc
 COPY demo/config.yaml /etc/redis-pvxs-ioc/config.yaml
 COPY scripts/container-entrypoint.sh /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
-COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/redis-pvxs-ioc/
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/redis-pvxs-ioc/
 
 RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 

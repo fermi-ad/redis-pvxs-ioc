@@ -53,7 +53,7 @@ done < <(compgen -e | LC_ALL=C sort)
 docker run --rm --network host \
   "${epics_env[@]}" \
   --volume "$PWD/config.yaml:/etc/redis-pvxs-ioc/config.yaml:ro" \
-  adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.0@sha256:208002466ec3cc7db31ed5061938029ed2df90242ae2ccb5b0ab7de8792fbefb
+  adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.1@sha256:73ef6e1ca9e8e6c344e2663f841186050629b49a3f1ebe3c3ffa1e73ce4bfad5
 ```
 
 For a long-running Compose deployment, capture the same variables in a
@@ -117,7 +117,7 @@ namespace:
 ```yaml
 services:
   ioc:
-    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.0@sha256:208002466ec3cc7db31ed5061938029ed2df90242ae2ccb5b0ab7de8792fbefb
+    image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.1@sha256:73ef6e1ca9e8e6c344e2663f841186050629b49a3f1ebe3c3ffa1e73ce4bfad5
     hostname: redis-pvxs-ioc.example.fnal.gov
     environment:
       - EPICS_HOST_INTERFACE=eth0

@@ -34,6 +34,26 @@ run_with_timeout() {
   fi
 }
 
+# Rewrite the existing inode so native Linux bind mounts observe config edits.
+# Tools such as `sed -i` and `perl -pi` replace the file by rename, leaving a
+# running container attached to the old inode.
+replace_config_text() {
+  local from="$1"
+  local to="$2"
+
+  perl -0 -e '
+    my ($path, $from, $to) = @ARGV;
+    open my $config, "+<", $path or die "open $path: $!\n";
+    local $/;
+    my $text = <$config>;
+    $text =~ s/\Q$from\E/$to/ or die "text not found in $path: $from\n";
+    seek $config, 0, 0 or die "seek $path: $!\n";
+    truncate $config, 0 or die "truncate $path: $!\n";
+    print {$config} $text or die "write $path: $!\n";
+    close $config or die "close $path: $!\n";
+  ' "$REDIS_PVXS_IOC_CONFIG" "$from" "$to"
+}
+
 if ! command -v xxd >/dev/null 2>&1; then
   echo "xxd is required on the Docker host for Redis payload validation" >&2
   exit 1
@@ -106,7 +126,7 @@ run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxge
 run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1" | xxd -p -c 256 | grep '^0000000000805640'
 run_with_timeout docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10 | grep 'DEMO:magnet:current'
 
-LC_ALL=C LANG=C perl -0pi -e 's/description: Source temperature/description: Source temperature reloaded/' "$REDIS_PVXS_IOC_CONFIG"
+replace_config_text 'description: Source temperature' 'description: Source temperature reloaded'
 run_with_timeout docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'
 sleep 2
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
@@ -121,7 +141,7 @@ done
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
 
 # A bad replacement must report the error without replacing generation 2.
-LC_ALL=C LANG=C perl -0pi -e 's/type: float64/type: unsupported/' "$REDIS_PVXS_IOC_CONFIG"
+replace_config_text 'type: float64' 'type: unsupported'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:config:reload 1"
 for _ in {1..10}; do
   if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep -q 'value string = "reload failed"'; then

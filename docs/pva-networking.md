@@ -31,6 +31,57 @@ Deployment compose files should usually set `EPICS_HOST_INTERFACE` to the
 container interface on the controls network and avoid overriding
 `EPICS_PVA_AUTO_ADDR_LIST` back to `YES`.
 
+## Bring an existing EPICS environment into Docker
+
+A native `redis-pvxs-ioc` process inherits every `EPICS_*` variable exported by
+its calling shell. Docker containers only receive variables that are passed
+explicitly. The container entrypoint preserves any supplied `EPICS_*` value and
+only fills in a project default when that variable is absent.
+
+For an ad hoc `docker run`, forward every currently exported `EPICS_*` variable
+by name. Passing `--env NAME` tells Docker to copy the value without embedding
+it in shell history:
+
+```bash
+epics_env=()
+while IFS= read -r name; do
+  case "$name" in
+    EPICS_*) epics_env+=(--env "$name") ;;
+  esac
+done < <(compgen -e | LC_ALL=C sort)
+
+docker run --rm --network host \
+  "${epics_env[@]}" \
+  --volume "$PWD/config.yaml:/etc/redis-pvxs-ioc/config.yaml:ro" \
+  adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.0@sha256:208002466ec3cc7db31ed5061938029ed2df90242ae2ccb5b0ab7de8792fbefb
+```
+
+For a long-running Compose deployment, capture the same variables in a
+temporary environment file and reference it from a deployment-owned override:
+
+```sh
+EPICS_ENV_FILE=$(mktemp)
+export EPICS_ENV_FILE
+env | awk -F= '$1 ~ /^EPICS_/ { print }' > "$EPICS_ENV_FILE"
+docker compose -f docker-compose.yml -f compose.epics-env.yml up -d
+rm -f "$EPICS_ENV_FILE"
+```
+
+```yaml
+# compose.epics-env.yml
+services:
+  ioc:
+    env_file:
+      - ${EPICS_ENV_FILE}
+```
+
+Review the captured variables before deployment. In particular, client-side
+`EPICS_PVA_*` search settings and server-side `EPICS_PVAS_*` interface/beacon
+settings have different roles. Forwarding the host environment also does not
+make a private bridge routable; use host networking or a routed container
+identity when the supplied addresses refer to the controls network. The
+`--network host` example is for Linux hosts.
+
 ## Default Docker Demo
 
 The default compose stack is intentionally self-contained on a private Docker

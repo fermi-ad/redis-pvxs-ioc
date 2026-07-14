@@ -114,7 +114,7 @@ foreach(_required
   if(NOT EXISTS "${_required}")
     message(FATAL_ERROR
       "Missing built dependency: ${_required}\n"
-      "Build epics-base and pvxs first. See README.md for the dependency bootstrap steps.")
+      "Build epics-base and pvxs first. See docs/building-from-source.md for the dependency bootstrap steps.")
   endif()
 endforeach()
 

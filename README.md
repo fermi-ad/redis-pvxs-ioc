@@ -106,7 +106,8 @@ immutable digest. `:latest` is only a development convenience. See the
 - [Operations and diagnostics](docs/operations.md)
 - [Architecture](docs/design.md)
 - [Current feature state and roadmap](docs/feature-state-roadmap.md)
-- [Development and local builds](docs/development.md)
+- [Building from source](docs/building-from-source.md)
+- [Contributor development guide](docs/development.md)
 - [Release process](docs/releasing.md)
 
 ## Optional legacy sidecar

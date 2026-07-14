@@ -25,8 +25,9 @@
 ## Contributors
 
 - [Architecture](design.md): implemented runtime boundaries and data flow.
-- [Development guide](development.md): prerequisites, dependency bootstrap,
-  builds, tests, and local images.
+- [Building from source](building-from-source.md): prerequisites, pinned or
+  existing EPICS/PVXS builds, tests, and local images.
+- [Development guide](development.md): the contributor build/test loop.
 - [Feature state and roadmap](feature-state-roadmap.md): current capabilities and
   tracked future work.
 - [Normative types roadmap](normative-types-roadmap.md): expansion beyond

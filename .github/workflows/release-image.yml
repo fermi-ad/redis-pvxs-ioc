@@ -111,7 +111,7 @@ jobs:
           docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
           test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "BSD-3-Clause"
           docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
-            'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
+            'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/NOTICE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
 
       - name: Create or update GitHub release
         env:
@@ -136,7 +136,7 @@ jobs:
           - Verified the tag commit is contained in \`origin/main\`.
           - Verified \`redis-pvxs-ioc --version\` reports \`${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.revision }})\`.
           - Verified the default runtime config with \`--check-config /etc/redis-pvxs-ioc/config.yaml\`.
-          - Verified the image carries the BSD-3-Clause label, project license, and third-party notices.
+          - Verified the image carries the BSD-3-Clause label, project license, government-rights notice, and third-party notices.
           EOF
 
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then

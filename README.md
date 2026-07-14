@@ -121,5 +121,6 @@ part of the core quick start while its long-term product boundary is decided in
 ## License
 
 Project-authored code is available under the [BSD 3-Clause License](LICENSE).
-See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for bundled dependencies and
-their license locations.
+The contract and government-rights terms are retained in [NOTICE](NOTICE). See
+[Third-Party Notices](THIRD_PARTY_NOTICES.md) for bundled dependencies and their
+license locations.

@@ -1,7 +1,7 @@
 REDIS_PVXS_IOC_TOP = $(TOP)/../..
 
 PVXS = $(REDIS_PVXS_IOC_TOP)/third_party/pvxs
-RECCASTER = $(REDIS_PVXS_IOC_TOP)/third_party/recsync/client
+RECCASTER = $(REDIS_PVXS_IOC_TOP)/third_party/reccaster
 
 SNCSEQ = $(REDIS_PVXS_IOC_TOP)/third_party/support/seq
 SSCAN = $(REDIS_PVXS_IOC_TOP)/third_party/support/sscan

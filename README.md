@@ -10,18 +10,29 @@ Redis-backed EPICS process variables defined by YAML.
 ## Key features
 
 - **Generation-based hot reload:** reload through `SIGHUP` or a PVA command;
-  invalid replacements are rejected while the active generation keeps serving.
+  compatible Redis subscriptions stay live, changed PVs are staged, and invalid
+  replacements are rejected while the active generation keeps serving.
+- **Collision-aware preflight:** `--check-config` resolves final PV names and
+  routes without starting Redis or PVA, rejecting duplicate PV names, reserved
+  version/revision aliases, unknown backends, and conflicting read/confirm
+  subscriptions within a backend.
 - **Built-in diagnostics:** always-on PVA endpoints report version, source
   revision, config generation/status/error, configured PV count, and Redis
   backend health.
-- **Typed Redis routes:** scalar and array reads, writes, and confirmed readback
-  across one or more standalone Redis backends.
+- **Snapshot-plus-stream reads:** each PV opens from the latest Redis value, or
+  its YAML `initial` fallback, before live subscription updates take over; Redis
+  source timestamps are carried into PVA.
+- **Confirmed Redis writes:** scalar and array routes may use independent read,
+  write, and confirmation keys across multiple backends; readback matching has a
+  bounded timeout, and stale-generation operations are fenced during reload.
 - **Operator-ready PVA values:** `NTScalar` and `NTScalarArray` values include
   alarm, timestamp, display, control, units, precision, and limit metadata.
-- **Alarms and transforms:** scalar threshold evaluation, Redis alarm-stream
-  publication, and linear floating-point scale/offset transforms.
-- **Integrations:** one-shot ChannelFinder publishing and reflection-based PVA
-  RPC to gRPC forwarding.
+- **Alarm de-chattering and engineering units:** numeric thresholds support
+  hysteresis, Redis alarm events are emitted only on state/severity transitions,
+  and linear transforms map reads forward and writes back through the inverse.
+- **Dynamic integrations:** one-shot ChannelFinder publishing and
+  reflection-based PVA RPC to gRPC forwarding without service-specific generated
+  code in the IOC.
 - **Container tooling:** released images include `pvxget`, `pvxput`, and other
   PVXS tools for validation and troubleshooting.
 

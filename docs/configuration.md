@@ -126,8 +126,24 @@ confirm:
   timeout_ms: 250
 ```
 
-`confirm` requires `write`; `timeout_ms` defaults to `250`. Subscribed read and
-confirm keys must be unique within each backend generation.
+`confirm` requires `write`; `timeout_ms` defaults to `250`. A confirmed put
+completes only after the confirmation subscription sees the raw value written to
+Redis. The wait is bounded by `timeout_ms`, and reload deactivation fences puts
+from an older generation.
+
+### Collision and route validation
+
+Configuration loading rejects:
+
+- duplicate `pvs[].name` values;
+- names that expand to the four reserved version/revision aliases;
+- more than one subscription to the same `(backend, key)` through a `read` or a
+  distinct `confirm` route; and
+- route or alarm backend aliases that do not exist.
+
+The same Redis key is allowed on different backends because the backend alias is
+part of the subscription identity. `--check-config` performs these checks
+offline and prints the resolved PV names and routes before deployment.
 
 ### Metadata
 
@@ -176,8 +192,11 @@ inverse mapping.
 
 ### Initial values
 
-`initial` is optional and must match the declared type and shape. It primes the
-served value until Redis supplies data. Boolean/string arrays are unsupported.
+`initial` is optional and must match the declared type and shape. At startup the
+runtime first attempts to load the latest Redis value; `initial` is the fallback
+when no snapshot is available. Live subscription updates then take over, and
+their Redis timestamps are carried into the PVA `timeStamp`. Boolean/string
+arrays are unsupported.
 
 ## `rpc_services`
 

@@ -45,7 +45,12 @@ int main() {
   assert(warning.status == epicsAlarmHigh);
   assert(warning.severity == epicsSevMinor);
 
-  const auto clear = evaluateNumericAlarm(pv, 5.0, warning.status);
+  pv.alarms.hysteresis = 0.5;
+  const auto heldByHysteresis = evaluateNumericAlarm(pv, 6.6, warning.status);
+  assert(heldByHysteresis.status == epicsAlarmHigh);
+  assert(heldByHysteresis.severity == epicsSevMinor);
+
+  const auto clear = evaluateNumericAlarm(pv, 6.4, warning.status);
   assert(clear.status == epicsAlarmNone);
   assert(clear.severity == epicsSevNone);
 

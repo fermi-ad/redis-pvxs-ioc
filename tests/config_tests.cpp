@@ -118,6 +118,26 @@ pvs:
       key: same
 )YAML";
 
+const char* const kDuplicatePvNames = R"YAML(
+server:
+  instance: test
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: duplicate
+    type: float64
+    shape: scalar
+    read:
+      key: first
+  - name: duplicate
+    type: float64
+    shape: scalar
+    read:
+      key: second
+)YAML";
+
 const char* const kDuplicateReadersDifferentBackends = R"YAML(
 server:
   instance: test
@@ -341,6 +361,7 @@ int main() {
   assert(!sameAlarmStreamConfig(multi.alarms, alarmChanged));
 
   assert(throwsConfig(kOldSchema));
+  assert(throwsConfig(kDuplicatePvNames));
   assert(throwsConfig(kDuplicateReaders));
   assert(!throwsConfig(kDuplicateReadersDifferentBackends));
   assert(throwsConfig(kUnknownBackend));

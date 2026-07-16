@@ -39,13 +39,15 @@ gitlink, verify that its public remote contains the exact pinned commit.
 - Publish status: ready
 - Source of the local checkout: `https://github.com/jbeder/yaml-cpp.git`
 
-### `third_party/recsync`
+### `third_party/reccaster`
 
-- Published `.gitmodules` URL: `https://github.com/ChannelFinder/recsync.git`
-- Pinned commit: `864b162cb05fa140e67e056bda86ed750447c3d4`
-- Pinned upstream tag: `1.9.2`
+- Published `.gitmodules` URL: `https://github.com/ChannelFinder/reccaster.git`
+- Pinned commit: `254723063a2b7a7c80d8e50f05efa8d748f429dd`
+- Pinned upstream tag: none; the standalone repository has not published a tag
 - Publish status: ready
 - Use: legacy IOC sidecar RecCaster support only
+- License notice: retained in `licenses/RecCaster-LICENSE` because the
+  standalone upstream repository does not contain a license file at this commit
 
 ## Legacy sidecar support-module remotes
 

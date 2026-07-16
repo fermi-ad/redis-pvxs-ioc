@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- migrate the legacy-sidecar RecCaster dependency from the removed
+  `ChannelFinder/recsync/client` tree to the standalone
+  `ChannelFinder/reccaster` repository
+
 ## v0.6.1 - 2026-07-14
 
 - publish the project under the BSD 3-Clause License and package the license and third-party notices in the runtime image

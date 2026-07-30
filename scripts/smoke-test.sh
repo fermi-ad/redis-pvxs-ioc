@@ -127,7 +127,7 @@ run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxge
 
 MONITOR_OUTPUT="$(mktemp)"
 docker exec "$IOC_CONTAINER" sh -lc \
-  "$PV_ENV $PVX_BIN_DIR/pvxmonitor EXTERNAL:magnet:current" >"$MONITOR_OUTPUT" 2>&1 &
+  "$PV_ENV stdbuf -oL -eL $PVX_BIN_DIR/pvxmonitor EXTERNAL:magnet:current" >"$MONITOR_OUTPUT" 2>&1 &
 MONITOR_PID=$!
 sleep 1
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput DEMO:magnet:current 9.0"

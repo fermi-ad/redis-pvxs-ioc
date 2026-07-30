@@ -51,6 +51,9 @@ always see served-unit values.
 and validates the replacement file, constructs the next generation, and only
 then applies it. Unaffected PVs remain live. Removed or structurally changed PVs
 are deactivated, and stale callbacks from prior generations are fenced.
+Alias-only changes update the PVA registry in place while retaining the
+canonical runtime and its Redis subscription. Removed aliases stop resolving;
+new aliases immediately share the existing value, monitor, and put behavior.
 
 If parsing, validation, backend construction, or RPC reflection fails, the new
 generation is rejected and the active generation continues serving. The

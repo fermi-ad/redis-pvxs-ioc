@@ -409,6 +409,20 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   if (pv.name.empty()) {
     fail(path + ".name", "must not be empty");
   }
+  if (node["aliases"]) {
+    const auto aliases = requireSequence(node["aliases"], path + ".aliases");
+    if (aliases.size() == 0u) {
+      fail(path + ".aliases", "must not be empty");
+    }
+    for (size_t index = 0; index < aliases.size(); ++index) {
+      const auto aliasPath = path + ".aliases[" + std::to_string(index) + "]";
+      const auto alias = parseString(aliases[index], aliasPath);
+      if (alias.empty()) {
+        fail(aliasPath, "must not be empty");
+      }
+      pv.aliases.push_back(alias);
+    }
+  }
 
   pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
   pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
@@ -525,7 +539,7 @@ AppConfig parseConfig(const YAML::Node& root) {
   // Redis-backed PVs.
   const auto pvsNode = root["pvs"] ? requireSequence(root["pvs"], "root.pvs") : YAML::Node();
 
-  std::set<std::string> pvNames;
+  std::set<std::string> servedNames;
   std::set<std::pair<std::string, std::string>> subscribedKeys;
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
@@ -546,20 +560,26 @@ AppConfig parseConfig(const YAML::Node& root) {
                           config.redisBackends,
                           hasLegacyRedis);
     }
-    if (!pvNames.insert(pv.name).second) {
-      fail("root.pvs[" + std::to_string(index) + "].name", "duplicate PV name '" + pv.name + "'");
-    }
-    const auto pvName = fullPVName(config.server, pv);
     const std::vector<std::string> reservedNames{
       versionPVName(config.server),
       revisionPVName(config.server),
       adminPVName(config.server, "version"),
       adminPVName(config.server, "revision"),
     };
-    for (const auto& reservedName : reservedNames) {
-      if (pvName == reservedName) {
-        fail("root.pvs[" + std::to_string(index) + "].name",
-             "PV name conflicts with reserved metadata PV '" + reservedName + "'");
+    const auto names = fullPVNames(config.server, pv);
+    for (size_t nameIndex = 0; nameIndex < names.size(); ++nameIndex) {
+      const auto path = nameIndex == 0u
+          ? "root.pvs[" + std::to_string(index) + "].name"
+          : "root.pvs[" + std::to_string(index) + "].aliases[" +
+                std::to_string(nameIndex - 1u) + "]";
+      const auto& name = names[nameIndex];
+      if (!servedNames.insert(name).second) {
+        fail(path, "duplicate served PV name '" + name + "'");
+      }
+      for (const auto& reservedName : reservedNames) {
+        if (name == reservedName) {
+          fail(path, "PV name conflicts with reserved metadata PV '" + reservedName + "'");
+        }
       }
     }
     if (!subscribedKeys.insert({pv.read.backend, pv.read.key}).second) {
@@ -627,6 +647,15 @@ std::string summarizeConfig(const AppConfig& config) {
     }
     if (pv.confirm) {
       stream << " confirm=" << pv.confirm->backend << ":" << pv.confirm->key;
+    }
+    if (!pv.aliases.empty()) {
+      stream << " aliases=";
+      for (size_t index = 0; index < pv.aliases.size(); ++index) {
+        if (index != 0u) {
+          stream << ",";
+        }
+        stream << pv.aliases[index];
+      }
     }
   }
   return stream.str();
@@ -754,6 +783,14 @@ std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
     return pv.name;
   }
   return server.nameSpace + ":" + pv.name;
+}
+
+std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig& pv) {
+  std::vector<std::string> names;
+  names.reserve(1u + pv.aliases.size());
+  names.push_back(fullPVName(server, pv));
+  names.insert(names.end(), pv.aliases.begin(), pv.aliases.end());
+  return names;
 }
 
 std::string adminPVName(const ServerConfig& server, const std::string& suffix) {

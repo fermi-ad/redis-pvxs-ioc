@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -279,6 +280,18 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
 using RpcMap = std::unordered_map<std::string, std::shared_ptr<RpcPV>>;
+using PVBindingMap = std::map<std::string, std::string>;
+
+PVBindingMap pvBindings(const AppConfig& config) {
+  PVBindingMap bindings;
+  for (const auto& pv : config.pvs) {
+    const auto canonicalName = fullPVName(config.server, pv);
+    for (const auto& servedName : fullPVNames(config.server, pv)) {
+      bindings.emplace(servedName, canonicalName);
+    }
+  }
+  return bindings;
+}
 
 // Build RPC-forwarding PVs by reflecting each configured gRPC service and
 // creating one PV per method, named <namespace>:<UPPER_SNAKE(Method)><suffix>.
@@ -414,9 +427,11 @@ void Application::stop() {
     return;
   }
 
+  for (const auto& binding : pvBindings(impl_->currentConfig)) {
+    impl_->server.removePV(binding.first);
+  }
   for (auto& item : impl_->runtimes) {
     item.second->deactivate("application stopping");
-    impl_->server.removePV(item.first);
   }
   impl_->runtimes.clear();
   for (auto& item : impl_->rpcPVs) {
@@ -471,14 +486,18 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
     }
     setDeferReaders(newRedisBackends, false);
 
+    for (const auto& binding : pvBindings(impl_->currentConfig)) {
+      impl_->server.removePV(binding.first);
+    }
     for (auto& item : impl_->runtimes) {
       item.second->deactivate("config replaced");
-      impl_->server.removePV(item.first);
     }
     impl_->runtimes.clear();
 
     for (auto& item : staged) {
-      impl_->server.addPV(item.first, item.second->sharedPV());
+      for (const auto& servedName : fullPVNames(config.server, item.second->config())) {
+        impl_->server.addPV(servedName, item.second->sharedPV());
+      }
       impl_->runtimes.emplace(item.first, item.second);
     }
 
@@ -514,6 +533,8 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
 
 bool Application::applyIncremental(const AppConfig& config, const uint64_t generation, std::string& error) {
   try {
+    const auto currentBindings = pvBindings(impl_->currentConfig);
+    const auto desiredBindings = pvBindings(config);
     std::map<std::string, PVConfig> desired;
     for (const auto& pv : config.pvs) {
       desired.emplace(fullPVName(config.server, pv), pv);
@@ -564,28 +585,45 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
       setDeferReaders(impl_->redisBackends, false);
     }
 
+    const std::set<std::string> replaced(replaceNames.begin(), replaceNames.end());
+    for (const auto& binding : currentBindings) {
+      const auto desiredIt = desiredBindings.find(binding.first);
+      if (desiredIt == desiredBindings.end() ||
+          desiredIt->second != binding.second ||
+          replaced.count(binding.second) != 0u) {
+        impl_->server.removePV(binding.first);
+      }
+    }
+
     for (const auto& item : reconfigureNames) {
       impl_->runtimes.at(item.first)->reconfigure(item.second, generation);
     }
 
     for (const auto& name : removeNames) {
       impl_->runtimes.at(name)->deactivate("pv removed");
-      impl_->server.removePV(name);
       impl_->runtimes.erase(name);
     }
 
     for (const auto& name : replaceNames) {
       impl_->runtimes.at(name)->deactivate("pv replaced");
-      impl_->server.removePV(name);
       impl_->runtimes.erase(name);
-      impl_->server.addPV(name, staged.at(name)->sharedPV());
       impl_->runtimes.emplace(name, staged.at(name));
       staged.erase(name);
     }
 
     for (auto& item : staged) {
-      impl_->server.addPV(item.first, item.second->sharedPV());
       impl_->runtimes.emplace(item.first, item.second);
+    }
+
+    for (const auto& binding : desiredBindings) {
+      const auto currentIt = currentBindings.find(binding.first);
+      if (currentIt == currentBindings.end() ||
+          currentIt->second != binding.second ||
+          replaced.count(binding.second) != 0u) {
+        impl_->server.addPV(
+            binding.first,
+            impl_->runtimes.at(binding.second)->sharedPV());
+      }
     }
 
     // Full-replace the RPC-forwarding PVs.

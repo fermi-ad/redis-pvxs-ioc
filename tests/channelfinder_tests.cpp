@@ -29,6 +29,8 @@ channelfinder:
     area: testbed
 pvs:
   - name: source:temperature
+    aliases:
+      - EXTERNAL:source:temperature
     type: float64
     shape: scalar
     read:
@@ -67,7 +69,7 @@ int main() {
   assert(config.channelFinder.properties.at("area") == "testbed");
 
   const auto channels = buildChannelFinderChannels(config, "2026-05-06T00:00:00Z");
-  assert(channels.size() == 2u);
+  assert(channels.size() == 3u);
 
   const auto& readback = channels[0];
   assert(readback.name == "DEMO:source:temperature");
@@ -88,13 +90,21 @@ int main() {
   assert(readback.properties.at("redisReadKey") == "temperature:rb");
   assert(readback.properties.at("area") == "testbed");
 
-  const auto& writable = channels[1];
+  const auto& alias = channels[1];
+  assert(alias.name == "EXTERNAL:source:temperature");
+  assert(alias.properties.at("aliasOf") == "DEMO:source:temperature");
+  assert(alias.properties.at("redisReadKey") == "temperature:rb");
+  assert(alias.properties.at("description") == "Source temperature");
+
+  const auto& writable = channels[2];
   assert(writable.name == "DEMO:magnet:current");
   assert(writable.properties.at("redisWriteKey") == "magnet:current");
   assert(writable.properties.at("redisConfirmKey") == "magnet:current");
 
   const auto json = channelFinderChannelsJson(channels);
   assert(json.find("\"name\": \"DEMO:source:temperature\"") != std::string::npos);
+  assert(json.find("\"name\": \"EXTERNAL:source:temperature\"") != std::string::npos);
+  assert(json.find("\"name\": \"aliasOf\"") != std::string::npos);
   assert(json.find("\"name\": \"redisReadKey\"") != std::string::npos);
   assert(json.find("\"name\": \"redisWriteKey\"") != std::string::npos);
   assert(json.find("\"name\": \"recordType\"") == std::string::npos);

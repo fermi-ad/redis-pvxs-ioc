@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- add fully-qualified PVA aliases that share one configured PV runtime, Redis
+  subscription, write route, and confirmation path
+- support alias add/remove/rename during hot reload and publish aliases to
+  ChannelFinder with an `aliasOf` property
+
 ## v0.6.1 - 2026-07-14
 
 - publish the project under the BSD 3-Clause License and package the license and third-party notices in the runtime image

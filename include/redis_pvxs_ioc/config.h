@@ -121,6 +121,7 @@ using TypedValue = std::variant<
 
 struct PVConfig {
   std::string name;
+  std::vector<std::string> aliases;
   PrimitiveType type = PrimitiveType::Float64;
   Shape shape = Shape::Scalar;
   RouteConfig read;
@@ -193,6 +194,7 @@ bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs);
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv);
+std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig& pv);
 std::string adminPVName(const ServerConfig& server, const std::string& suffix);
 std::string versionPVName(const ServerConfig& server);
 std::string revisionPVName(const ServerConfig& server);

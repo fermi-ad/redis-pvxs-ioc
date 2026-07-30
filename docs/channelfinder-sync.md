@@ -45,7 +45,9 @@ Credentials come only from `CHANNELFINDER_USERNAME` and `CHANNELFINDER_PASSWORD`
 
 ## Published Fields
 
-Each Redis PV becomes one ChannelFinder channel.
+Each canonical Redis PV and each of its configured aliases becomes one
+ChannelFinder channel. Alias channels carry the same metadata and routes plus
+`aliasOf=<canonical resolved PVA name>`.
 
 Properties include:
 

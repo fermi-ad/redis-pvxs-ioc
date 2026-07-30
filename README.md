@@ -16,6 +16,9 @@ Redis-backed EPICS process variables defined by YAML.
   routes without starting Redis or PVA, rejecting duplicate PV names, reserved
   version/revision aliases, unknown backends, and conflicting read/confirm
   subscriptions within a backend.
+- **Shared-runtime aliases:** each Redis-backed PV may expose additional,
+  fully-qualified PVA names without adding Redis subscriptions or duplicating
+  confirmed writes.
 - **Built-in diagnostics:** always-on PVA endpoints report version, source
   revision, config generation/status/error, configured PV count, and Redis
   backend health.

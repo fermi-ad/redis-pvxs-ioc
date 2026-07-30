@@ -22,6 +22,9 @@ channelfinder:
 
 pvs:
   - name: source:temperature
+    aliases:
+      - EXTERNAL:source:temperature
+      - REMOVE:source:temperature
     type: float64
     shape: scalar
     read:
@@ -47,6 +50,9 @@ pvs:
     initial: 21.5
 
   - name: magnet:current
+    aliases:
+      - EXTERNAL:magnet:current
+      - EXTERNAL:magnet:current:secondary
     type: float64
     shape: scalar
     read:

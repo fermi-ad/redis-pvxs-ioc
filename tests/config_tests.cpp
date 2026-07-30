@@ -27,6 +27,9 @@ redis:
   port: 6379
 pvs:
   - name: readback
+    aliases:
+      - EXTERNAL:readback
+      - EXTERNAL:readback:secondary
     type: float64
     shape: scalar
     read:
@@ -136,6 +139,136 @@ pvs:
     shape: scalar
     read:
       key: second
+)YAML";
+
+const char* const kEmptyAliases = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: readback
+    aliases: []
+    type: float64
+    shape: scalar
+    read:
+      key: rb
+)YAML";
+
+const char* const kEmptyAlias = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: readback
+    aliases: [""]
+    type: float64
+    shape: scalar
+    read:
+      key: rb
+)YAML";
+
+const char* const kAliasMatchesCanonical = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: readback
+    aliases: [DEMO:readback]
+    type: float64
+    shape: scalar
+    read:
+      key: rb
+)YAML";
+
+const char* const kDuplicateAliasesOnPv = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: readback
+    aliases: [EXTERNAL:readback, EXTERNAL:readback]
+    type: float64
+    shape: scalar
+    read:
+      key: rb
+)YAML";
+
+const char* const kAliasMatchesOtherCanonical = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: first
+    aliases: [DEMO:second]
+    type: float64
+    shape: scalar
+    read:
+      key: first
+  - name: second
+    type: float64
+    shape: scalar
+    read:
+      key: second
+)YAML";
+
+const char* const kAliasMatchesOtherAlias = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: first
+    aliases: [EXTERNAL:shared]
+    type: float64
+    shape: scalar
+    read:
+      key: first
+  - name: second
+    aliases: [EXTERNAL:shared]
+    type: float64
+    shape: scalar
+    read:
+      key: second
+)YAML";
+
+const char* const kReservedAlias = R"YAML(
+server:
+  instance: test
+  namespace: DEMO
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: readback
+    aliases: [SYS:test:version]
+    type: float64
+    shape: scalar
+    read:
+      key: rb
 )YAML";
 
 const char* const kDuplicateReadersDifferentBackends = R"YAML(
@@ -333,6 +466,16 @@ int main() {
   assert(legacy.alarms.backend == kDefaultRedisBackendAlias);
   assert(legacy.pvs.size() == 2u);
   assert(legacy.pvs[0].read.backend == kDefaultRedisBackendAlias);
+  assert(legacy.pvs[0].aliases.size() == 2u);
+  assert(legacy.pvs[0].aliases[0] == "EXTERNAL:readback");
+  assert(legacy.pvs[0].aliases[1] == "EXTERNAL:readback:secondary");
+  const auto readbackNames = fullPVNames(legacy.server, legacy.pvs[0]);
+  assert(readbackNames.size() == 3u);
+  assert(readbackNames[0] == "DEMO:readback");
+  assert(readbackNames[1] == "EXTERNAL:readback");
+  assert(readbackNames[2] == "EXTERNAL:readback:secondary");
+  assert(summarizeConfig(legacy).find(
+      "aliases=EXTERNAL:readback,EXTERNAL:readback:secondary") != std::string::npos);
   assert(legacy.pvs[0].confirm == std::nullopt);
   assert(legacy.pvs[0].transform.has_value());
   assert(legacy.pvs[1].shape == Shape::Array);
@@ -362,6 +505,13 @@ int main() {
 
   assert(throwsConfig(kOldSchema));
   assert(throwsConfig(kDuplicatePvNames));
+  assert(throwsConfig(kEmptyAliases));
+  assert(throwsConfig(kEmptyAlias));
+  assert(throwsConfig(kAliasMatchesCanonical));
+  assert(throwsConfig(kDuplicateAliasesOnPv));
+  assert(throwsConfig(kAliasMatchesOtherCanonical));
+  assert(throwsConfig(kAliasMatchesOtherAlias));
+  assert(throwsConfig(kReservedAlias));
   assert(throwsConfig(kDuplicateReaders));
   assert(!throwsConfig(kDuplicateReadersDifferentBackends));
   assert(throwsConfig(kUnknownBackend));

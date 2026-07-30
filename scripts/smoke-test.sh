@@ -143,7 +143,7 @@ grep 'value double = 9' "$MONITOR_OUTPUT"
 rm -f "$MONITOR_OUTPUT"
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 9'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget EXTERNAL:magnet:current:secondary" | grep 'value double = 9'
-run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1" | xxd -p -c 256 | grep '^0000000000805640'
+run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XREVRANGE '{demo}:magnet:current' + - COUNT 1 | tail -n 1" | xxd -p -c 256 | grep '^0000000000805640'
 run_with_timeout docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10 | grep 'DEMO:magnet:current'
 
 replace_config_text 'description: Source temperature' 'description: Source temperature reloaded'

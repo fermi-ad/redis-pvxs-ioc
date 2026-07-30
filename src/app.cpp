@@ -544,6 +544,7 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
     std::vector<std::string> replaceNames;
     std::vector<std::pair<std::string, PVConfig>> addNames;
     std::vector<std::pair<std::string, PVConfig>> reconfigureNames;
+    std::set<std::string> reopenNames;
 
     for (const auto& current : impl_->runtimes) {
       const auto desiredIt = desired.find(current.first);
@@ -554,6 +555,13 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
 
       if (current.second->structurallyCompatible(desiredIt->second)) {
         reconfigureNames.emplace_back(current.first, desiredIt->second);
+        const auto currentServedNames =
+            fullPVNames(impl_->currentConfig.server, current.second->config());
+        const auto desiredServedNames = fullPVNames(config.server, desiredIt->second);
+        if (std::set<std::string>(currentServedNames.begin(), currentServedNames.end()) !=
+            std::set<std::string>(desiredServedNames.begin(), desiredServedNames.end())) {
+          reopenNames.insert(current.first);
+        }
       } else {
         replaceNames.push_back(current.first);
       }
@@ -586,13 +594,29 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
     }
 
     const std::set<std::string> replaced(replaceNames.begin(), replaceNames.end());
+    std::map<std::string, pvxs::Value> reopenValues;
+    for (const auto& name : reopenNames) {
+      reopenValues.emplace(name, impl_->runtimes.at(name)->sharedPV().fetch());
+    }
+
     for (const auto& binding : currentBindings) {
       const auto desiredIt = desiredBindings.find(binding.first);
       if (desiredIt == desiredBindings.end() ||
           desiredIt->second != binding.second ||
-          replaced.count(binding.second) != 0u) {
+          replaced.count(binding.second) != 0u ||
+          reopenNames.count(binding.second) != 0u) {
         impl_->server.removePV(binding.first);
       }
+    }
+
+    // PVXS StaticSource::remove() closes the SharedPV even when that same
+    // SharedPV is registered under other names. Alias-only changes therefore
+    // remove every binding for the logical runtime, reopen the existing
+    // SharedPV with its current value, and then register the desired name set.
+    // The Redis readers and confirmation routes remain attached to the same
+    // runtime throughout.
+    for (const auto& name : reopenNames) {
+      impl_->runtimes.at(name)->sharedPV().open(reopenValues.at(name));
     }
 
     for (const auto& item : reconfigureNames) {
@@ -619,7 +643,8 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
       const auto currentIt = currentBindings.find(binding.first);
       if (currentIt == currentBindings.end() ||
           currentIt->second != binding.second ||
-          replaced.count(binding.second) != 0u) {
+          replaced.count(binding.second) != 0u ||
+          reopenNames.count(binding.second) != 0u) {
         impl_->server.addPV(
             binding.first,
             impl_->runtimes.at(binding.second)->sharedPV());

@@ -54,6 +54,11 @@ are deactivated, and stale callbacks from prior generations are fenced.
 Alias-only changes update the PVA registry in place while retaining the
 canonical runtime and its Redis subscription. Removed aliases stop resolving;
 new aliases immediately share the existing value, monitor, and put behavior.
+PVXS's static registry closes a `SharedPV` when any registered name is removed,
+so an alias-set change briefly reopens that same `SharedPV` and re-registers its
+complete desired name set. Existing PVA clients may observe a disconnect and
+reconnect during that reload; no Redis subscription, command, or confirmation
+route is rebuilt or replayed.
 
 If parsing, validation, backend construction, or RPC reflection fails, the new
 generation is rejected and the active generation continues serving. The

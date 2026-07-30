@@ -129,6 +129,12 @@ name:
 With `server.namespace: DEMO`, this serves both `DEMO:magnet:current` and the
 exact alias `FACILITY:AREA_GROUP_MAGNET01:I`.
 
+Adding, renaming, or removing aliases during a successful reload retains the
+logical runtime and all Redis routes. Because the PVXS static registry closes a
+shared PV when a registered name is removed, clients attached to any name for
+that logical PV may briefly reconnect while the same `SharedPV` is reopened and
+its desired name set is registered.
+
 Optional route fields:
 
 ```yaml

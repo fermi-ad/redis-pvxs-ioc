@@ -64,7 +64,11 @@ std::string trimTrailingSlash(std::string url) {
 std::vector<ChannelFinderChannel> buildChannelFinderChannels(const AppConfig& config,
                                                              const std::string& syncTime) {
   std::vector<ChannelFinderChannel> channels;
-  channels.reserve(config.pvs.size());
+  size_t channelCount = config.pvs.size();
+  for (const auto& pv : config.pvs) {
+    channelCount += pv.aliases.size();
+  }
+  channels.reserve(channelCount);
 
   const auto pvaPort = config.server.tcpPort.value_or(kDefaultPvaServerPort);
 
@@ -107,7 +111,14 @@ std::vector<ChannelFinderChannel> buildChannelFinderChannels(const AppConfig& co
       channel.properties[entry.first] = entry.second;
     }
 
-    channels.push_back(std::move(channel));
+    const auto canonicalName = channel.name;
+    channels.push_back(channel);
+    for (const auto& alias : pv.aliases) {
+      auto aliasChannel = channel;
+      aliasChannel.name = alias;
+      aliasChannel.properties["aliasOf"] = canonicalName;
+      channels.push_back(std::move(aliasChannel));
+    }
   }
 
   return channels;

@@ -27,6 +27,10 @@ int main() {
   pv.alarms.highWarning = 7.0;
   pv.transform = LinearTransformConfig{2.0, 1.0};
 
+  auto aliasOnlyChange = pv;
+  aliasOnlyChange.aliases.push_back("EXTERNAL:test");
+  assert(sameReaderTopology(pv, aliasOnlyChange));
+
   auto value = createInitialValue(pv);
   value["value"] = 5.0;
 

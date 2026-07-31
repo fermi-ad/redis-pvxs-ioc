@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- add fully-qualified PVA aliases that share one configured PV runtime, Redis
+  subscription, write route, and confirmation path
+- support alias add/remove/rename during hot reload and publish aliases to
+  ChannelFinder with an `aliasOf` property
 - migrate the legacy-sidecar RecCaster dependency from the removed
   `ChannelFinder/recsync/client` tree to the standalone
   `ChannelFinder/reccaster` repository

@@ -107,12 +107,33 @@ Every PV requires:
 | Field | Values |
 | --- | --- |
 | `name` | Non-empty name; `server.namespace` is prepended when set |
+| `aliases` | Optional non-empty sequence of exact, fully-qualified PVA names; `server.namespace` is not prepended |
 | `type` | `bool`/`boolean`, `int8`, `uint8`, `int16`, `uint16`, `int32`, `uint32`, `int64`, `uint64`, `float32`/`float`, `float64`/`double`, or `string` |
 | `shape` | `scalar` or `array` |
 | `read` | Mapping with required non-empty `key` and optional `backend` |
 
 Boolean and string values are scalar-only. Numeric types support scalar or
 array shapes.
+
+Aliases are additional names for the same PVXS `SharedPV`; they do not create
+another Redis reader, writer, confirmation route, alarm state, or configured
+runtime. This permits cross-namespace names while retaining a concise canonical
+name:
+
+```yaml
+- name: magnet:current
+  aliases:
+    - FACILITY:AREA_GROUP_MAGNET01:I
+```
+
+With `server.namespace: DEMO`, this serves both `DEMO:magnet:current` and the
+exact alias `FACILITY:AREA_GROUP_MAGNET01:I`.
+
+Adding, renaming, or removing aliases during a successful reload retains the
+logical runtime and all Redis routes. Because the PVXS static registry closes a
+shared PV when a registered name is removed, clients attached to any name for
+that logical PV may briefly reconnect while the same `SharedPV` is reopened and
+its desired name set is registered.
 
 Optional route fields:
 
@@ -135,7 +156,8 @@ from an older generation.
 
 Configuration loading rejects:
 
-- duplicate `pvs[].name` values;
+- any duplicate served name across canonical names and aliases, including an
+  alias equal to its own or another PV's canonical name;
 - names that expand to the four reserved version/revision aliases;
 - more than one subscription to the same `(backend, key)` through a `read` or a
   distinct `confirm` route; and
@@ -143,7 +165,7 @@ Configuration loading rejects:
 
 The same Redis key is allowed on different backends because the backend alias is
 part of the subscription identity. `--check-config` performs these checks
-offline and prints the resolved PV names and routes before deployment.
+offline and prints the resolved PV names, aliases, and routes before deployment.
 
 ### Metadata
 

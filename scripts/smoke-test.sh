@@ -100,7 +100,7 @@ run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxge
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 1'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep 'value string = "generation 1 active"'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastError" | grep 'value string = ""'
-run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:stats:pvCount" | grep -E 'value int64_t = [1-9][0-9]*'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:stats:pvCount" | grep 'value int64_t = 3'
 
 if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput demo:version invalid"; then
   echo "version PV accepted a write unexpectedly" >&2
@@ -120,13 +120,34 @@ if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pv
 fi
 
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget EXTERNAL:source:temperature" | grep 'display.description string = "Source temperature"'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:waveform" | grep 'value float\[] = {5}\[0, 1.5, 3, 1.5, 0\]'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput EXTERNAL:magnet:current 8.0"
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 8'
+
+MONITOR_OUTPUT="$(mktemp)"
+docker exec "$IOC_CONTAINER" sh -lc \
+  "$PV_ENV timeout 4 stdbuf -oL -eL $PVX_BIN_DIR/pvxmonitor EXTERNAL:magnet:current" >"$MONITOR_OUTPUT" 2>&1 &
+MONITOR_PID=$!
+sleep 1
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput DEMO:magnet:current 9.0"
+for _ in {1..10}; do
+  if grep -q 'value double = 9' "$MONITOR_OUTPUT"; then
+    break
+  fi
+  sleep 0.5
+done
+wait "$MONITOR_PID" 2>/dev/null || true
+grep 'value double = 9' "$MONITOR_OUTPUT"
+rm -f "$MONITOR_OUTPUT"
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 9'
-run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XRANGE '{demo}:magnet:current' - + COUNT 1 | tail -n 1" | xxd -p -c 256 | grep '^0000000000805640'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget EXTERNAL:magnet:current:secondary" | grep 'value double = 9'
+run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XREVRANGE '{demo}:magnet:current' + - COUNT 1 | tail -n 1" | xxd -p -c 256 | grep '^0000000000805640'
 run_with_timeout docker exec "$REDIS_CONTAINER" redis-cli XRANGE acorn:alarms - + COUNT 10 | grep 'DEMO:magnet:current'
 
 replace_config_text 'description: Source temperature' 'description: Source temperature reloaded'
+replace_config_text '      - EXTERNAL:source:temperature' '      - RELOADED:source:temperature'
+replace_config_text '      - REMOVE:source:temperature' $'      - ADDED:source:temperature\n      - ADDED:source:temperature:secondary'
 run_with_timeout docker exec "$IOC_CONTAINER" /bin/sh -lc 'kill -HUP 1'
 sleep 2
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
@@ -139,9 +160,21 @@ for _ in {1..10}; do
   sleep 1
 done
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget RELOADED:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget ADDED:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget ADDED:source:temperature:secondary" | grep 'display.description string = "Source temperature reloaded"'
+if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget EXTERNAL:source:temperature"; then
+  echo "removed alias EXTERNAL:source:temperature still resolves" >&2
+  exit 1
+fi
+if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget REMOVE:source:temperature"; then
+  echo "removed alias REMOVE:source:temperature still resolves" >&2
+  exit 1
+fi
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:stats:pvCount" | grep 'value int64_t = 3'
 
-# A bad replacement must report the error without replacing generation 2.
-replace_config_text 'type: float64' 'type: unsupported'
+# A colliding alias must report the error without replacing generation 2.
+replace_config_text '      - RELOADED:source:temperature' '      - DEMO:source:temperature'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput SYS:demo:config:reload 1"
 for _ in {1..10}; do
   if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep -q 'value string = "reload failed"'; then
@@ -151,5 +184,6 @@ for _ in {1..10}; do
 done
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:generation" | grep 'value int64_t = 2'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastStatus" | grep 'value string = "reload failed"'
-run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastError" | grep 'unsupported primitive type'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:config:lastError" | grep 'duplicate served PV name'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:source:temperature" | grep 'display.description string = "Source temperature reloaded"'
+run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget RELOADED:source:temperature" | grep 'display.description string = "Source temperature reloaded"'

@@ -6,6 +6,9 @@
   subscription, write route, and confirmation path
 - support alias add/remove/rename during hot reload and publish aliases to
   ChannelFinder with an `aliasOf` property
+- migrate the legacy-sidecar RecCaster dependency from the removed
+  `ChannelFinder/recsync/client` tree to the standalone
+  `ChannelFinder/reccaster` repository
 
 ## v0.6.1 - 2026-07-14
 

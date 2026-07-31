@@ -10,9 +10,9 @@
 [submodule "third_party/yaml-cpp"]
 	path = third_party/yaml-cpp
 	url = https://github.com/jbeder/yaml-cpp.git
-[submodule "third_party/recsync"]
-	path = third_party/recsync
-	url = https://github.com/ChannelFinder/recsync.git
+[submodule "third_party/reccaster"]
+	path = third_party/reccaster
+	url = https://github.com/ChannelFinder/reccaster.git
 [submodule "third_party/support/seq"]
 	path = third_party/support/seq
 	url = https://github.com/epics-modules/sequencer.git

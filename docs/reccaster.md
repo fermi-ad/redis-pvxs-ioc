@@ -68,13 +68,26 @@ RECCAST_MAX_HOLDOFF=10
 
 Override them as normal compose environment variables. `CONTACT`, `BUILDING`, and `SECTOR` are sent with each RecCaster upload.
 
-## Fermilab Delta
+## Upstream Source and Fermilab Delta
 
-The local Fermilab `RecCaster-1.8` tree was compared with public `ChannelFinder/recsync` client tag `1.9.2`.
+RecCaster is pinned from the standalone public
+[`ChannelFinder/reccaster`](https://github.com/ChannelFinder/reccaster)
+repository. Upstream moved it from `ChannelFinder/recsync/client` in June 2026
+and subsequently removed that old source tree.
+
+The local Fermilab `RecCaster-1.8` tree was originally compared with the public
+`ChannelFinder/recsync` client tag `1.9.2`. The pinned `1.9.2` client source was
+then compared with standalone RecCaster commit
+`254723063a2b7a7c80d8e50f05efa8d748f429dd` during the repository migration.
 
 Observed differences are build/layout only:
 
-- Fermilab top-level `Makefile` disables upstream demo/iocBoot dirs.
-- Fermilab `configure/RELEASE` adjusts local include depth for `RELEASE.local`.
+- Fermilab's top-level `Makefile` disables upstream demo/iocBoot dirs.
+- Fermilab's `configure/RELEASE` adjusts local include depth for
+  `RELEASE.local`.
+- The standalone upstream commit updates documentation and
+  `configure/RELEASE` include paths for its new repository root.
 
-No C source, DBD, database, or protocol differences were observed. This project tracks public RecSync directly and should only add a patch layer if a real source delta appears later.
+No C source, DBD, database, or protocol differences were observed. This project
+tracks public RecCaster directly and should only add a patch layer if a real
+source delta appears later.

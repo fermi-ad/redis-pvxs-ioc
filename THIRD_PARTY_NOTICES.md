@@ -13,7 +13,7 @@ authoritative.
 | PVXS | <https://github.com/derekste/pvxs> | `third_party/pvxs/LICENSE` |
 | redis-adapter and its bundled dependencies | <https://github.com/fermi-ad/redis-adapter> | `third_party/redis-adapter/LICENSE`, plus nested notices |
 | yaml-cpp | <https://github.com/jbeder/yaml-cpp> | `third_party/yaml-cpp/LICENSE` |
-| RecSync/RecCaster | <https://github.com/ChannelFinder/recsync> | `third_party/recsync/LICENSE` |
+| RecCaster | <https://github.com/ChannelFinder/reccaster> | `licenses/RecCaster-LICENSE` |
 | sequencer | <https://github.com/epics-modules/sequencer> | `third_party/support/seq/LICENSE` |
 | sscan | <https://github.com/epics-modules/sscan> | `third_party/support/sscan/LICENSE` |
 | calc | <https://github.com/epics-modules/calc> | `third_party/support/calc/LICENSE` |
@@ -32,6 +32,12 @@ The runtime container also includes packages supplied by Ubuntu, including
 gRPC, Protocol Buffers, libcurl, libevent, readline, and their runtime
 dependencies. Their package metadata and upstream source distributions contain
 the applicable notices.
+
+ChannelFinder moved RecCaster from the licensed `recsync/client` tree to the
+standalone `reccaster` repository. The standalone repository did not contain a
+license file at pinned commit `254723063a2b7a7c80d8e50f05efa8d748f429dd`, so
+the applicable notice from `ChannelFinder/recsync` is retained verbatim in
+`licenses/RecCaster-LICENSE`.
 
 ## Vendored source
 

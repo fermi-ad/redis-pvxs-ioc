@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.0 - 2026-07-31
 
 - add fully-qualified PVA aliases that share one configured PV runtime, Redis
   subscription, write route, and confirmation path

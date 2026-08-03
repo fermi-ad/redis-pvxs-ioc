@@ -1,5 +1,6 @@
 #include "redis_pvxs_ioc/access_control.h"
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -264,10 +265,28 @@ ASG(DECISION) {
   std::this_thread::sleep_for(std::chrono::milliseconds(110));
   watched.pump();
   assert(watched.status().generation == 4u);
+  const auto beforeConcurrentReloads = watched.status().generation;
+  std::atomic<bool> concurrentOk{true};
+  std::thread reloadThread([&]() {
+    for (size_t index = 0; index < 8u; ++index) {
+      std::string concurrentError;
+      if (!watched.reload("concurrent-test", concurrentError)) concurrentOk.store(false);
+    }
+  });
+  std::thread reconfigureThread([&]() {
+    for (size_t index = 0; index < 8u; ++index) {
+      std::string concurrentError;
+      if (!watched.reconfigure(config, {"WATCHED"}, concurrentError)) concurrentOk.store(false);
+    }
+  });
+  reloadThread.join();
+  reconfigureThread.join();
+  assert(concurrentOk.load());
+  assert(watched.status().generation == beforeConcurrentReloads + 16u);
   std::filesystem::remove(file.path);
   std::this_thread::sleep_for(std::chrono::milliseconds(110));
   watched.pump();
-  assert(watched.status().generation == 4u);
+  assert(watched.status().generation == beforeConcurrentReloads + 16u);
   assert(watched.status().lastError.find("cannot open") != std::string::npos);
   auto disabledReload = config;
   disabledReload.enabled = false;

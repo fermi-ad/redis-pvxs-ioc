@@ -1133,12 +1133,15 @@ void AccessController::pump() {
     const bool recoveredMissing = impl_->watchMissingReported;
     impl_->watchMissingReported = false;
     if (raw == impl_->observedRaw) {
-      if (recoveredMissing) {
+      {
         std::lock_guard<std::mutex> guard(impl_->mutex);
-        impl_->lastStatus = "watch active";
-        impl_->lastError.clear();
+        if (recoveredMissing || impl_->lastStatus == "watch reload failed") {
+          impl_->lastStatus = "watch active";
+          impl_->lastError.clear();
+        }
       }
       impl_->watchCandidateRaw.clear();
+      impl_->watchLastAttemptRaw.clear();
       return;
     }
     if (raw == impl_->watchLastAttemptRaw) {

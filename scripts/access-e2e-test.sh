@@ -225,6 +225,18 @@ assert_pv_contains SYS:e2e:access:lastError 'ACF 6:19:'
 assert_pv_contains SYS:e2e:access:lastError 'CALC'
 assert_pv_contains E2E:value 'value double = 42'
 
+# Restoring the already-active last-good bytes clears watcher observability
+# without a duplicate activation. Reintroducing the same invalid bytes must be
+# attempted again rather than being hidden by the duplicate-attempt cache.
+replace_in_place "$FIXTURE_DIR/read-only.acf" "$RUN_DIR/access.acf"
+wait_pv_contains SYS:e2e:access:lastStatus 'watch active'
+assert_pv_contains SYS:e2e:access:lastError 'value string = ""'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
+replace_in_place "$FIXTURE_DIR/invalid.acf" "$RUN_DIR/access.acf"
+wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
+assert_pv_contains SYS:e2e:access:lastError 'CALC'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
+
 # Atomic path replacement restores access.
 cp "$FIXTURE_DIR/allow.acf" "$RUN_DIR/access.acf.next"
 mv "$RUN_DIR/access.acf.next" "$RUN_DIR/access.acf"

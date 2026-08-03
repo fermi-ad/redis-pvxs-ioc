@@ -547,7 +547,10 @@ struct AccessController::Impl {
   std::set<std::string> configuredAsgs;
   std::map<std::string, std::chrono::steady_clock::time_point> denialLogTimes;
 
-  std::set<std::string> requiredAsgs() const;
+  bool reloadLocked(const std::string& trigger,
+                    const AccessConfig& configSnapshot,
+                    const std::set<std::string>& requiredAsgs,
+                    std::string& error);
   void markDirty(const std::shared_ptr<ChannelState>& state);
   void drainDirty();
   void recomputeAllClients();
@@ -859,11 +862,6 @@ private:
 
 }  // namespace
 
-std::set<std::string> AccessController::Impl::requiredAsgs() const {
-  std::lock_guard<std::mutex> guard(mutex);
-  return configuredAsgs;
-}
-
 void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& state) {
   std::lock_guard<std::mutex> guard(mutex);
   dirty.emplace_back(state);
@@ -945,12 +943,12 @@ AccessController::AccessController(AccessConfig config)
 AccessController::~AccessController() = default;
 
 bool AccessController::start(const std::set<std::string>& requiredAsgs, std::string& error) {
-  if (!impl_->config.enabled) {
-    error = "access controller requires enabled configuration";
-    return false;
-  }
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
+    if (!impl_->config.enabled) {
+      error = "access controller requires enabled configuration";
+      return false;
+    }
     impl_->configuredAsgs = requiredAsgs;
   }
   asCheckClientIP = 1;
@@ -960,27 +958,29 @@ bool AccessController::start(const std::set<std::string>& requiredAsgs, std::str
 bool AccessController::reconfigure(const AccessConfig& config,
                                    const std::set<std::string>& requiredAsgs,
                                    std::string& error) {
-  if (config.enabled != impl_->config.enabled) {
-    error = "access.enabled is immutable after startup";
-    return false;
-  }
-  const auto previous = impl_->config;
+  std::lock_guard<std::mutex> reloadGuard(impl_->reloadMutex);
+  AccessConfig previous;
   std::set<std::string> previousAsgs;
   std::string previousPolicy;
   std::string previousPolicyFingerprint;
   std::string previousRaw;
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
+    if (config.enabled != impl_->config.enabled) {
+      error = "access.enabled is immutable after startup";
+      return false;
+    }
+    previous = impl_->config;
     previousAsgs = impl_->configuredAsgs;
     previousPolicy = impl_->activePolicy;
     previousPolicyFingerprint = impl_->policyFingerprint;
     previousRaw = impl_->observedRaw;
+    impl_->config = config;
     impl_->configuredAsgs = requiredAsgs;
   }
-  impl_->config = config;
-  if (!reload("config", error)) {
-    impl_->config = previous;
+  if (!impl_->reloadLocked("config", config, requiredAsgs, error)) {
     std::lock_guard<std::mutex> guard(impl_->mutex);
+    impl_->config = previous;
     impl_->configuredAsgs = std::move(previousAsgs);
     return false;
   }
@@ -1046,52 +1046,67 @@ bool AccessController::restorePrevious(std::string& error) {
   return true;
 }
 
-bool AccessController::reload(const std::string& trigger, std::string& error) {
-  std::lock_guard<std::mutex> reloadGuard(impl_->reloadMutex);
+bool AccessController::Impl::reloadLocked(const std::string& trigger,
+                                          const AccessConfig& configSnapshot,
+                                          const std::set<std::string>& requiredAsgs,
+                                          std::string& error) {
   try {
-    const auto prepared = preparePolicy(impl_->config, impl_->requiredAsgs());
+    const auto prepared = preparePolicy(configSnapshot, requiredAsgs);
     const long status = asInitMem(prepared.expanded.c_str(), nullptr);
     if (status != 0) {
       throw std::runtime_error(std::string("ACF parse failed: ") + errSymMsg(status));
     }
-    impl_->recomputeAllClients();
+    recomputeAllClients();
     {
-      std::lock_guard<std::mutex> guard(impl_->mutex);
-      impl_->activePolicy = prepared.expanded;
-      impl_->policyFingerprint = prepared.fingerprint;
-      impl_->observedRaw = prepared.raw;
-      impl_->watchLastAttemptRaw.clear();
-      impl_->watchMissingReported = false;
-      impl_->lastStatus = trigger + " reload active";
-      impl_->lastError.clear();
-      impl_->watchStatus = impl_->config.watch.enabled ? "watching " + impl_->config.file : "disabled";
+      std::lock_guard<std::mutex> guard(mutex);
+      activePolicy = prepared.expanded;
+      policyFingerprint = prepared.fingerprint;
+      observedRaw = prepared.raw;
+      watchLastAttemptRaw.clear();
+      watchMissingReported = false;
+      lastStatus = trigger + " reload active";
+      lastError.clear();
+      watchStatus = configSnapshot.watch.enabled ? "watching " + configSnapshot.file : "disabled";
     }
-    const auto generation = impl_->generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    const auto currentGeneration = generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
     std::fprintf(stderr,
                  "[redis-pvxs-ioc] access policy active trigger=%s generation=%llu fingerprint=%s clients=%llu\n",
-                 trigger.c_str(), static_cast<unsigned long long>(generation), prepared.fingerprint.c_str(),
-                 static_cast<unsigned long long>(impl_->activeClients.load(std::memory_order_relaxed)));
+                 trigger.c_str(), static_cast<unsigned long long>(currentGeneration),
+                 prepared.fingerprint.c_str(),
+                 static_cast<unsigned long long>(activeClients.load(std::memory_order_relaxed)));
     error.clear();
     return true;
   } catch (const std::exception& ex) {
     error = ex.what();
     std::string activeFingerprint;
     {
-      std::lock_guard<std::mutex> guard(impl_->mutex);
-      impl_->lastStatus = trigger + " reload failed";
-      impl_->lastError = error;
-      activeFingerprint = impl_->policyFingerprint;
+      std::lock_guard<std::mutex> guard(mutex);
+      lastStatus = trigger + " reload failed";
+      lastError = error;
+      activeFingerprint = policyFingerprint;
     }
     std::fprintf(stderr,
                  "[redis-pvxs-ioc] access policy reload failed trigger=%s generation=%llu "
                  "fingerprint=%s clients=%llu error=%s\n",
                  trigger.c_str(),
-                 static_cast<unsigned long long>(impl_->generation.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(generation.load(std::memory_order_relaxed)),
                  activeFingerprint.c_str(),
-                 static_cast<unsigned long long>(impl_->activeClients.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(activeClients.load(std::memory_order_relaxed)),
                  error.c_str());
     return false;
   }
+}
+
+bool AccessController::reload(const std::string& trigger, std::string& error) {
+  std::lock_guard<std::mutex> reloadGuard(impl_->reloadMutex);
+  AccessConfig configSnapshot;
+  std::set<std::string> requiredAsgs;
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    configSnapshot = impl_->config;
+    requiredAsgs = impl_->configuredAsgs;
+  }
+  return impl_->reloadLocked(trigger, configSnapshot, requiredAsgs, error);
 }
 
 void AccessController::requestReload(const std::string& trigger) {
@@ -1124,12 +1139,17 @@ void AccessController::pump() {
     }
   }
 
-  if (!impl_->config.watch.enabled ||
-      now - impl_->lastWatchPoll < std::chrono::milliseconds(impl_->config.watch.intervalMs)) return;
+  AccessConfig configSnapshot;
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    configSnapshot = impl_->config;
+  }
+  if (!configSnapshot.watch.enabled ||
+      now - impl_->lastWatchPoll < std::chrono::milliseconds(configSnapshot.watch.intervalMs)) return;
   impl_->lastWatchPoll = now;
 
   try {
-    const auto raw = readTextFile(impl_->config.file);
+    const auto raw = readTextFile(configSnapshot.file);
     const bool recoveredMissing = impl_->watchMissingReported;
     impl_->watchMissingReported = false;
     if (raw == impl_->observedRaw) {
@@ -1153,7 +1173,8 @@ void AccessController::pump() {
       impl_->watchCandidateSince = now;
       return;
     }
-    if (now - impl_->watchCandidateSince >= std::chrono::milliseconds(impl_->config.watch.settleMs)) {
+    if (now - impl_->watchCandidateSince >=
+        std::chrono::milliseconds(configSnapshot.watch.settleMs)) {
       impl_->watchLastAttemptRaw = raw;
       std::string error;
       reload("watch", error);

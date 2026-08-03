@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
       });
     }
     const auto monitorSeconds = std::chrono::duration<double>(Clock::now() - monitorStart).count();
-    measured.monitorPerSecond = monitorCount.load() / monitorSeconds;
+    measured.monitorPerSecond = monitorSeconds > 0.0 ? monitorCount.load() / monitorSeconds : 0.0;
 
     if (mode == "reload") {
       std::atomic<bool> keepLoading{true};

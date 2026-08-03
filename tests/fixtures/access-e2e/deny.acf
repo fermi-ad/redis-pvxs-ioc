@@ -1,4 +1,3 @@
-UAG(OPS) { root }
 UAG(NOBODY) { nobody }
 
 ASG(DEFAULT) {
@@ -12,5 +11,5 @@ ASG(DATA) {
 
 ASG(ADMIN) {
   RULE(0, READ)
-  RULE(0, WRITE) { UAG(OPS) }
+  RULE(0, WRITE)
 }

@@ -105,6 +105,14 @@ ASG(OPERATORS) {
   assert(!validates(config, {"DEFAULT"}, &error));
   assert(error.find("only RULE") != std::string::npos);
 
+  file.write("ASG(DEFAULT) { RULE(0, READ) { UAG(typo) } }\n");
+  assert(!validates(config, {"DEFAULT"}, &error));
+  assert(error.find("undefined group 'typo'") != std::string::npos);
+
+  file.write("ASG(DATA) { RULE(0, READ) }\nASG(DATA) { RULE(0, WRITE) }\n");
+  assert(!validates(config, {"DATA"}, &error));
+  assert(error.find("duplicate ASG") != std::string::npos);
+
   file.write("UAG(one) { alice }\nUAG(two) { bob }\n"
              "ASG(DEFAULT) { RULE(0, WRITE, NOTRAPWRITE) { UAG(one, two) } }\n");
   assert(validates(config, {"DEFAULT"}));

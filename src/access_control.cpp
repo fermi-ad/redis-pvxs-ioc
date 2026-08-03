@@ -212,18 +212,29 @@ public:
   explicit AcfSubsetParser(const std::string& text) : tokens_(tokenizeAcf(text)) {}
 
   std::set<std::string> parse() {
-    std::set<std::string> groups{"DEFAULT"};
+    std::set<std::string> groups;
     while (!done()) {
       rejectDeferred(peek());
       const auto keyword = upper(peek().text);
       if (keyword == "UAG" || keyword == "HAG") {
         parseNamedList(keyword);
       } else if (keyword == "ASG") {
-        groups.insert(parseAsg());
+        const auto group = parseAsg();
+        if (!groups.insert(group).second) {
+          acfError(tokens_[position_ - 1u], "duplicate ASG '" + group + "'");
+        }
       } else {
         acfError(peek(), "unknown top-level construct '" + peek().text + "'");
       }
     }
+    for (const auto& reference : references_) {
+      const auto& definitions = reference.kind == "UAG" ? uags_ : hags_;
+      if (definitions.count(reference.name) == 0u) {
+        acfError(reference.token,
+                 reference.kind + " references undefined group '" + reference.name + "'");
+      }
+    }
+    groups.insert("DEFAULT");
     return groups;
   }
 
@@ -291,7 +302,11 @@ private:
   }
 
   void parseNamedList(const std::string& keyword) {
-    definitionName(keyword);
+    const auto definition = definitionName(keyword);
+    auto& definitions = keyword == "UAG" ? uags_ : hags_;
+    if (!definitions.insert(definition).second) {
+      acfError(tokens_[position_ - 1u], "duplicate " + keyword + " '" + definition + "'");
+    }
     expect("{");
     if (peek().text != "}") {
       while (true) {
@@ -345,13 +360,24 @@ private:
       if (condition != "UAG" && condition != "HAG") {
         acfError(peek(), "only UAG and HAG conditions are supported in RULE");
       }
-      callNames(condition);
+      const auto token = peek();
+      for (const auto& referenced : callNames(condition)) {
+        references_.push_back({condition, referenced, token});
+      }
     }
     expect("}");
   }
 
   std::vector<Token> tokens_;
   size_t position_ = 0u;
+  std::set<std::string> uags_;
+  std::set<std::string> hags_;
+  struct Reference {
+    std::string kind;
+    std::string name;
+    Token token;
+  };
+  std::vector<Reference> references_;
 };
 
 std::set<std::string> inspectAcf(const std::string& text) {

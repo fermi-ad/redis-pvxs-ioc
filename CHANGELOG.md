@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.8.0 - 2026-08-03
+
+- add explicitly enabled native EPICS ACF enforcement for PV, RPC, and admin
+  endpoints, with inherited ASG/ASL assignments and strict supported-subset
+  validation before activation
+- hot-reload policy, macros, assignments, defaults, and watcher settings through
+  whole-config reload, SIGHUP, the dedicated access reload PV, or optional
+  stable-content file monitoring while retaining the last good policy on failure
+- cache aggregate channel rights so allowed requests perform one atomic load,
+  keep Redis updates and monitor fan-out authorization-free, and disconnect
+  clients immediately when live rights change
+- add access status PVs, process-lifetime counters, fingerprints, rate-limited
+  denial logs, TRAPWRITE auditing, and HAG DNS refresh for connected clients
+- consolidate dependencies on official PVXS 1.5.2 and EPICS Base R7.0.10 with
+  one narrow HAG-refresh API extension
+- add enabled-policy examples, end-to-end Redis/PVA reload coverage, an
+  access-disabled smoke gate, and a repeatable no-threshold performance report
+
 ## v0.7.0 - 2026-07-31
 
 - add fully-qualified PVA aliases that share one configured PV runtime, Redis

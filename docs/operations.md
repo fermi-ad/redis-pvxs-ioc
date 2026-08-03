@@ -17,6 +17,17 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:config:lastError` | string/read | Last reload error; empty after success |
 | `SYS:<instance>:stats:pvCount` | int64/read | Configured Redis-backed and RPC PV count |
 | `SYS:<instance>:backend:health` | string/read | `<connected>/<total> connected`, with disconnected aliases when applicable |
+| `SYS:<instance>:access:reload` | int64/write | Request an ACF-only reload |
+| `SYS:<instance>:access:enabled` | bool/read | Startup access-control state |
+| `SYS:<instance>:access:generation` | int64/read | Active ACF generation; `0` disabled, `1` after enabled startup |
+| `SYS:<instance>:access:lastStatus` | string/read | Last policy/watcher status |
+| `SYS:<instance>:access:lastError` | string/read | Last policy/watcher error |
+| `SYS:<instance>:access:policyFingerprint` | string/read | Fingerprint of expanded active policy bytes |
+| `SYS:<instance>:access:watchStatus` | string/read | Watcher state and path |
+| `SYS:<instance>:access:activeClients` | int64/read | Connected access-controlled channels |
+| `SYS:<instance>:access:deniedReads` | int64/read | Process-lifetime denied-read count |
+| `SYS:<instance>:access:deniedWrites` | int64/read | Process-lifetime denied-write count |
+| `SYS:<instance>:access:rightsChanges` | int64/read | Process-lifetime changed-rights count |
 
 ## Reload
 
@@ -39,6 +50,11 @@ number remains unchanged and the active generation continues serving.
 Namespace and bind settings cannot change through hot reload. Restart the process
 to change `server.instance`, `server.namespace`, interfaces, ports, or beacon
 configuration.
+
+When access control is enabled, whole-config reload also rereads and activates
+the ACF. `SYS:<instance>:access:reload` reloads only that policy, and an optional
+settled file watcher can do the same automatically. Access enablement cannot
+change through reload. See [Access control](access-control.md).
 
 ## Container verification
 

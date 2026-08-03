@@ -9,20 +9,19 @@ gitlink, verify that its public remote contains the exact pinned commit.
 ### `third_party/epics-base`
 
 - Published `.gitmodules` URL: `https://github.com/derekste/epics-base.git`
-- Pinned commit: `c5333b5c88dc05bbb5a6bc641527f11f949953b8`
+- Pinned commit: `c8ecd7c29d5e8cdd3ee15da2aaf761bda4f37e37`
 - Publish status: ready
-- Current known branch containing the commit: `dev/as-hag-dns-ttl`
-- Verified remote branch: `https://github.com/derekste/epics-base.git` `refs/heads/dev/as-hag-dns-ttl`
+- Current known branch containing the commit: `dev/as-hag-refresh-api-v7.0.10`
+- Verified remote branch: `https://github.com/derekste/epics-base.git` `refs/heads/dev/as-hag-refresh-api-v7.0.10`
 - Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
 
 ### `third_party/pvxs`
 
-- Published `.gitmodules` URL: `https://github.com/derekste/pvxs.git`
-- Pinned commit: `3c83f4bde9a36a3d06d65389b4f043de244464ac`
+- Published `.gitmodules` URL: `https://github.com/epics-base/pvxs.git`
+- Pinned commit: `8e00eaecdee5ce8a474704e70d820e6f92693fa1`
 - Publish status: ready
-- Current known branch containing the commit: `dev/client-stateful-dns`
-- Verified remote branch: `https://github.com/derekste/pvxs.git` `refs/heads/dev/client-stateful-dns`
-- Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/pvxs` repo at the merged upstream commit
+- Release tag: `1.5.2`
+- No redis-pvxs-ioc-specific PVXS changes are required.
 
 ### `third_party/redis-adapter`
 

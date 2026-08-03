@@ -18,6 +18,8 @@ future work; it is not ordered by business priority.
 - rejection of bad replacement configurations while the active generation stays live
 - built-in version, revision, config status/error/generation, PV count, and backend
   health PVs
+- explicitly enabled native EPICS ACF enforcement for PV, RPC, and admin
+  endpoints, with dedicated, whole-config, and optional watched-file reload
 
 ### Integrations and packaging
 
@@ -31,7 +33,6 @@ future work; it is not ordered by business priority.
 ## Not supported now
 
 - Redis-backed PV definitions or metadata; definitions still come from YAML
-- ACF parsing, enforcement, or reload
 - Channel Access in the main runtime
 - normative types beyond `NTScalar` and `NTScalarArray`
 - Redis Cluster
@@ -51,15 +52,6 @@ future work; it is not ordered by business priority.
 
 The Redis definition path must preserve generation staging: validate the full next
 definition set before cutover and leave the active generation untouched on error.
-
-### Security and access policy
-
-- [#5: Implement the standalone ACF subset](https://github.com/fermi-ad/redis-pvxs-ioc/issues/5)
-
-The intended policy engine is EPICS access security, not a project-specific ACL
-format. Initial work covers read/write checks, `ASG`, `RULE`, `UAG`, `HAG`,
-permission recomputation, HAG DNS refresh, and write audit events. Record-specific
-`INPA..INPU`/`CALC()` parity remains separate.
 
 ### Normative types
 

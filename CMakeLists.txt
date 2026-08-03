@@ -163,6 +163,7 @@ target_include_directories(bpm-query-proto PUBLIC "${BRIDGE_GEN_DIR}" ${Protobuf
 set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(redis-pvxs-ioc-core STATIC
+  src/access_control.cpp
   src/config.cpp
   src/channelfinder.cpp
   src/util.cpp
@@ -204,6 +205,9 @@ target_link_libraries(redis-pvxs-ioc PRIVATE redis-pvxs-ioc-core)
 add_executable(redis-pvxs-channelfinder-sync tools/channelfinder_sync.cpp)
 target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-ioc-core CURL::libcurl)
 
+add_executable(redis-pvxs-access-benchmark tools/access_benchmark.cpp)
+target_link_libraries(redis-pvxs-access-benchmark PRIVATE redis-pvxs-ioc-core)
+
 install(TARGETS redis-pvxs-ioc redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
@@ -212,6 +216,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_executable(config_tests tests/config_tests.cpp)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME config_tests COMMAND config_tests)
+
+  add_executable(access_control_tests tests/access_control_tests.cpp)
+  target_link_libraries(access_control_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME access_control_tests COMMAND access_control_tests)
+
+  add_executable(access_runtime_tests tests/access_runtime_tests.cpp)
+  target_link_libraries(access_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME access_runtime_tests COMMAND access_runtime_tests)
 
   add_executable(model_tests tests/model_tests.cpp)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
@@ -224,4 +236,17 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
   target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
+
+  # redis-plus-plus supplies a default Release build type when callers don't
+  # specify one.  These small test executables use assert() as their test
+  # primitive, so keep assertions active even in that configuration.
+  foreach(_test_target
+      config_tests
+      access_control_tests
+      access_runtime_tests
+      model_tests
+      alarm_publisher_tests
+      channelfinder_tests)
+    target_compile_options(${_test_target} PRIVATE -UNDEBUG)
+  endforeach()
 endif()

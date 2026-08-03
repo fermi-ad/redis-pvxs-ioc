@@ -1,5 +1,6 @@
 #include "redis_pvxs_ioc/app.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include "RedisAdapter.hpp"
 
 #include "redis_pvxs_ioc/alarm_publisher.h"
+#include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/config.h"
 #include "redis_pvxs_ioc/rpc_pv.h"
 #include "redis_pvxs_ioc/runtime.h"
@@ -62,8 +64,10 @@ void openStringPV(pvxs::server::SharedPV& pv,
 
 class AdminNamespace {
 public:
-  explicit AdminNamespace(const ServerConfig& serverConfig)
-      : reloadCommand_(pvxs::server::SharedPV::buildMailbox()),
+  explicit AdminNamespace(const ServerConfig& serverConfig, const bool accessConfigured)
+      : accessConfigured_(accessConfigured),
+        reloadCommand_(pvxs::server::SharedPV::buildMailbox()),
+        accessReloadCommand_(pvxs::server::SharedPV::buildMailbox()),
         version_(pvxs::server::SharedPV::buildReadonly()),
         revision_(pvxs::server::SharedPV::buildReadonly()),
         sysVersion_(pvxs::server::SharedPV::buildReadonly()),
@@ -73,6 +77,16 @@ public:
         lastError_(pvxs::server::SharedPV::buildReadonly()),
         pvCount_(pvxs::server::SharedPV::buildReadonly()),
         backendHealth_(pvxs::server::SharedPV::buildReadonly()),
+        accessEnabled_(pvxs::server::SharedPV::buildReadonly()),
+        accessGeneration_(pvxs::server::SharedPV::buildReadonly()),
+        accessLastStatus_(pvxs::server::SharedPV::buildReadonly()),
+        accessLastError_(pvxs::server::SharedPV::buildReadonly()),
+        accessPolicyFingerprint_(pvxs::server::SharedPV::buildReadonly()),
+        accessWatchStatus_(pvxs::server::SharedPV::buildReadonly()),
+        accessActiveClients_(pvxs::server::SharedPV::buildReadonly()),
+        accessDeniedReads_(pvxs::server::SharedPV::buildReadonly()),
+        accessDeniedWrites_(pvxs::server::SharedPV::buildReadonly()),
+        accessRightsChanges_(pvxs::server::SharedPV::buildReadonly()),
         reloadName_(adminPVName(serverConfig, "config:reload")),
         versionName_(versionPVName(serverConfig)),
         revisionName_(revisionPVName(serverConfig)),
@@ -83,6 +97,17 @@ public:
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
         pvCountName_(adminPVName(serverConfig, "stats:pvCount")),
         backendHealthName_(adminPVName(serverConfig, "backend:health")) {
+    accessReloadName_ = adminPVName(serverConfig, "access:reload");
+    accessEnabledName_ = adminPVName(serverConfig, "access:enabled");
+    accessGenerationName_ = adminPVName(serverConfig, "access:generation");
+    accessLastStatusName_ = adminPVName(serverConfig, "access:lastStatus");
+    accessLastErrorName_ = adminPVName(serverConfig, "access:lastError");
+    accessPolicyFingerprintName_ = adminPVName(serverConfig, "access:policyFingerprint");
+    accessWatchStatusName_ = adminPVName(serverConfig, "access:watchStatus");
+    accessActiveClientsName_ = adminPVName(serverConfig, "access:activeClients");
+    accessDeniedReadsName_ = adminPVName(serverConfig, "access:deniedReads");
+    accessDeniedWritesName_ = adminPVName(serverConfig, "access:deniedWrites");
+    accessRightsChangesName_ = adminPVName(serverConfig, "access:rightsChanges");
     auto reloadValue = makeAdminValue(pvxs::TypeCode::Int64, "Write any value to request a config reload");
     reloadValue["value"] = static_cast<int64_t>(0);
     reloadCommand_.onPut([this](pvxs::server::SharedPV& pv,
@@ -96,6 +121,24 @@ public:
       op->reply();
     });
     reloadCommand_.open(reloadValue);
+
+    auto accessReloadValue = makeAdminValue(pvxs::TypeCode::Int64, "Write any value to request an ACF reload");
+    accessReloadValue["value"] = static_cast<int64_t>(0);
+    accessReloadCommand_.onPut([this](pvxs::server::SharedPV& pv,
+                                      std::unique_ptr<pvxs::server::ExecOp>&& op,
+                                      pvxs::Value&&) {
+      if (!accessConfigured_) {
+        op->error("access control is disabled");
+        return;
+      }
+      accessReloadRequested_ = true;
+      auto value = pv.fetch();
+      value["value"] = value["value"].as<int64_t>() + 1;
+      applyTimestamp(value);
+      pv.post(value);
+      op->reply();
+    });
+    accessReloadCommand_.open(accessReloadValue);
 
     const std::string version = std::string("redis-pvxs-ioc v") + REDIS_PVXS_IOC_VERSION;
     const std::string revision = std::string("redis-pvxs-ioc ") + REDIS_PVXS_IOC_GIT_REVISION;
@@ -123,36 +166,109 @@ public:
     auto backendValue = makeAdminValue(pvxs::TypeCode::String, "Redis backend health");
     backendValue["value"] = std::string("unknown");
     backendHealth_.open(backendValue);
+
+    auto enabledValue = makeAdminValue(pvxs::TypeCode::Bool, "Whether ACF access control was enabled at startup");
+    enabledValue["value"] = false;
+    accessEnabled_.open(enabledValue);
+    auto accessGenerationValue = makeAdminValue(pvxs::TypeCode::Int64, "Current access policy generation");
+    accessGenerationValue["value"] = static_cast<int64_t>(0);
+    accessGeneration_.open(accessGenerationValue);
+    openStringPV(accessLastStatus_, "disabled", "Last access policy status");
+    openStringPV(accessLastError_, "", "Last access policy error");
+    openStringPV(accessPolicyFingerprint_, "", "Expanded access policy fingerprint");
+    openStringPV(accessWatchStatus_, "disabled", "Access policy file watcher status");
+    auto activeValue = makeAdminValue(pvxs::TypeCode::Int64, "Connected access-controlled channels");
+    activeValue["value"] = static_cast<int64_t>(0);
+    accessActiveClients_.open(activeValue);
+    auto deniedReadValue = makeAdminValue(pvxs::TypeCode::Int64, "Denied read operations since startup");
+    deniedReadValue["value"] = static_cast<int64_t>(0);
+    accessDeniedReads_.open(deniedReadValue);
+    auto deniedWriteValue = makeAdminValue(pvxs::TypeCode::Int64, "Denied write operations since startup");
+    deniedWriteValue["value"] = static_cast<int64_t>(0);
+    accessDeniedWrites_.open(deniedWriteValue);
+    auto rightsValue = makeAdminValue(pvxs::TypeCode::Int64, "Access-right changes since startup");
+    rightsValue["value"] = static_cast<int64_t>(0);
+    accessRightsChanges_.open(rightsValue);
   }
 
-  void install(pvxs::server::Server& server) {
-    server.addPV(reloadName_, reloadCommand_)
-          .addPV(versionName_, version_)
-          .addPV(revisionName_, revision_)
-          .addPV(sysVersionName_, sysVersion_)
-          .addPV(sysRevisionName_, sysRevision_)
-          .addPV(generationName_, generation_)
-          .addPV(lastStatusName_, lastStatus_)
-          .addPV(lastErrorName_, lastError_)
-          .addPV(pvCountName_, pvCount_)
-          .addPV(backendHealthName_, backendHealth_);
+  void install(pvxs::server::Server& server,
+               AccessController* access,
+               const AccessDefaultsConfig& defaults) {
+    const auto add = [&](const std::string& name, const pvxs::server::SharedPV& pv,
+                         const AccessAssignment& assignment) {
+      if (access) access->addPV(name, pv, assignment);
+      else server.addPV(name, pv);
+    };
+    add(reloadName_, reloadCommand_, defaults.adminWrite);
+    add(versionName_, version_, defaults.adminRead);
+    add(revisionName_, revision_, defaults.adminRead);
+    add(sysVersionName_, sysVersion_, defaults.adminRead);
+    add(sysRevisionName_, sysRevision_, defaults.adminRead);
+    add(generationName_, generation_, defaults.adminRead);
+    add(lastStatusName_, lastStatus_, defaults.adminRead);
+    add(lastErrorName_, lastError_, defaults.adminRead);
+    add(pvCountName_, pvCount_, defaults.adminRead);
+    add(backendHealthName_, backendHealth_, defaults.adminRead);
+    add(accessReloadName_, accessReloadCommand_, defaults.adminWrite);
+    add(accessEnabledName_, accessEnabled_, defaults.adminRead);
+    add(accessGenerationName_, accessGeneration_, defaults.adminRead);
+    add(accessLastStatusName_, accessLastStatus_, defaults.adminRead);
+    add(accessLastErrorName_, accessLastError_, defaults.adminRead);
+    add(accessPolicyFingerprintName_, accessPolicyFingerprint_, defaults.adminRead);
+    add(accessWatchStatusName_, accessWatchStatus_, defaults.adminRead);
+    add(accessActiveClientsName_, accessActiveClients_, defaults.adminRead);
+    add(accessDeniedReadsName_, accessDeniedReads_, defaults.adminRead);
+    add(accessDeniedWritesName_, accessDeniedWrites_, defaults.adminRead);
+    add(accessRightsChangesName_, accessRightsChanges_, defaults.adminRead);
   }
 
-  void remove(pvxs::server::Server& server) {
-    server.removePV(reloadName_)
-          .removePV(versionName_)
-          .removePV(revisionName_)
-          .removePV(sysVersionName_)
-          .removePV(sysRevisionName_)
-          .removePV(generationName_)
-          .removePV(lastStatusName_)
-          .removePV(lastErrorName_)
-          .removePV(pvCountName_)
-          .removePV(backendHealthName_);
+  void remove(pvxs::server::Server& server, AccessController* access) {
+    const auto remove = [&](const std::string& name) {
+      if (access) access->removePV(name);
+      else server.removePV(name);
+    };
+    remove(reloadName_);
+    remove(versionName_);
+    remove(revisionName_);
+    remove(sysVersionName_);
+    remove(sysRevisionName_);
+    remove(generationName_);
+    remove(lastStatusName_);
+    remove(lastErrorName_);
+    remove(pvCountName_);
+    remove(backendHealthName_);
+    remove(accessReloadName_);
+    remove(accessEnabledName_);
+    remove(accessGenerationName_);
+    remove(accessLastStatusName_);
+    remove(accessLastErrorName_);
+    remove(accessPolicyFingerprintName_);
+    remove(accessWatchStatusName_);
+    remove(accessActiveClientsName_);
+    remove(accessDeniedReadsName_);
+    remove(accessDeniedWritesName_);
+    remove(accessRightsChangesName_);
+  }
+
+  void setAccessAssignments(AccessController& access, const AccessDefaultsConfig& defaults) {
+    access.setAssignment(reloadName_, defaults.adminWrite);
+    access.setAssignment(accessReloadName_, defaults.adminWrite);
+    const std::vector<std::string> readNames{
+      versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
+      lastStatusName_, lastErrorName_, pvCountName_, backendHealthName_, accessEnabledName_,
+      accessGenerationName_, accessLastStatusName_, accessLastErrorName_,
+      accessPolicyFingerprintName_, accessWatchStatusName_, accessActiveClientsName_,
+      accessDeniedReadsName_, accessDeniedWritesName_, accessRightsChangesName_,
+    };
+    for (const auto& name : readNames) access.setAssignment(name, defaults.adminRead);
   }
 
   bool consumeReloadRequest() {
     return reloadRequested_.exchange(false);
+  }
+
+  bool consumeAccessReloadRequest() {
+    return accessReloadRequested_.exchange(false);
   }
 
   void setGeneration(const uint64_t generation) {
@@ -175,9 +291,25 @@ public:
     setAdminScalar(backendHealth_, health);
   }
 
+  void setAccessStatus(const AccessStatus& status) {
+    setAdminScalar(accessEnabled_, status.enabled);
+    setAdminScalar(accessGeneration_, static_cast<int64_t>(status.generation));
+    setAdminScalar(accessLastStatus_, status.lastStatus);
+    setAdminScalar(accessLastError_, status.lastError);
+    setAdminScalar(accessPolicyFingerprint_, status.policyFingerprint);
+    setAdminScalar(accessWatchStatus_, status.watchStatus);
+    setAdminScalar(accessActiveClients_, static_cast<int64_t>(status.activeClients));
+    setAdminScalar(accessDeniedReads_, static_cast<int64_t>(status.deniedReads));
+    setAdminScalar(accessDeniedWrites_, static_cast<int64_t>(status.deniedWrites));
+    setAdminScalar(accessRightsChanges_, static_cast<int64_t>(status.rightsChanges));
+  }
+
 private:
+  bool accessConfigured_ = false;
   std::atomic<bool> reloadRequested_{false};
+  std::atomic<bool> accessReloadRequested_{false};
   pvxs::server::SharedPV reloadCommand_;
+  pvxs::server::SharedPV accessReloadCommand_;
   pvxs::server::SharedPV version_;
   pvxs::server::SharedPV revision_;
   pvxs::server::SharedPV sysVersion_;
@@ -187,6 +319,16 @@ private:
   pvxs::server::SharedPV lastError_;
   pvxs::server::SharedPV pvCount_;
   pvxs::server::SharedPV backendHealth_;
+  pvxs::server::SharedPV accessEnabled_;
+  pvxs::server::SharedPV accessGeneration_;
+  pvxs::server::SharedPV accessLastStatus_;
+  pvxs::server::SharedPV accessLastError_;
+  pvxs::server::SharedPV accessPolicyFingerprint_;
+  pvxs::server::SharedPV accessWatchStatus_;
+  pvxs::server::SharedPV accessActiveClients_;
+  pvxs::server::SharedPV accessDeniedReads_;
+  pvxs::server::SharedPV accessDeniedWrites_;
+  pvxs::server::SharedPV accessRightsChanges_;
   std::string reloadName_;
   std::string versionName_;
   std::string revisionName_;
@@ -197,6 +339,17 @@ private:
   std::string lastErrorName_;
   std::string pvCountName_;
   std::string backendHealthName_;
+  std::string accessReloadName_;
+  std::string accessEnabledName_;
+  std::string accessGenerationName_;
+  std::string accessLastStatusName_;
+  std::string accessLastErrorName_;
+  std::string accessPolicyFingerprintName_;
+  std::string accessWatchStatusName_;
+  std::string accessActiveClientsName_;
+  std::string accessDeniedReadsName_;
+  std::string accessDeniedWritesName_;
+  std::string accessRightsChangesName_;
 };
 
 std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {
@@ -281,6 +434,7 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
 using RpcMap = std::unordered_map<std::string, std::shared_ptr<RpcPV>>;
 using PVBindingMap = std::map<std::string, std::string>;
+using AssignmentMap = std::unordered_map<std::string, AccessAssignment>;
 
 PVBindingMap pvBindings(const AppConfig& config) {
   PVBindingMap bindings;
@@ -293,11 +447,24 @@ PVBindingMap pvBindings(const AppConfig& config) {
   return bindings;
 }
 
+std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
+  std::set<std::string> groups;
+  if (!config.access.enabled) return groups;
+  groups.insert(config.access.defaults.adminRead.asg);
+  groups.insert(config.access.defaults.adminWrite.asg);
+  for (const auto& pv : config.pvs) groups.insert(pv.access.value_or(config.access.defaults.pv).asg);
+  for (const auto& service : config.rpcServices) {
+    groups.insert(service.access.value_or(config.access.defaults.rpc).asg);
+  }
+  return groups;
+}
+
 // Build RPC-forwarding PVs by reflecting each configured gRPC service and
 // creating one PV per method, named <namespace>:<UPPER_SNAKE(Method)><suffix>.
 // The IOC has no compiled-in knowledge of the methods or message schema.
-RpcMap buildRpcPVs(const AppConfig& config) {
+RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
   RpcMap rpcPVs;
+  assignments.clear();
   for (const auto& svc : config.rpcServices) {
     auto bridge = std::make_shared<GrpcBridge>(svc.endpoint);
 
@@ -326,6 +493,7 @@ RpcMap buildRpcPVs(const AppConfig& config) {
       std::string name =
           config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
       rpcPVs.emplace(name, std::make_shared<RpcPV>(bridge, m, svc.defaults));
+      assignments.emplace(name, svc.access.value_or(config.access.defaults.rpc));
       std::fprintf(stderr, "[redis-pvxs-ioc] rpc PV %s -> %s/%s\n",
                    name.c_str(), m.service.c_str(), m.method.c_str());
     }
@@ -337,6 +505,7 @@ RpcMap buildRpcPVs(const AppConfig& config) {
 
 struct Application::Impl {
   pvxs::server::Server server;
+  std::shared_ptr<AccessController> access;
   std::unique_ptr<AdminNamespace> admin;
   AppConfig currentConfig;
   bool hasConfig = false;
@@ -345,7 +514,24 @@ struct Application::Impl {
   std::shared_ptr<AlarmPublisher> alarmPublisher;
   RuntimeMap runtimes;
   RpcMap rpcPVs;
+  AssignmentMap rpcAssignments;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
+
+  void addEndpoint(const std::string& name,
+                   const pvxs::server::SharedPV& pv,
+                   const AccessAssignment& assignment) {
+    if (access) access->addPV(name, pv, assignment);
+    else server.addPV(name, pv);
+  }
+
+  void removeEndpoint(const std::string& name) {
+    if (access) access->removePV(name);
+    else server.removePV(name);
+  }
+
+  void setAssignment(const std::string& name, const AccessAssignment& assignment) {
+    if (access) access->setAssignment(name, assignment);
+  }
 };
 
 Application::Application(std::string configPath)
@@ -356,7 +542,14 @@ Application::~Application() = default;
 
 bool Application::validateOnly(std::string& summary, std::string& error) const {
   try {
-    summary = summarizeConfig(loadConfigFile(configPath_));
+    const auto config = loadConfigFile(configPath_);
+    std::string policyFingerprint;
+    if (!validateAccessPolicy(config.access, requiredAccessAsgs(config), policyFingerprint, error)) {
+      summary.clear();
+      return false;
+    }
+    summary = summarizeConfig(config);
+    if (!policyFingerprint.empty()) summary += " access_fingerprint=" + policyFingerprint;
     error.clear();
     return true;
   } catch (const std::exception& ex) {
@@ -370,8 +563,14 @@ bool Application::start(std::string& error) {
   try {
     const auto config = loadConfigFile(configPath_);
     impl_->server = buildServerConfig(config).build();
-    impl_->admin = std::make_unique<AdminNamespace>(config.server);
-    impl_->admin->install(impl_->server);
+    if (config.access.enabled) {
+      impl_->access = std::make_shared<AccessController>(config.access);
+      if (!impl_->access->start(requiredAccessAsgs(config), error)) return false;
+      impl_->server.addSource("access", impl_->access->source());
+    }
+    impl_->admin = std::make_unique<AdminNamespace>(config.server, config.access.enabled);
+    impl_->admin->install(impl_->server, impl_->access.get(), config.access.defaults);
+    impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     if (!applyConfig(config, true, error)) {
       return false;
     }
@@ -396,6 +595,9 @@ void Application::pump() {
   if (impl_->admin && impl_->admin->consumeReloadRequest()) {
     reloadRequested_.store(true);
   }
+  if (impl_->access && impl_->admin && impl_->admin->consumeAccessReloadRequest()) {
+    impl_->access->requestReload("admin-pv");
+  }
 
   if (reloadRequested_.exchange(false)) {
     try {
@@ -413,11 +615,14 @@ void Application::pump() {
     }
   }
 
+  if (impl_->access) impl_->access->pump();
+
   const auto now = std::chrono::steady_clock::now();
   if (now - impl_->lastHealthUpdate >= std::chrono::seconds(1)) {
     impl_->lastHealthUpdate = now;
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
+      impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     }
   }
 }
@@ -428,21 +633,25 @@ void Application::stop() {
   }
 
   for (const auto& binding : pvBindings(impl_->currentConfig)) {
-    impl_->server.removePV(binding.first);
+    impl_->removeEndpoint(binding.first);
   }
   for (auto& item : impl_->runtimes) {
     item.second->deactivate("application stopping");
   }
   impl_->runtimes.clear();
   for (auto& item : impl_->rpcPVs) {
-    impl_->server.removePV(item.first);
+    impl_->removeEndpoint(item.first);
   }
   impl_->rpcPVs.clear();
   impl_->redisBackends.clear();
   impl_->alarmPublisher.reset();
 
   if (impl_->admin) {
-    impl_->admin->remove(impl_->server);
+    impl_->admin->remove(impl_->server, impl_->access.get());
+  }
+  if (impl_->access) {
+    impl_->server.removeSource("access");
+    impl_->access.reset();
   }
   impl_->server.stop();
   started_ = false;
@@ -453,19 +662,51 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
     error = "server namespace/bind settings are immutable after startup";
     return false;
   }
+  if (!initialLoad && impl_->hasConfig &&
+      impl_->currentConfig.access.enabled != config.access.enabled) {
+    error = "access.enabled is immutable after startup; restart is required";
+    return false;
+  }
+
+  bool policyActivated = false;
+  const BeforeCommit activatePolicy = [&](std::string& activationError) {
+    if (initialLoad || !impl_->access) return true;
+    if (!impl_->access->reconfigure(config.access, requiredAccessAsgs(config), activationError)) {
+      return false;
+    }
+    policyActivated = true;
+    try {
+      impl_->admin->setAccessAssignments(*impl_->access, config.access.defaults);
+      return true;
+    } catch (const std::exception& ex) {
+      activationError = ex.what();
+      return false;
+    }
+  };
 
   const auto nextGeneration = impl_->generation + 1;
 
   const bool redisChanged = !impl_->hasConfig || !sameRedisBackends(impl_->currentConfig.redisBackends, config.redisBackends);
   const bool alarmChanged = !impl_->hasConfig || !sameAlarmStreamConfig(impl_->currentConfig.alarms, config.alarms);
 
-  if (initialLoad || redisChanged || alarmChanged) {
-    return replaceAll(config, nextGeneration, error);
+  const bool applied = initialLoad || redisChanged || alarmChanged
+      ? replaceAll(config, nextGeneration, activatePolicy, error)
+      : applyIncremental(config, nextGeneration, activatePolicy, error);
+  if (!applied && policyActivated) {
+    std::string restoreError;
+    if (!impl_->access->restorePrevious(restoreError)) {
+      error += "; previous ACF restore failed: " + restoreError;
+    } else {
+      impl_->admin->setAccessAssignments(*impl_->access, impl_->currentConfig.access.defaults);
+    }
   }
-  return applyIncremental(config, nextGeneration, error);
+  return applied;
 }
 
-bool Application::replaceAll(const AppConfig& config, const uint64_t generation, std::string& error) {
+bool Application::replaceAll(const AppConfig& config,
+                             const uint64_t generation,
+                             const BeforeCommit& beforeCommit,
+                             std::string& error) {
   try {
     auto newRedisBackends = buildRedisBackends(config);
     setDeferReaders(newRedisBackends, true);
@@ -486,8 +727,15 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
     }
     setDeferReaders(newRedisBackends, false);
 
+    AssignmentMap stagedRpcAssignments;
+    auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments);
+    if (!beforeCommit(error)) {
+      for (auto& item : staged) item.second->deactivate("staged config rejected");
+      return false;
+    }
+
     for (const auto& binding : pvBindings(impl_->currentConfig)) {
-      impl_->server.removePV(binding.first);
+      impl_->removeEndpoint(binding.first);
     }
     for (auto& item : impl_->runtimes) {
       item.second->deactivate("config replaced");
@@ -496,7 +744,9 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
 
     for (auto& item : staged) {
       for (const auto& servedName : fullPVNames(config.server, item.second->config())) {
-        impl_->server.addPV(servedName, item.second->sharedPV());
+        impl_->addEndpoint(servedName,
+                           item.second->sharedPV(),
+                           item.second->config().access.value_or(config.access.defaults.pv));
       }
       impl_->runtimes.emplace(item.first, item.second);
     }
@@ -504,11 +754,12 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
     // Rebuild RPC-forwarding PVs (simple full-replace; they hold no Redis
     // reader state, so there is no in-flight subscription to preserve).
     for (auto& item : impl_->rpcPVs) {
-      impl_->server.removePV(item.first);
+      impl_->removeEndpoint(item.first);
     }
-    impl_->rpcPVs = buildRpcPVs(config);
+    impl_->rpcPVs = std::move(stagedRpcPVs);
+    impl_->rpcAssignments = std::move(stagedRpcAssignments);
     for (auto& item : impl_->rpcPVs) {
-      impl_->server.addPV(item.first, item.second->sharedPV());
+      impl_->addEndpoint(item.first, item.second->sharedPV(), impl_->rpcAssignments.at(item.first));
     }
 
     impl_->redisBackends = std::move(newRedisBackends);
@@ -531,7 +782,10 @@ bool Application::replaceAll(const AppConfig& config, const uint64_t generation,
   }
 }
 
-bool Application::applyIncremental(const AppConfig& config, const uint64_t generation, std::string& error) {
+bool Application::applyIncremental(const AppConfig& config,
+                                   const uint64_t generation,
+                                   const BeforeCommit& beforeCommit,
+                                   std::string& error) {
   try {
     const auto currentBindings = pvBindings(impl_->currentConfig);
     const auto desiredBindings = pvBindings(config);
@@ -599,13 +853,20 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
       reopenValues.emplace(name, impl_->runtimes.at(name)->sharedPV().fetch());
     }
 
+    AssignmentMap stagedRpcAssignments;
+    auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments);
+    if (!beforeCommit(error)) {
+      for (auto& item : staged) item.second->deactivate("staged config rejected");
+      return false;
+    }
+
     for (const auto& binding : currentBindings) {
       const auto desiredIt = desiredBindings.find(binding.first);
       if (desiredIt == desiredBindings.end() ||
           desiredIt->second != binding.second ||
           replaced.count(binding.second) != 0u ||
           reopenNames.count(binding.second) != 0u) {
-        impl_->server.removePV(binding.first);
+        impl_->removeEndpoint(binding.first);
       }
     }
 
@@ -621,6 +882,14 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
 
     for (const auto& item : reconfigureNames) {
       impl_->runtimes.at(item.first)->reconfigure(item.second, generation);
+      for (const auto& servedName : fullPVNames(config.server, item.second)) {
+        const auto currentIt = currentBindings.find(servedName);
+        if (currentIt != currentBindings.end() &&
+            currentIt->second == item.first &&
+            reopenNames.count(item.first) == 0u) {
+          impl_->setAssignment(servedName, item.second.access.value_or(config.access.defaults.pv));
+        }
+      }
     }
 
     for (const auto& name : removeNames) {
@@ -645,19 +914,21 @@ bool Application::applyIncremental(const AppConfig& config, const uint64_t gener
           currentIt->second != binding.second ||
           replaced.count(binding.second) != 0u ||
           reopenNames.count(binding.second) != 0u) {
-        impl_->server.addPV(
+        impl_->addEndpoint(
             binding.first,
-            impl_->runtimes.at(binding.second)->sharedPV());
+            impl_->runtimes.at(binding.second)->sharedPV(),
+            desired.at(binding.second).access.value_or(config.access.defaults.pv));
       }
     }
 
     // Full-replace the RPC-forwarding PVs.
     for (auto& item : impl_->rpcPVs) {
-      impl_->server.removePV(item.first);
+      impl_->removeEndpoint(item.first);
     }
-    impl_->rpcPVs = buildRpcPVs(config);
+    impl_->rpcPVs = std::move(stagedRpcPVs);
+    impl_->rpcAssignments = std::move(stagedRpcAssignments);
     for (auto& item : impl_->rpcPVs) {
-      impl_->server.addPV(item.first, item.second->sharedPV());
+      impl_->addEndpoint(item.first, item.second->sharedPV(), impl_->rpcAssignments.at(item.first));
     }
 
     impl_->currentConfig = config;

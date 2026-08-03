@@ -455,10 +455,131 @@ pvs:
       key: sys-revision
 )YAML";
 
+const char* const kAccessConfig = R"YAML(
+access:
+  enabled: true
+  file: policies/test.acf
+  macros:
+    IOC: demo
+  watch:
+    enabled: true
+    interval_ms: 1500
+    settle_ms: 300
+  defaults:
+    pv: {asg: DATA, asl: 0}
+    rpc: {asg: RPC, asl: 1}
+    admin_read: {asg: STATUS, asl: 0}
+    admin_write: {asg: ADMIN, asl: 1}
+server:
+  instance: secure
+redis:
+  base_key: demo
+  host: localhost
+  port: 6379
+pvs:
+  - name: inherited
+    aliases: [EXTERNAL:inherited]
+    type: float64
+    shape: scalar
+    read: {key: inherited}
+  - name: overridden
+    type: float64
+    shape: scalar
+    read: {key: overridden}
+    access: {asg: SPECIAL, asl: 1}
+rpc_services:
+  - endpoint: host:50051
+    service: pkg.Svc
+)YAML";
+
+const char* const kDisabledEndpointAccess = R"YAML(
+server: {instance: insecure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+    access: {asg: LOOKS_SECURE, asl: 0}
+)YAML";
+
+const char* const kDisabledWatch = R"YAML(
+access:
+  enabled: false
+  watch: {enabled: true}
+server: {instance: insecure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+)YAML";
+
+const char* const kDisabledWatchSettings = R"YAML(
+access:
+  enabled: false
+  watch: {enabled: false, interval_ms: 500}
+server: {instance: insecure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+)YAML";
+
+const char* const kUnknownAccessKey = R"YAML(
+access: {enabled: true, file: test.acf, enabeld: true}
+server: {instance: secure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+)YAML";
+
+const char* const kUnknownAssignmentKey = R"YAML(
+access: {enabled: true, file: test.acf}
+server: {instance: secure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+    access: {asg: DATA, level: 1}
+)YAML";
+
+const char* const kEnabledMissingFile = R"YAML(
+access: {enabled: true}
+server: {instance: secure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+)YAML";
+
+const char* const kInvalidAsl = R"YAML(
+access: {enabled: true, file: test.acf}
+server: {instance: secure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+    access: {asg: DATA, asl: 2}
+)YAML";
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   const auto legacy = loadConfigString(kLegacyConfig);
+  assert(!legacy.access.enabled);
   assert(legacy.server.instance == "test");
   assert(legacy.server.nameSpace == "DEMO");
   assert(legacy.redisBackends.size() == 1u);
@@ -520,6 +641,31 @@ int main() {
   assert(throwsConfig(kReservedRevisionPvName));
   assert(throwsConfig(kReservedSysVersionPvName));
   assert(throwsConfig(kReservedSysRevisionPvName));
+  assert(throwsConfig(kDisabledEndpointAccess));
+  assert(throwsConfig(kDisabledWatch));
+  assert(throwsConfig(kDisabledWatchSettings));
+  assert(throwsConfig(kUnknownAccessKey));
+  assert(throwsConfig(kUnknownAssignmentKey));
+  assert(throwsConfig(kEnabledMissingFile));
+  assert(throwsConfig(kInvalidAsl));
+
+  const auto access = loadConfigString(kAccessConfig);
+  assert(access.access.enabled);
+  assert(access.access.file.find("policies/test.acf") != std::string::npos);
+  assert(access.access.macros.at("IOC") == "demo");
+  assert(access.access.watch.enabled);
+  assert(access.access.watch.intervalMs == 1500u);
+  assert(access.access.watch.settleMs == 300u);
+  assert(access.pvs[0].access.has_value());
+  assert(access.pvs[0].access->asg == "DATA");
+  assert(access.pvs[0].access->asl == 0);
+  assert(access.pvs[0].aliases.size() == 1u);
+  assert(access.pvs[1].access->asg == "SPECIAL");
+  assert(access.pvs[1].access->asl == 1);
+  assert(access.rpcServices[0].access->asg == "RPC");
+  assert(access.rpcServices[0].access->asl == 1);
+  assert(access.access.defaults.adminRead.asg == "STATUS");
+  assert(access.access.defaults.adminWrite.asg == "ADMIN");
 
   // Generic gRPC RPC services (one PV per reflected method at runtime).
   const auto rpc = loadConfigString(kRpcConfig);
@@ -539,6 +685,11 @@ int main() {
   assert(throwsConfig(kRpcMissingEndpoint));     // service without endpoint
   assert(throwsConfig(kNoPvsNoRpc));             // neither pvs nor rpc_services
 
+  if (argc > 1) {
+    const auto fileConfig = loadConfigFile(argv[1]);
+    assert(fileConfig.access.enabled);
+    assert(!fileConfig.access.file.empty());
+  }
   std::cout << "config tests passed\n";
   return 0;
 }

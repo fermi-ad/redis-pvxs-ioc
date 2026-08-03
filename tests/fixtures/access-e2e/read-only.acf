@@ -1,0 +1,15 @@
+UAG(NOBODY) { nobody }
+
+ASG(DEFAULT) {
+  RULE(0, READ)
+}
+
+ASG(DATA) {
+  RULE(0, READ)
+  RULE(0, WRITE) { UAG(NOBODY) }
+}
+
+ASG(ADMIN) {
+  RULE(0, READ)
+  RULE(0, WRITE)
+}

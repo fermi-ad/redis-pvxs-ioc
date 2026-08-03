@@ -80,6 +80,32 @@ struct LinearTransformConfig {
   double offset = 0.0;
 };
 
+struct AccessAssignment {
+  std::string asg = "DEFAULT";
+  int asl = 0;
+};
+
+struct AccessDefaultsConfig {
+  AccessAssignment pv;
+  AccessAssignment rpc;
+  AccessAssignment adminRead;
+  AccessAssignment adminWrite;
+};
+
+struct AccessWatchConfig {
+  bool enabled = false;
+  uint32_t intervalMs = 1000;
+  uint32_t settleMs = 250;
+};
+
+struct AccessConfig {
+  bool enabled = false;
+  std::string file;
+  std::map<std::string, std::string> macros;
+  AccessWatchConfig watch;
+  AccessDefaultsConfig defaults;
+};
+
 // A backend gRPC service to expose as RPC PVs. The IOC reflects the service at
 // startup and creates one RPC PV per method; it has NO compiled-in knowledge of
 // the service's methods or message types (see docs/rpc-forwarding.md). Each PV
@@ -92,6 +118,7 @@ struct RpcServiceConfig {
   // unique leaf) before per-call pvxcall args. Fields that a given method's
   // request doesn't have are ignored, so one map can serve every method.
   std::map<std::string, std::string> defaults;
+  std::optional<AccessAssignment> access;
 };
 
 using TypedValue = std::variant<
@@ -131,6 +158,7 @@ struct PVConfig {
   AlarmConfig alarms;
   std::optional<LinearTransformConfig> transform;
   TypedValue initialValue;
+  std::optional<AccessAssignment> access;
 };
 
 struct ServerConfig {
@@ -168,6 +196,7 @@ struct ChannelFinderConfig {
 
 struct AppConfig {
   ServerConfig server;
+  AccessConfig access;
   RedisBackendConfigs redisBackends;
   AlarmStreamConfig alarms;
   ChannelFinderConfig channelFinder;
@@ -189,6 +218,8 @@ std::string toString(DisplayForm form);
 
 bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);
 bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs);
+bool sameAccessAssignment(const AccessAssignment& lhs, const AccessAssignment& rhs);
+bool sameAccessConfig(const AccessConfig& lhs, const AccessConfig& rhs);
 bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs);
 bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs& rhs);
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs);

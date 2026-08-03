@@ -8,6 +8,10 @@
   defaults, types, and validation rules.
 - [Operations and diagnostics](operations.md): hot reload, built-in PVs, health,
   and troubleshooting.
+- [Access control](access-control.md): opt-in native ACF policy, hot reload,
+  watcher behavior, auditing, and diagnostics.
+- [Live ACF validation](access-live-validation.md): controlled acceptance and
+  rollback procedure for a representative deployed IOC.
 - [PVAccess networking](pva-networking.md): container discovery and routable
   deployment patterns.
 - [Demo guide](demo.md): full core demo and validation sequence.
@@ -28,6 +32,8 @@
 - [Building from source](building-from-source.md): prerequisites, pinned or
   existing EPICS/PVXS builds, tests, and local images.
 - [Development guide](development.md): the contributor build/test loop.
+- [Performance measurement](performance.md): repeatable ACF baseline, mixed,
+  and reload-under-load benchmark report.
 - [Feature state and roadmap](feature-state-roadmap.md): current capabilities and
   tracked future work.
 - [Normative types roadmap](normative-types-roadmap.md): expansion beyond

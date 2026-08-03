@@ -9,8 +9,11 @@ PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.
 DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.1@sha256:73ef6e1ca9e8e6c344e2663f841186050629b49a3f1ebe3c3ffa1e73ce4bfad5"
 USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE+x}"
 SOURCE_VERSION="$(tr -d '\n' < VERSION)"
+SMOKE_RUN_ID="${REDIS_PVXS_IOC_SMOKE_RUN_ID:-$$}"
 
 export REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE:-$DEFAULT_REDIS_PVXS_IOC_IMAGE}"
+export REDIS_CONTAINER_NAME="${REDIS_CONTAINER_NAME:-redis-pvxs-ioc-smoke-${SMOKE_RUN_ID}-redis}"
+export REDIS_PVXS_IOC_CONTAINER_NAME="${REDIS_PVXS_IOC_CONTAINER_NAME:-redis-pvxs-ioc-smoke-${SMOKE_RUN_ID}-ioc}"
 SOURCE_CONFIG="${REDIS_PVXS_IOC_CONFIG:-$ROOT_DIR/demo/config.yaml}"
 TEMP_CONFIG="$(mktemp)"
 export REDIS_PVXS_IOC_CONFIG="$TEMP_CONFIG"
@@ -41,7 +44,7 @@ replace_config_text() {
   local from="$1"
   local to="$2"
 
-  perl -0 -e '
+  LC_ALL=C perl -0 -e '
     my ($path, $from, $to) = @ARGV;
     open my $config, "+<", $path or die "open $path: $!\n";
     local $/;
@@ -84,10 +87,11 @@ run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxge
 VERSION_OUTPUT="$(docker exec "$IOC_CONTAINER" /opt/redis-pvxs-ioc/bin/redis-pvxs-ioc --version)"
 EXPECTED_VERSION="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n 's/^redis-pvxs-ioc \([^ ]*\).*$/\1/p')"
 EXPECTED_REVISION="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n 's/^redis-pvxs-ioc [^ ]* (\([^)]*\))$/\1/p')"
-if [ -z "$EXPECTED_VERSION" ] || [ -z "$EXPECTED_REVISION" ]; then
-  echo "could not determine redis-pvxs-ioc version and revision from: $VERSION_OUTPUT" >&2
+if [ -z "$EXPECTED_VERSION" ]; then
+  echo "could not determine redis-pvxs-ioc version from: $VERSION_OUTPUT" >&2
   exit 1
 fi
+EXPECTED_REVISION="${EXPECTED_REVISION:-unknown}"
 if [ -n "$USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE" ] && [ "$EXPECTED_VERSION" != "$SOURCE_VERSION" ]; then
   echo "user-supplied image version $EXPECTED_VERSION does not match VERSION=$SOURCE_VERSION" >&2
   exit 1

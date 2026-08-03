@@ -1,0 +1,42 @@
+server:
+  instance: demo-access
+  namespace: DEMO
+  auto_beacon: true
+
+access:
+  enabled: true
+  file: access.acf
+  macros: {}
+  watch:
+    enabled: true
+    interval_ms: 1000
+    settle_ms: 250
+  defaults:
+    pv: {asg: DEFAULT, asl: 0}
+    rpc: {asg: DEFAULT, asl: 0}
+    admin_read: {asg: DEFAULT, asl: 0}
+    admin_write: {asg: ACCESS_ADMINS, asl: 0}
+
+redis:
+  base_key: demo
+  host: redis
+  port: 6379
+  workers: 2
+  readers: 2
+
+pvs:
+  - name: source:temperature
+    type: float64
+    shape: scalar
+    read: {key: temperature:rb}
+    metadata: {description: Source temperature, units: C, precision: 1}
+    initial: 21.5
+
+  - name: magnet:current
+    type: float64
+    shape: scalar
+    read: {key: magnet:current}
+    write: {key: magnet:current}
+    access: {asg: OPERATORS, asl: 0}
+    metadata: {description: Magnet current, units: A, precision: 2}
+    initial: 0.0

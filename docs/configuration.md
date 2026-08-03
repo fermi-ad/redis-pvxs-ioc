@@ -14,6 +14,7 @@ PVs, and RPC services. It does not connect to Redis or start a PVA server.
 
 ```yaml
 server: {}
+access: {}                # optional; disabled by default
 redis: {}                 # or redis_backends, exactly one form
 alarms: {}                # optional
 channelfinder: {}         # optional
@@ -38,6 +39,13 @@ At least one `pvs` or `rpc_services` entry is required. The old `PVList`,
 Namespace, instance, interfaces, ports, and beacon configuration are immutable
 after startup. Change them by restarting the process; ordinary PV/route/metadata
 changes use hot reload.
+
+## `access`
+
+Native EPICS ACF access control is opt-in and startup-immutable. When enabled,
+the policy, macros, defaults, endpoint assignments, and optional file watcher
+are hot-reloadable. See [Access control](access-control.md) for the complete
+schema, authorization behavior, and reload guarantees.
 
 ## Redis backends
 
@@ -158,7 +166,7 @@ Configuration loading rejects:
 
 - any duplicate served name across canonical names and aliases, including an
   alias equal to its own or another PV's canonical name;
-- names that expand to the four reserved version/revision aliases;
+- names that expand to any built-in operational PV name;
 - more than one subscription to the same `(backend, key)` through a `read` or a
   distinct `confirm` route; and
 - route or alarm backend aliases that do not exist.
@@ -238,9 +246,8 @@ reflection. See [`rpc-forwarding.md`](rpc-forwarding.md).
 ## Reserved names
 
 Do not configure any PV with the built-in names listed in
-[`operations.md`](operations.md). Config validation currently enforces the
-version/revision aliases; [issue #66](https://github.com/fermi-ad/redis-pvxs-ioc/issues/66)
-tracks reserving the complete operational namespace.
+[`operations.md`](operations.md). Configuration validation reserves the full
+operational namespace.
 
 ## Complete examples
 
@@ -250,3 +257,5 @@ tracks reserving the complete operational namespace.
   backends and explicit route selection.
 - [`../demo/config.rpc.yaml`](../demo/config.rpc.yaml): reflection-based RPC-only
   process with no Redis-backed PV definitions.
+- [`../demo/config.access.yaml`](../demo/config.access.yaml): explicitly enabled
+  ACF policy, endpoint assignments, and file monitoring.

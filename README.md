@@ -12,6 +12,9 @@ Redis-backed EPICS process variables defined by YAML.
 - **Generation-based hot reload:** reload through `SIGHUP` or a PVA command;
   compatible Redis subscriptions stay live, changed PVs are staged, and invalid
   replacements are rejected while the active generation keeps serving.
+- **Optional native ACF security:** explicitly enabled EPICS access policy
+  protects Redis PVs, RPCs, and admin endpoints with dedicated, whole-config,
+  or settled file-watcher reload while leaving monitor fan-out untouched.
 - **Collision-aware preflight:** `--check-config` resolves final PV names and
   routes without starting Redis or PVA, rejecting duplicate PV names, reserved
   version/revision aliases, unknown backends, and conflicting read/confirm
@@ -90,6 +93,7 @@ These PVs are always created from `server.instance`; they do not use
 | `SYS:<instance>:config:lastError` | read | Last config/app error |
 | `SYS:<instance>:stats:pvCount` | read | Configured runtime and RPC PV count |
 | `SYS:<instance>:backend:health` | read | Connected Redis backend summary |
+| `SYS:<instance>:access:*` | read/write | ACF reload, status, generation, fingerprint, and counters |
 
 See [Operations and diagnostics](docs/operations.md) for reload guarantees and
 verification commands.
@@ -118,6 +122,8 @@ immutable digest. `:latest` is only a development convenience. See the
 - [Documentation index](docs/README.md)
 - [Configuration reference](docs/configuration.md)
 - [Operations and diagnostics](docs/operations.md)
+- [Access control](docs/access-control.md)
+- [Performance measurement](docs/performance.md)
 - [Architecture](docs/design.md)
 - [Current feature state and roadmap](docs/feature-state-roadmap.md)
 - [Building from source](docs/building-from-source.md)

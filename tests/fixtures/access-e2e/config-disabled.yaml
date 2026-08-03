@@ -1,0 +1,23 @@
+server:
+  instance: e2e
+  namespace: E2E
+  interfaces: [0.0.0.0]
+  auto_beacon: false
+
+access:
+  enabled: false
+
+redis:
+  base_key: acf-e2e
+  host: acf-e2e-redis
+  port: 6379
+  workers: 1
+  readers: 1
+
+pvs:
+  - name: value
+    type: float64
+    shape: scalar
+    read: {key: value}
+    write: {key: value}
+    initial: 1.0

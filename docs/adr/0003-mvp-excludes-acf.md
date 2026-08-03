@@ -1,8 +1,9 @@
 # ADR 0003: MVP Excludes ACF Enforcement
 
-> **Historical wording:** “MVP” names the original milestone. ACF remains
-> unimplemented and is tracked as current roadmap work in
-> [issue #5](https://github.com/fermi-ad/redis-pvxs-ioc/issues/5).
+> **Historical wording:** “MVP” names the original milestone. Native ACF support
+> was implemented later under
+> [issue #5](https://github.com/fermi-ad/redis-pvxs-ioc/issues/5); this ADR records
+> only the original MVP scope decision.
 
 ## Status
 

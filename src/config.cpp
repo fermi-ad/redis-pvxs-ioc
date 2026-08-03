@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <sstream>
@@ -71,6 +72,97 @@ std::string parseString(const YAML::Node& node, const std::string& path) {
   } catch (const std::exception& ex) {
     fail(path, ex.what());
   }
+}
+
+AccessAssignment parseAccessAssignment(const YAML::Node& node, const std::string& path) {
+  requireMap(node, path);
+  AccessAssignment assignment;
+  if (node["asg"]) {
+    assignment.asg = parseString(node["asg"], path + ".asg");
+  }
+  if (node["asl"]) {
+    assignment.asl = parseNumeric<int>(node["asl"], path + ".asl");
+  }
+  if (assignment.asg.empty()) {
+    fail(path + ".asg", "must not be empty");
+  }
+  if (assignment.asl != 0 && assignment.asl != 1) {
+    fail(path + ".asl", "must be 0 or 1");
+  }
+  return assignment;
+}
+
+AccessConfig parseAccessConfig(const YAML::Node& node,
+                               const std::filesystem::path& configDirectory,
+                               const std::string& path) {
+  AccessConfig config;
+  if (!node) {
+    return config;
+  }
+
+  requireMap(node, path);
+  if (node["enabled"]) {
+    config.enabled = node["enabled"].as<bool>();
+  }
+  if (node["file"]) {
+    config.file = parseString(node["file"], path + ".file");
+  }
+  if (node["macros"]) {
+    const auto macros = requireMap(node["macros"], path + ".macros");
+    for (const auto& entry : macros) {
+      const auto name = parseString(entry.first, path + ".macros.<name>");
+      if (name.empty()) {
+        fail(path + ".macros", "macro name must not be empty");
+      }
+      config.macros[name] = parseString(entry.second, path + ".macros." + name);
+    }
+  }
+  if (node["watch"]) {
+    const auto watch = requireMap(node["watch"], path + ".watch");
+    if (watch["enabled"]) {
+      config.watch.enabled = watch["enabled"].as<bool>();
+    }
+    if (watch["interval_ms"]) {
+      config.watch.intervalMs = parseNumeric<uint32_t>(watch["interval_ms"], path + ".watch.interval_ms");
+    }
+    if (watch["settle_ms"]) {
+      config.watch.settleMs = parseNumeric<uint32_t>(watch["settle_ms"], path + ".watch.settle_ms");
+    }
+    if (config.watch.intervalMs < 100u || config.watch.intervalMs > 60000u) {
+      fail(path + ".watch.interval_ms", "must be between 100 and 60000");
+    }
+    if (config.watch.settleMs > 60000u) {
+      fail(path + ".watch.settle_ms", "must not exceed 60000");
+    }
+  }
+  if (node["defaults"]) {
+    const auto defaults = requireMap(node["defaults"], path + ".defaults");
+    if (defaults["pv"]) config.defaults.pv = parseAccessAssignment(defaults["pv"], path + ".defaults.pv");
+    if (defaults["rpc"]) config.defaults.rpc = parseAccessAssignment(defaults["rpc"], path + ".defaults.rpc");
+    if (defaults["admin_read"]) {
+      config.defaults.adminRead = parseAccessAssignment(defaults["admin_read"], path + ".defaults.admin_read");
+    }
+    if (defaults["admin_write"]) {
+      config.defaults.adminWrite = parseAccessAssignment(defaults["admin_write"], path + ".defaults.admin_write");
+    }
+  }
+
+  if (!config.enabled) {
+    if (!config.file.empty() || !config.macros.empty() || config.watch.enabled || node["defaults"]) {
+      fail(path, "access settings require enabled: true");
+    }
+    return config;
+  }
+
+  if (config.file.empty()) {
+    fail(path + ".file", "is required when access control is enabled");
+  }
+  std::filesystem::path policyPath(config.file);
+  if (policyPath.is_relative()) {
+    policyPath = configDirectory / policyPath;
+  }
+  config.file = std::filesystem::absolute(policyPath).lexically_normal().string();
+  return config;
 }
 
 PrimitiveType parsePrimitiveType(const YAML::Node& node, const std::string& path) {
@@ -396,6 +488,7 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
           parseString(kv.second, path + ".defaults." + kv.first.as<std::string>());
     }
   }
+  if (node["access"]) svc.access = parseAccessAssignment(node["access"], path + ".access");
   if (svc.endpoint.empty()) fail(path + ".endpoint", "must not be empty");
   if (svc.service.empty()) fail(path + ".service", "must not be empty");
   return svc;
@@ -442,6 +535,7 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   pv.alarms = parseAlarmConfig(node["alarm"], path + ".alarm");
   pv.transform = parseTransform(node["transform"], path + ".transform");
   pv.initialValue = parseInitialValue(node["initial"], pv.type, pv.shape, path + ".initial");
+  if (node["access"]) pv.access = parseAccessAssignment(node["access"], path + ".access");
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
     fail(path + ".type", "this array element type is unsupported");
@@ -470,11 +564,13 @@ void validateTopLevelSchema(const YAML::Node& root) {
   }
 }
 
-AppConfig parseConfig(const YAML::Node& root) {
+AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& configDirectory) {
   requireMap(root, "root");
   validateTopLevelSchema(root);
 
   AppConfig config;
+
+  config.access = parseAccessConfig(root["access"], configDirectory, "root.access");
 
   const auto serverNode = requireMap(requireNode(root, "server", "root"), "root.server");
   config.server.instance = parseString(requireNode(serverNode, "instance", "root.server"), "root.server.instance");
@@ -544,6 +640,13 @@ AppConfig parseConfig(const YAML::Node& root) {
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
 
+    if (pv.access && !config.access.enabled) {
+      fail("root.pvs[" + std::to_string(index) + "].access", "requires root.access.enabled: true");
+    }
+    if (!pv.access && config.access.enabled) {
+      pv.access = config.access.defaults.pv;
+    }
+
     resolveBackendAlias(pv.read.backend,
                         "root.pvs[" + std::to_string(index) + "].read.backend",
                         config.redisBackends,
@@ -565,6 +668,23 @@ AppConfig parseConfig(const YAML::Node& root) {
       revisionPVName(config.server),
       adminPVName(config.server, "version"),
       adminPVName(config.server, "revision"),
+      adminPVName(config.server, "config:reload"),
+      adminPVName(config.server, "config:generation"),
+      adminPVName(config.server, "config:lastStatus"),
+      adminPVName(config.server, "config:lastError"),
+      adminPVName(config.server, "stats:pvCount"),
+      adminPVName(config.server, "backend:health"),
+      adminPVName(config.server, "access:reload"),
+      adminPVName(config.server, "access:enabled"),
+      adminPVName(config.server, "access:generation"),
+      adminPVName(config.server, "access:lastStatus"),
+      adminPVName(config.server, "access:lastError"),
+      adminPVName(config.server, "access:policyFingerprint"),
+      adminPVName(config.server, "access:watchStatus"),
+      adminPVName(config.server, "access:activeClients"),
+      adminPVName(config.server, "access:deniedReads"),
+      adminPVName(config.server, "access:deniedWrites"),
+      adminPVName(config.server, "access:rightsChanges"),
     };
     const auto names = fullPVNames(config.server, pv);
     for (size_t nameIndex = 0; nameIndex < names.size(); ++nameIndex) {
@@ -599,8 +719,14 @@ AppConfig parseConfig(const YAML::Node& root) {
   if (root["rpc_services"]) {
     const auto svcNode = requireSequence(root["rpc_services"], "root.rpc_services");
     for (size_t i = 0; i < svcNode.size(); ++i) {
-      config.rpcServices.push_back(
-          parseRpcService(svcNode[i], "root.rpc_services[" + std::to_string(i) + "]"));
+      auto service = parseRpcService(svcNode[i], "root.rpc_services[" + std::to_string(i) + "]");
+      if (service.access && !config.access.enabled) {
+        fail("root.rpc_services[" + std::to_string(i) + "].access", "requires root.access.enabled: true");
+      }
+      if (!service.access && config.access.enabled) {
+        service.access = config.access.defaults.rpc;
+      }
+      config.rpcServices.push_back(std::move(service));
     }
   }
 
@@ -614,11 +740,12 @@ AppConfig parseConfig(const YAML::Node& root) {
 }  // namespace
 
 AppConfig loadConfigFile(const std::string& path) {
-  return parseConfig(YAML::LoadFile(path));
+  const auto absolutePath = std::filesystem::absolute(path);
+  return parseConfig(YAML::LoadFile(path), absolutePath.parent_path());
 }
 
 AppConfig loadConfigString(const std::string& text) {
-  return parseConfig(YAML::Load(text));
+  return parseConfig(YAML::Load(text), std::filesystem::current_path());
 }
 
 std::string summarizeConfig(const AppConfig& config) {
@@ -627,7 +754,13 @@ std::string summarizeConfig(const AppConfig& config) {
          << " namespace=" << (config.server.nameSpace.empty() ? "<none>" : config.server.nameSpace)
          << " redis_backends=" << config.redisBackends.size()
          << " pvs=" << config.pvs.size()
-         << " rpc_services=" << config.rpcServices.size();
+         << " rpc_services=" << config.rpcServices.size()
+         << " access=" << (config.access.enabled ? "enabled" : "disabled");
+  if (config.access.enabled) {
+    stream << "\naccess_file=" << config.access.file
+           << " watch=" << (config.access.watch.enabled ? "enabled" : "disabled")
+           << " macros=" << config.access.macros.size();
+  }
   for (const auto& entry : config.redisBackends) {
     stream << "\nbackend[" << entry.first << "]="
            << entry.second.host << ":" << entry.second.port
@@ -656,6 +789,9 @@ std::string summarizeConfig(const AppConfig& config) {
         }
         stream << pv.aliases[index];
       }
+    }
+    if (pv.access) {
+      stream << " access=" << pv.access->asg << ":ASL" << pv.access->asl;
     }
   }
   return stream.str();
@@ -746,6 +882,23 @@ bool sameServerConfig(const ServerConfig& lhs, const ServerConfig& rhs) {
          lhs.tcpPort == rhs.tcpPort &&
          lhs.udpPort == rhs.udpPort &&
          lhs.autoBeacon == rhs.autoBeacon;
+}
+
+bool sameAccessAssignment(const AccessAssignment& lhs, const AccessAssignment& rhs) {
+  return lhs.asg == rhs.asg && lhs.asl == rhs.asl;
+}
+
+bool sameAccessConfig(const AccessConfig& lhs, const AccessConfig& rhs) {
+  return lhs.enabled == rhs.enabled &&
+         lhs.file == rhs.file &&
+         lhs.macros == rhs.macros &&
+         lhs.watch.enabled == rhs.watch.enabled &&
+         lhs.watch.intervalMs == rhs.watch.intervalMs &&
+         lhs.watch.settleMs == rhs.watch.settleMs &&
+         sameAccessAssignment(lhs.defaults.pv, rhs.defaults.pv) &&
+         sameAccessAssignment(lhs.defaults.rpc, rhs.defaults.rpc) &&
+         sameAccessAssignment(lhs.defaults.adminRead, rhs.defaults.adminRead) &&
+         sameAccessAssignment(lhs.defaults.adminWrite, rhs.defaults.adminWrite);
 }
 
 bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs) {

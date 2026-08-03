@@ -41,7 +41,7 @@ replace_config_text() {
   local from="$1"
   local to="$2"
 
-  perl -0 -e '
+  LC_ALL=C perl -0 -e '
     my ($path, $from, $to) = @ARGV;
     open my $config, "+<", $path or die "open $path: $!\n";
     local $/;
@@ -84,10 +84,11 @@ run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxge
 VERSION_OUTPUT="$(docker exec "$IOC_CONTAINER" /opt/redis-pvxs-ioc/bin/redis-pvxs-ioc --version)"
 EXPECTED_VERSION="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n 's/^redis-pvxs-ioc \([^ ]*\).*$/\1/p')"
 EXPECTED_REVISION="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n 's/^redis-pvxs-ioc [^ ]* (\([^)]*\))$/\1/p')"
-if [ -z "$EXPECTED_VERSION" ] || [ -z "$EXPECTED_REVISION" ]; then
-  echo "could not determine redis-pvxs-ioc version and revision from: $VERSION_OUTPUT" >&2
+if [ -z "$EXPECTED_VERSION" ]; then
+  echo "could not determine redis-pvxs-ioc version from: $VERSION_OUTPUT" >&2
   exit 1
 fi
+EXPECTED_REVISION="${EXPECTED_REVISION:-unknown}"
 if [ -n "$USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE" ] && [ "$EXPECTED_VERSION" != "$SOURCE_VERSION" ]; then
   echo "user-supplied image version $EXPECTED_VERSION does not match VERSION=$SOURCE_VERSION" >&2
   exit 1

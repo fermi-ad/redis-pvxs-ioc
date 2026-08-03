@@ -1,0 +1,24 @@
+# Example policy for demo/config.access.yaml.  Production deployments should
+# replace these identities and groups with site-owned policy.
+UAG(DEMO_OPERATORS) {
+  demo,
+  "role/operators"
+}
+
+ASG(DEFAULT) {
+  RULE(0, READ)
+}
+
+ASG(OPERATORS) {
+  RULE(0, READ)
+  RULE(0, WRITE, TRAPWRITE) {
+    UAG(DEMO_OPERATORS)
+  }
+}
+
+ASG(ACCESS_ADMINS) {
+  RULE(0, READ)
+  RULE(0, WRITE, TRAPWRITE) {
+    UAG(DEMO_OPERATORS)
+  }
+}

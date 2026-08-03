@@ -222,6 +222,22 @@ ASG(DECISION) {
   std::this_thread::sleep_for(std::chrono::milliseconds(110));
   watched.pump();
   assert(watched.status().generation == 2u);
+  // Returning to the already-active last-good bytes is recovery, not a new
+  // activation. Clear the stale watcher error and allow the same invalid bytes
+  // to be evaluated again if they are written after this recovery.
+  file.write("ASG(WATCHED) { RULE(0, WRITE) }\n");
+  std::this_thread::sleep_for(std::chrono::milliseconds(110));
+  watched.pump();
+  assert(watched.status().generation == 2u);
+  assert(watched.status().lastStatus == "watch active");
+  assert(watched.status().lastError.empty());
+  file.write("ASG(WATCHED) { RULE(0, READ) { CALC(\"A=1\") } }\n");
+  std::this_thread::sleep_for(std::chrono::milliseconds(110));
+  watched.pump();
+  std::this_thread::sleep_for(std::chrono::milliseconds(110));
+  watched.pump();
+  assert(watched.status().generation == 2u);
+  assert(watched.status().lastError.find("CALC") != std::string::npos);
   file.write("ASG(WATCHED) {\n RULE(0, READ)\n}\n");
   std::this_thread::sleep_for(std::chrono::milliseconds(110));
   watched.pump();

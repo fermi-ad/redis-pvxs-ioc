@@ -709,7 +709,17 @@ public:
       : ConnectOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
         target_(std::move(target)), state_(std::move(state)) {}
 
-  void connect(const pvxs::Value& prototype) override { target_->connect(prototype); }
+  void connect(const pvxs::Value& prototype) override {
+    // GET_FIELD is a one-shot ConnectOp and never invokes onGet().  Enforce
+    // READ here for that operation while leaving GET/PUT setup alone so their
+    // execution paths retain the single cached-rights load.
+    if (op() == pvxs::server::OpBase::Info && (state_->loadRights() & kRead) == 0u) {
+      state_->owner.recordDenied(*state_, false, nullptr);
+      target_->error("access denied");
+      return;
+    }
+    target_->connect(prototype);
+  }
 
   void error(const std::string& message) override { target_->error(message); }
   void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }

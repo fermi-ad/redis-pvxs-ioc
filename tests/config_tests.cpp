@@ -478,6 +478,7 @@ redis:
   port: 6379
 pvs:
   - name: inherited
+    aliases: [EXTERNAL:inherited]
     type: float64
     shape: scalar
     read: {key: inherited}
@@ -513,6 +514,42 @@ pvs:
     type: float64
     shape: scalar
     read: {key: bad}
+)YAML";
+
+const char* const kDisabledWatchSettings = R"YAML(
+access:
+  enabled: false
+  watch: {enabled: false, interval_ms: 500}
+server: {instance: insecure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+)YAML";
+
+const char* const kUnknownAccessKey = R"YAML(
+access: {enabled: true, file: test.acf, enabeld: true}
+server: {instance: secure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+)YAML";
+
+const char* const kUnknownAssignmentKey = R"YAML(
+access: {enabled: true, file: test.acf}
+server: {instance: secure}
+redis: {base_key: demo, host: localhost, port: 6379}
+pvs:
+  - name: bad
+    type: float64
+    shape: scalar
+    read: {key: bad}
+    access: {asg: DATA, level: 1}
 )YAML";
 
 const char* const kEnabledMissingFile = R"YAML(
@@ -606,6 +643,9 @@ int main(int argc, char** argv) {
   assert(throwsConfig(kReservedSysRevisionPvName));
   assert(throwsConfig(kDisabledEndpointAccess));
   assert(throwsConfig(kDisabledWatch));
+  assert(throwsConfig(kDisabledWatchSettings));
+  assert(throwsConfig(kUnknownAccessKey));
+  assert(throwsConfig(kUnknownAssignmentKey));
   assert(throwsConfig(kEnabledMissingFile));
   assert(throwsConfig(kInvalidAsl));
 
@@ -619,6 +659,7 @@ int main(int argc, char** argv) {
   assert(access.pvs[0].access.has_value());
   assert(access.pvs[0].access->asg == "DATA");
   assert(access.pvs[0].access->asl == 0);
+  assert(access.pvs[0].aliases.size() == 1u);
   assert(access.pvs[1].access->asg == "SPECIAL");
   assert(access.pvs[1].access->asl == 1);
   assert(access.rpcServices[0].access->asg == "RPC");

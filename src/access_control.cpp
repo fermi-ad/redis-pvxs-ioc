@@ -29,18 +29,33 @@ namespace {
 constexpr uint8_t kRead = 0x01u;
 constexpr uint8_t kWrite = 0x02u;
 constexpr uint8_t kTrapWrite = 0x04u;
+constexpr size_t kMaxRawPolicyBytes = 1024u * 1024u;
+constexpr size_t kMaxExpandedPolicyBytes = 4u * 1024u * 1024u;
 
 std::string readTextFile(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     throw std::runtime_error("cannot open ACF file '" + path + "'");
   }
+  input.seekg(0, std::ios::end);
+  const auto length = input.tellg();
+  if (length < 0) {
+    throw std::runtime_error("cannot determine ACF file size for '" + path + "'");
+  }
+  if (static_cast<uint64_t>(length) > kMaxRawPolicyBytes) {
+    throw std::runtime_error("ACF file exceeds the 1 MiB limit: '" + path + "'");
+  }
+  input.seekg(0, std::ios::beg);
   std::ostringstream stream;
   stream << input.rdbuf();
   if (!input.good() && !input.eof()) {
     throw std::runtime_error("cannot read ACF file '" + path + "'");
   }
-  return stream.str();
+  auto result = stream.str();
+  if (result.find('\0') != std::string::npos) {
+    throw std::runtime_error("ACF file contains a NUL byte: '" + path + "'");
+  }
+  return result;
 }
 
 std::string expandMacros(const std::string& input,
@@ -63,8 +78,9 @@ std::string expandMacros(const std::string& input,
     ~HandleGuard() { macDeleteHandle(handle); }
   } guard{handle};
 
-  size_t capacity = std::max<size_t>(input.size() + 1024u, 4096u);
-  for (unsigned attempt = 0; attempt < 8u; ++attempt) {
+  size_t capacity = std::min(kMaxExpandedPolicyBytes + 1u,
+                             std::max<size_t>(input.size() + 1024u, 4096u));
+  while (capacity <= kMaxExpandedPolicyBytes + 1u) {
     std::vector<char> output(capacity, '\0');
     const long result = macExpandString(handle, input.c_str(), output.data(), static_cast<long>(output.size()));
     if (result < 0) {
@@ -73,7 +89,8 @@ std::string expandMacros(const std::string& input,
     if (static_cast<size_t>(result) + 1u < output.size()) {
       return std::string(output.data(), static_cast<size_t>(result));
     }
-    capacity *= 2u;
+    if (capacity == kMaxExpandedPolicyBytes + 1u) break;
+    capacity = std::min(kMaxExpandedPolicyBytes + 1u, capacity * 2u);
   }
   throw std::runtime_error("expanded ACF exceeds supported size");
 }
@@ -102,9 +119,13 @@ std::vector<Token> tokenizeAcf(const std::string& text) {
   size_t column = 1;
   for (size_t index = 0; index < text.size();) {
     const char ch = text[index];
-    if (ch == '\n') {
-      ++line;
-      column = 1;
+    if (std::isspace(static_cast<unsigned char>(ch))) {
+      if (ch == '\n') {
+        ++line;
+        column = 1;
+      } else {
+        ++column;
+      }
       ++index;
       continue;
     }
@@ -122,6 +143,7 @@ std::vector<Token> tokenizeAcf(const std::string& text) {
       ++index;
       ++column;
       bool escaped = false;
+      bool closed = false;
       while (index < text.size()) {
         const char current = text[index++];
         ++column;
@@ -135,20 +157,28 @@ std::vector<Token> tokenizeAcf(const std::string& text) {
         } else if (current == '\\') {
           escaped = true;
         } else if (current == '"') {
+          closed = true;
           break;
         } else {
           value.push_back(current);
         }
       }
+      if (!closed) {
+        std::ostringstream error;
+        error << "ACF " << startLine << ":" << startColumn << ": unterminated string";
+        throw std::runtime_error(error.str());
+      }
       tokens.push_back({value, startLine, startColumn, true});
       continue;
     }
-    if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == ':' || ch == '-' || ch == '.') {
+    if (ch != '(' && ch != ')' && ch != '{' && ch != '}' && ch != ',') {
       const size_t start = index;
       const size_t startColumn = column;
       while (index < text.size()) {
         const unsigned char current = static_cast<unsigned char>(text[index]);
-        if (!std::isalnum(current) && current != '_' && current != ':' && current != '-' && current != '.') break;
+        if (std::isspace(current) || current == '(' || current == ')' ||
+            current == '{' || current == '}' || current == ',' ||
+            current == '#' || current == '"') break;
         ++index;
         ++column;
       }
@@ -171,30 +201,165 @@ std::string upper(std::string text) {
   return text;
 }
 
-std::set<std::string> inspectAcf(const std::string& text) {
-  const auto tokens = tokenizeAcf(text);
-  std::set<std::string> groups{"DEFAULT"};
-  for (size_t index = 0; index < tokens.size(); ++index) {
-    if (tokens[index].quoted) continue;
-    const auto keyword = upper(tokens[index].text);
-    const bool call = index + 1u < tokens.size() && tokens[index + 1u].text == "(";
-    if (!call) continue;
+[[noreturn]] void acfError(const Token& token, const std::string& message) {
+  std::ostringstream error;
+  error << "ACF " << token.line << ":" << token.column << ": " << message;
+  throw std::runtime_error(error.str());
+}
 
-    if (keyword == "CALC" ||
-        (keyword.size() == 4u && keyword.rfind("INP", 0u) == 0u && keyword[3] >= 'A' && keyword[3] <= 'U')) {
-      std::ostringstream error;
-      error << "ACF " << tokens[index].line << ":" << tokens[index].column
-            << ": " << keyword << " is outside the supported ACF subset";
-      throw std::runtime_error(error.str());
+class AcfSubsetParser {
+public:
+  explicit AcfSubsetParser(const std::string& text) : tokens_(tokenizeAcf(text)) {}
+
+  std::set<std::string> parse() {
+    std::set<std::string> groups{"DEFAULT"};
+    while (!done()) {
+      rejectDeferred(peek());
+      const auto keyword = upper(peek().text);
+      if (keyword == "UAG" || keyword == "HAG") {
+        parseNamedList(keyword);
+      } else if (keyword == "ASG") {
+        groups.insert(parseAsg());
+      } else {
+        acfError(peek(), "unknown top-level construct '" + peek().text + "'");
+      }
     }
-    if (keyword == "ASG" && index + 2u < tokens.size() && tokens[index + 2u].text != ")") {
-      groups.insert(tokens[index + 2u].text);
+    return groups;
+  }
+
+private:
+  bool done() const { return position_ == tokens_.size(); }
+
+  const Token& peek() const {
+    if (done()) throw std::runtime_error("ACF: unexpected end of policy");
+    return tokens_[position_];
+  }
+
+  Token take() {
+    const auto result = peek();
+    ++position_;
+    return result;
+  }
+
+  void expect(const std::string& text) {
+    if (peek().text != text) acfError(peek(), "expected '" + text + "'");
+    ++position_;
+  }
+
+  Token name() {
+    const auto result = take();
+    if (result.text.empty() || (!result.quoted &&
+        (result.text == "(" || result.text == ")" || result.text == "{" ||
+         result.text == "}" || result.text == ","))) {
+      acfError(result, "expected a name");
+    }
+    return result;
+  }
+
+  void rejectDeferred(const Token& token) const {
+    if (token.quoted) return;
+    const auto keyword = upper(token.text);
+    if (keyword == "CALC" ||
+        (keyword.size() == 4u && keyword.rfind("INP", 0u) == 0u &&
+         keyword[3] >= 'A' && keyword[3] <= 'U')) {
+      acfError(token, keyword + " is outside the supported ACF subset");
     }
   }
-  return groups;
+
+  std::vector<std::string> callNames(const std::string& keyword) {
+    const auto actual = take();
+    rejectDeferred(actual);
+    if (actual.quoted || upper(actual.text) != keyword) {
+      acfError(actual, "expected " + keyword);
+    }
+    expect("(");
+    std::vector<std::string> result{name().text};
+    while (peek().text == ",") {
+      take();
+      result.push_back(name().text);
+    }
+    expect(")");
+    return result;
+  }
+
+  std::string definitionName(const std::string& keyword) {
+    const auto names = callNames(keyword);
+    if (names.size() != 1u) {
+      acfError(tokens_[position_ - 1u], keyword + " definitions require exactly one name");
+    }
+    return names.front();
+  }
+
+  void parseNamedList(const std::string& keyword) {
+    definitionName(keyword);
+    expect("{");
+    if (peek().text != "}") {
+      while (true) {
+        name();
+        if (peek().text == "}") break;
+        expect(",");
+      }
+    }
+    expect("}");
+  }
+
+  std::string parseAsg() {
+    const auto group = definitionName("ASG");
+    expect("{");
+    while (peek().text != "}") parseRule();
+    expect("}");
+    return group;
+  }
+
+  void parseRule() {
+    const auto rule = take();
+    rejectDeferred(rule);
+    if (rule.quoted || upper(rule.text) != "RULE") {
+      acfError(rule, "only RULE is supported inside ASG");
+    }
+    expect("(");
+    const auto level = name();
+    if (level.quoted || (level.text != "0" && level.text != "1")) {
+      acfError(level, "RULE access level must be 0 or 1");
+    }
+    expect(",");
+    const auto permission = name();
+    const auto permissionName = permission.quoted ? std::string{} : upper(permission.text);
+    if (permissionName != "NONE" && permissionName != "READ" && permissionName != "WRITE") {
+      acfError(permission, "RULE permission must be NONE, READ, or WRITE");
+    }
+    if (peek().text == ",") {
+      take();
+      const auto trap = name();
+      const auto trapName = trap.quoted ? std::string{} : upper(trap.text);
+      if (trapName != "TRAPWRITE" && trapName != "NOTRAPWRITE") {
+        acfError(trap, "RULE option must be TRAPWRITE or NOTRAPWRITE");
+      }
+    }
+    expect(")");
+    if (done() || peek().text != "{") return;
+    take();
+    while (peek().text != "}") {
+      rejectDeferred(peek());
+      const auto condition = upper(peek().text);
+      if (condition != "UAG" && condition != "HAG") {
+        acfError(peek(), "only UAG and HAG conditions are supported in RULE");
+      }
+      callNames(condition);
+    }
+    expect("}");
+  }
+
+  std::vector<Token> tokens_;
+  size_t position_ = 0u;
+};
+
+std::set<std::string> inspectAcf(const std::string& text) {
+  return AcfSubsetParser(text).parse();
 }
 
 struct PreparedPolicy {
+  std::string raw;
   std::string rawFingerprint;
   std::string expanded;
   std::string fingerprint;
@@ -204,9 +369,9 @@ struct PreparedPolicy {
 PreparedPolicy preparePolicy(const AccessConfig& config,
                              const std::set<std::string>& requiredAsgs) {
   PreparedPolicy prepared;
-  const auto raw = readTextFile(config.file);
-  prepared.rawFingerprint = fingerprint(raw);
-  prepared.expanded = expandMacros(raw, config.macros);
+  prepared.raw = readTextFile(config.file);
+  prepared.rawFingerprint = fingerprint(prepared.raw);
+  prepared.expanded = expandMacros(prepared.raw, config.macros);
   prepared.groups = inspectAcf(prepared.expanded);
   for (const auto& asg : requiredAsgs) {
     if (prepared.groups.count(asg) == 0u) {
@@ -341,16 +506,17 @@ struct AccessController::Impl {
   std::set<std::string> previousConfiguredAsgs;
   std::string previousPolicy;
   std::string previousPolicyFingerprint;
-  std::string previousRawFingerprint;
+  std::string previousRaw;
+  uint64_t previousGeneration = 0u;
   bool hasPreviousPolicy = false;
   std::string watchStatus = "disabled";
   std::string pendingTrigger;
   std::chrono::steady_clock::time_point lastMaintenance{};
   std::chrono::steady_clock::time_point lastWatchPoll{};
   std::chrono::steady_clock::time_point watchCandidateSince{};
-  std::string observedRawFingerprint;
-  std::string watchCandidateFingerprint;
-  std::string watchLastAttemptFingerprint;
+  std::string observedRaw;
+  std::string watchCandidateRaw;
+  std::string watchLastAttemptRaw;
   bool watchMissingReported = false;
   std::set<std::string> configuredAsgs;
   std::map<std::string, std::chrono::steady_clock::time_point> denialLogTimes;
@@ -358,6 +524,7 @@ struct AccessController::Impl {
   std::set<std::string> requiredAsgs() const;
   void markDirty(const std::shared_ptr<ChannelState>& state);
   void drainDirty();
+  void recomputeAllClients();
   void recordDenied(const ChannelState& state, bool write, const pvxs::Value* value);
   void recordAudit(const ChannelState& state, const pvxs::Value& value);
 };
@@ -388,6 +555,7 @@ public:
   }
 
   void closeClients();
+  std::vector<std::shared_ptr<ChannelState>> liveClients();
 
   AccessAssignment assignment;
   ASMEMBERPVT member = nullptr;
@@ -445,9 +613,10 @@ public:
         if (raw->trapMask) next |= kTrapWrite;
       }
     }
-    rights.store(next, std::memory_order_release);
+    const auto current = rights.exchange(next, std::memory_order_acq_rel);
     dirty.store(false, std::memory_order_release);
-    const auto prior = rightsBeforeChange.exchange(0u, std::memory_order_acq_rel);
+    const auto callbackPrior = rightsBeforeChange.exchange(0u, std::memory_order_acq_rel);
+    const auto prior = callbackPrior != 0u ? callbackPrior : current;
     if (closeOnChange && prior != next) {
       owner.rightsChanges.fetch_add(1u, std::memory_order_relaxed);
       closer->close();
@@ -487,6 +656,11 @@ public:
 };
 
 void AccessMember::closeClients() {
+  const auto live = liveClients();
+  for (const auto& state : live) state->closer->close();
+}
+
+std::vector<std::shared_ptr<ChannelState>> AccessMember::liveClients() {
   std::vector<std::shared_ptr<ChannelState>> live;
   {
     std::lock_guard<std::mutex> guard(mutex);
@@ -499,7 +673,7 @@ void AccessMember::closeClients() {
       }
     }
   }
-  for (const auto& state : live) state->closer->close();
+  return live;
 }
 
 class AuthorizedConnectOp final : public pvxs::server::ConnectOp {
@@ -565,13 +739,6 @@ public:
   void onOp(std::function<void(std::unique_ptr<pvxs::server::ConnectOp>&&)>&& fn) override {
     auto state = state_;
     target_->onOp([state, fn = std::move(fn)](std::unique_ptr<pvxs::server::ConnectOp>&& op) mutable {
-      const auto rights = state->loadRights();
-      const bool write = op->op() == pvxs::server::ConnectOp::Put;
-      if ((rights & (write ? kWrite : kRead)) == 0u) {
-        state->owner.recordDenied(*state, write, nullptr);
-        op->error("access denied");
-        return;
-      }
       fn(std::make_unique<AuthorizedConnectOp>(std::move(op), state));
     });
   }
@@ -658,9 +825,7 @@ private:
 
 std::set<std::string> AccessController::Impl::requiredAsgs() const {
   std::lock_guard<std::mutex> guard(mutex);
-  auto result = configuredAsgs;
-  for (const auto& entry : members) result.insert(entry.second->assignment.asg);
-  return result;
+  return configuredAsgs;
 }
 
 void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& state) {
@@ -676,6 +841,19 @@ void AccessController::Impl::drainDirty() {
   }
   for (const auto& weak : pending) {
     if (const auto state = weak.lock()) state->recompute(true);
+  }
+}
+
+void AccessController::Impl::recomputeAllClients() {
+  std::vector<std::shared_ptr<AccessMember>> currentMembers;
+  {
+    std::lock_guard<std::mutex> guard(mutex);
+    currentMembers.reserve(members.size());
+    for (const auto& entry : members) currentMembers.push_back(entry.second);
+    dirty.clear();
+  }
+  for (const auto& member : currentMembers) {
+    for (const auto& state : member->liveClients()) state->recompute(true);
   }
 }
 
@@ -754,13 +932,13 @@ bool AccessController::reconfigure(const AccessConfig& config,
   std::set<std::string> previousAsgs;
   std::string previousPolicy;
   std::string previousPolicyFingerprint;
-  std::string previousRawFingerprint;
+  std::string previousRaw;
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
     previousAsgs = impl_->configuredAsgs;
     previousPolicy = impl_->activePolicy;
     previousPolicyFingerprint = impl_->policyFingerprint;
-    previousRawFingerprint = impl_->observedRawFingerprint;
+    previousRaw = impl_->observedRaw;
     impl_->configuredAsgs = requiredAsgs;
   }
   impl_->config = config;
@@ -776,7 +954,8 @@ bool AccessController::reconfigure(const AccessConfig& config,
     impl_->previousConfiguredAsgs = std::move(previousAsgs);
     impl_->previousPolicy = std::move(previousPolicy);
     impl_->previousPolicyFingerprint = std::move(previousPolicyFingerprint);
-    impl_->previousRawFingerprint = std::move(previousRawFingerprint);
+    impl_->previousRaw = std::move(previousRaw);
+    impl_->previousGeneration = impl_->generation.load(std::memory_order_relaxed) - 1u;
     impl_->hasPreviousPolicy = true;
   }
   return true;
@@ -788,7 +967,8 @@ bool AccessController::restorePrevious(std::string& error) {
   std::set<std::string> previousAsgs;
   std::string previousPolicy;
   std::string previousFingerprint;
-  std::string previousRawFingerprint;
+  std::string previousRaw;
+  uint64_t previousGeneration = 0u;
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
     if (!impl_->hasPreviousPolicy) {
@@ -799,14 +979,15 @@ bool AccessController::restorePrevious(std::string& error) {
     previousAsgs = impl_->previousConfiguredAsgs;
     previousPolicy = impl_->previousPolicy;
     previousFingerprint = impl_->previousPolicyFingerprint;
-    previousRawFingerprint = impl_->previousRawFingerprint;
+    previousRaw = impl_->previousRaw;
+    previousGeneration = impl_->previousGeneration;
   }
   const long status = asInitMem(previousPolicy.c_str(), nullptr);
   if (status != 0) {
     error = std::string("previous ACF restore failed: ") + errSymMsg(status);
     return false;
   }
-  impl_->drainDirty();
+  impl_->recomputeAllClients();
   const auto restoredFingerprint = previousFingerprint;
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
@@ -814,16 +995,16 @@ bool AccessController::restorePrevious(std::string& error) {
     impl_->configuredAsgs = std::move(previousAsgs);
     impl_->activePolicy = std::move(previousPolicy);
     impl_->policyFingerprint = std::move(previousFingerprint);
-    impl_->observedRawFingerprint = std::move(previousRawFingerprint);
+    impl_->observedRaw = std::move(previousRaw);
     impl_->lastStatus = "previous policy restored";
     impl_->lastError.clear();
     impl_->watchStatus = impl_->config.watch.enabled ? "watching " + impl_->config.file : "disabled";
     impl_->hasPreviousPolicy = false;
   }
-  const auto generation = impl_->generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+  impl_->generation.store(previousGeneration, std::memory_order_relaxed);
   std::fprintf(stderr,
                "[redis-pvxs-ioc] previous access policy restored generation=%llu fingerprint=%s clients=%llu\n",
-               static_cast<unsigned long long>(generation), restoredFingerprint.c_str(),
+               static_cast<unsigned long long>(previousGeneration), restoredFingerprint.c_str(),
                static_cast<unsigned long long>(impl_->activeClients.load(std::memory_order_relaxed)));
   error.clear();
   return true;
@@ -837,13 +1018,13 @@ bool AccessController::reload(const std::string& trigger, std::string& error) {
     if (status != 0) {
       throw std::runtime_error(std::string("ACF parse failed: ") + errSymMsg(status));
     }
-    impl_->drainDirty();
+    impl_->recomputeAllClients();
     {
       std::lock_guard<std::mutex> guard(impl_->mutex);
       impl_->activePolicy = prepared.expanded;
       impl_->policyFingerprint = prepared.fingerprint;
-      impl_->observedRawFingerprint = prepared.rawFingerprint;
-      impl_->watchLastAttemptFingerprint.clear();
+      impl_->observedRaw = prepared.raw;
+      impl_->watchLastAttemptRaw.clear();
       impl_->watchMissingReported = false;
       impl_->lastStatus = trigger + " reload active";
       impl_->lastError.clear();
@@ -896,8 +1077,15 @@ void AccessController::pump() {
   const auto now = std::chrono::steady_clock::now();
   if (now - impl_->lastMaintenance >= std::chrono::seconds(1)) {
     impl_->lastMaintenance = now;
-    asComputeAllAsg();
-    impl_->drainDirty();
+    unsigned changed = 0u;
+    const auto status = asRefreshHag(&changed);
+    if (status != 0 && status != S_asLib_asNotActive) {
+      std::fprintf(stderr, "[redis-pvxs-ioc] HAG refresh failed: %s\n", errSymMsg(status));
+    } else if (changed != 0u) {
+      impl_->recomputeAllClients();
+    } else {
+      impl_->drainDirty();
+    }
   }
 
   if (!impl_->config.watch.enabled ||
@@ -905,32 +1093,32 @@ void AccessController::pump() {
   impl_->lastWatchPoll = now;
 
   try {
-    const auto raw = fingerprint(readTextFile(impl_->config.file));
+    const auto raw = readTextFile(impl_->config.file);
     const bool recoveredMissing = impl_->watchMissingReported;
     impl_->watchMissingReported = false;
-    if (raw == impl_->observedRawFingerprint) {
+    if (raw == impl_->observedRaw) {
       if (recoveredMissing) {
         std::lock_guard<std::mutex> guard(impl_->mutex);
         impl_->lastStatus = "watch active";
         impl_->lastError.clear();
       }
-      impl_->watchCandidateFingerprint.clear();
+      impl_->watchCandidateRaw.clear();
       return;
     }
-    if (raw == impl_->watchLastAttemptFingerprint) {
-      impl_->watchCandidateFingerprint.clear();
+    if (raw == impl_->watchLastAttemptRaw) {
+      impl_->watchCandidateRaw.clear();
       return;
     }
-    if (raw != impl_->watchCandidateFingerprint) {
-      impl_->watchCandidateFingerprint = raw;
+    if (raw != impl_->watchCandidateRaw) {
+      impl_->watchCandidateRaw = raw;
       impl_->watchCandidateSince = now;
       return;
     }
     if (now - impl_->watchCandidateSince >= std::chrono::milliseconds(impl_->config.watch.settleMs)) {
-      impl_->watchLastAttemptFingerprint = raw;
+      impl_->watchLastAttemptRaw = raw;
       std::string error;
       reload("watch", error);
-      impl_->watchCandidateFingerprint.clear();
+      impl_->watchCandidateRaw.clear();
     }
   } catch (const std::exception& ex) {
     std::lock_guard<std::mutex> guard(impl_->mutex);
@@ -962,24 +1150,24 @@ void AccessController::removePV(const std::string& name) {
   std::shared_ptr<AccessMember> member;
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
-    impl_->staticSource.remove(name);
     const auto found = impl_->members.find(name);
     if (found != impl_->members.end()) {
       member = std::move(found->second);
       impl_->members.erase(found);
     }
   }
+  impl_->staticSource.remove(name);
   if (member) member->closeClients();
 }
 
 void AccessController::setAssignment(const std::string& name, const AccessAssignment& assignment) {
   std::shared_ptr<AccessMember> old;
-  auto replacement = std::make_shared<AccessMember>(assignment);
   {
     std::lock_guard<std::mutex> guard(impl_->mutex);
     const auto found = impl_->members.find(name);
     if (found == impl_->members.end()) throw std::runtime_error("unknown secured PV '" + name + "'");
     if (sameAccessAssignment(found->second->assignment, assignment)) return;
+    auto replacement = std::make_shared<AccessMember>(assignment);
     old = std::move(found->second);
     found->second = std::move(replacement);
   }
@@ -1016,8 +1204,6 @@ bool validateAccessPolicy(const AccessConfig& config,
   try {
     asCheckClientIP = 1;
     const auto prepared = preparePolicy(config, requiredAsgs);
-    const long status = asInitMem(prepared.expanded.c_str(), nullptr);
-    if (status != 0) throw std::runtime_error(std::string("ACF parse failed: ") + errSymMsg(status));
     resultFingerprint = prepared.fingerprint;
     error.clear();
     return true;

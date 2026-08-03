@@ -10,7 +10,7 @@ authoritative.
 | Component | Source | License notice in this checkout |
 | --- | --- | --- |
 | EPICS Base | <https://github.com/derekste/epics-base> | `third_party/epics-base/LICENSE` |
-| PVXS | <https://github.com/derekste/pvxs> | `third_party/pvxs/LICENSE` |
+| PVXS | <https://github.com/epics-base/pvxs> | `third_party/pvxs/LICENSE` |
 | redis-adapter and its bundled dependencies | <https://github.com/fermi-ad/redis-adapter> | `third_party/redis-adapter/LICENSE`, plus nested notices |
 | yaml-cpp | <https://github.com/jbeder/yaml-cpp> | `third_party/yaml-cpp/LICENSE` |
 | RecCaster | <https://github.com/ChannelFinder/reccaster> | `licenses/RecCaster-LICENSE` |

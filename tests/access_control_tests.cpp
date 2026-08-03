@@ -97,6 +97,29 @@ ASG(OPERATORS) {
              "ASG(DEFAULT) { RULE(0, READ) }\n");
   assert(validates(config, {"DEFAULT"}));
 
+  file.write("FUTURE(thing) { value }\nASG(DEFAULT) { RULE(0, READ) }\n");
+  assert(!validates(config, {"DEFAULT"}, &error));
+  assert(error.find("unknown top-level") != std::string::npos);
+
+  file.write("ASG(DEFAULT) { UNKNOWN(0, READ) }\n");
+  assert(!validates(config, {"DEFAULT"}, &error));
+  assert(error.find("only RULE") != std::string::npos);
+
+  file.write("UAG(one) { alice }\nUAG(two) { bob }\n"
+             "ASG(DEFAULT) { RULE(0, WRITE, NOTRAPWRITE) { UAG(one, two) } }\n");
+  assert(validates(config, {"DEFAULT"}));
+
+  auto nulPolicy = std::string("ASG(DEFAULT) { RULE(0, READ) }\n");
+  nulPolicy.push_back('\0');
+  nulPolicy += "trailing";
+  file.write(nulPolicy);
+  assert(!validates(config, {"DEFAULT"}, &error));
+  assert(error.find("NUL") != std::string::npos);
+
+  file.write(std::string(1024u * 1024u + 1u, '#'));
+  assert(!validates(config, {"DEFAULT"}, &error));
+  assert(error.find("1 MiB") != std::string::npos);
+
   file.write("ASG($(GROUP)) { RULE(0, READ) }\n");
   config.macros["GROUP"] = "MACRO_GROUP";
   assert(validates(config, {"MACRO_GROUP"}));
@@ -123,6 +146,8 @@ ASG(DECISION) {
 )acf");
   config.macros.clear();
   assert(validates(config, {"DECISION"}));
+  asCheckClientIP = 1;
+  assert(asInitFile(config.file.c_str(), nullptr) == 0);
   ASMEMBERPVT member = nullptr;
   assert(asAddMember(&member, "DECISION") == 0);
   auto addClient = [&](const int asl, std::string user, std::string host) {
@@ -202,6 +227,7 @@ ASG(DECISION) {
   file.write("this is no longer a policy\n");
   assert(watched.restorePrevious(error));
   assert(watched.status().policyFingerprint == beforeReconfigure);
+  assert(watched.status().generation == 3u);
   const auto replacement = file.path.string() + ".replacement";
   {
     std::ofstream output(replacement, std::ios::binary | std::ios::trunc);
@@ -213,11 +239,11 @@ ASG(DECISION) {
   watched.pump();
   std::this_thread::sleep_for(std::chrono::milliseconds(110));
   watched.pump();
-  assert(watched.status().generation == 6u);
+  assert(watched.status().generation == 4u);
   std::filesystem::remove(file.path);
   std::this_thread::sleep_for(std::chrono::milliseconds(110));
   watched.pump();
-  assert(watched.status().generation == 6u);
+  assert(watched.status().generation == 4u);
   assert(watched.status().lastError.find("cannot open") != std::string::npos);
   auto disabledReload = config;
   disabledReload.enabled = false;

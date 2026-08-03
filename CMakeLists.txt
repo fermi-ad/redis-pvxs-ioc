@@ -225,10 +225,6 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_link_libraries(access_runtime_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME access_runtime_tests COMMAND access_runtime_tests)
 
-  add_executable(access_hag_runtime_tests tests/access_hag_runtime_tests.cpp)
-  target_link_libraries(access_hag_runtime_tests PRIVATE redis-pvxs-ioc-core)
-  add_test(NAME access_hag_runtime_tests COMMAND access_hag_runtime_tests)
-
   add_executable(model_tests tests/model_tests.cpp)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME model_tests COMMAND model_tests)
@@ -248,7 +244,6 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
       config_tests
       access_control_tests
       access_runtime_tests
-      access_hag_runtime_tests
       model_tests
       alarm_publisher_tests
       channelfinder_tests)

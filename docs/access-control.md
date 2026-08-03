@@ -42,12 +42,13 @@ rpc_services:
     access: {asg: QUERY_USERS, asl: 0}
 ```
 
-The ACF parser is the pinned EPICS `asLib` implementation. `ASG`, `RULE`,
-`UAG`, `HAG`, ASL 0/1, and `TRAPWRITE` are supported. Deferred `CALC()` and
-`INPA` through `INPU` constructs are rejected with line and column information.
-Every assigned ASG must be present before a policy can activate. HAG hostname
-resolution and refresh follow the pinned EPICS branch and match IPv4 client
-addresses.
+The product validator accepts only `ASG`, `RULE`, `UAG`, `HAG`, ASL 0/1,
+`TRAPWRITE`, and `NOTRAPWRITE`, then activates the exact validated bytes through
+the pinned EPICS `asLib` parser. Unknown constructs fail closed. Deferred
+`CALC()` and `INPA` through `INPU` constructs are rejected with line and column
+information. Every assigned ASG must be present before a policy can activate.
+HAG hostname resolution and refresh use the single pinned EPICS Base extension
+and match IPv4 client addresses.
 
 ## Authorization behavior
 
@@ -82,8 +83,9 @@ do not increment the access generation.
 
 The optional watcher polls the configured path rather than an inode, so it sees
 in-place edits, atomic replacements, and bind-mount updates. It waits until the
-content fingerprint remains stable for `settle_ms`, and does not repeatedly
-attempt the same unchanged invalid content.
+exact content remains stable for `settle_ms`, and does not repeatedly attempt
+the same unchanged invalid content. Fingerprints are observability identifiers,
+not equality checks.
 
 After building the local `redis-pvxs-ioc:acf-local` image, run the isolated
 Redis/PVXS acceptance sequence with:

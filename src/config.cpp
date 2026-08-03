@@ -47,6 +47,15 @@ YAML::Node requireSequence(const YAML::Node& node, const std::string& path) {
   return node;
 }
 
+void rejectUnknownKeys(const YAML::Node& node,
+                       const std::string& path,
+                       const std::set<std::string>& allowed) {
+  for (const auto& entry : requireMap(node, path)) {
+    const auto key = entry.first.as<std::string>();
+    if (allowed.count(key) == 0u) fail(path + "." + key, "unknown key");
+  }
+}
+
 template <typename T>
 T parseNumeric(const YAML::Node& node, const std::string& path) {
   try {
@@ -75,7 +84,7 @@ std::string parseString(const YAML::Node& node, const std::string& path) {
 }
 
 AccessAssignment parseAccessAssignment(const YAML::Node& node, const std::string& path) {
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"asg", "asl"});
   AccessAssignment assignment;
   if (node["asg"]) {
     assignment.asg = parseString(node["asg"], path + ".asg");
@@ -100,7 +109,7 @@ AccessConfig parseAccessConfig(const YAML::Node& node,
     return config;
   }
 
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"enabled", "file", "macros", "watch", "defaults"});
   if (node["enabled"]) {
     config.enabled = node["enabled"].as<bool>();
   }
@@ -119,6 +128,7 @@ AccessConfig parseAccessConfig(const YAML::Node& node,
   }
   if (node["watch"]) {
     const auto watch = requireMap(node["watch"], path + ".watch");
+    rejectUnknownKeys(watch, path + ".watch", {"enabled", "interval_ms", "settle_ms"});
     if (watch["enabled"]) {
       config.watch.enabled = watch["enabled"].as<bool>();
     }
@@ -137,6 +147,8 @@ AccessConfig parseAccessConfig(const YAML::Node& node,
   }
   if (node["defaults"]) {
     const auto defaults = requireMap(node["defaults"], path + ".defaults");
+    rejectUnknownKeys(defaults, path + ".defaults",
+                      {"pv", "rpc", "admin_read", "admin_write"});
     if (defaults["pv"]) config.defaults.pv = parseAccessAssignment(defaults["pv"], path + ".defaults.pv");
     if (defaults["rpc"]) config.defaults.rpc = parseAccessAssignment(defaults["rpc"], path + ".defaults.rpc");
     if (defaults["admin_read"]) {
@@ -148,7 +160,7 @@ AccessConfig parseAccessConfig(const YAML::Node& node,
   }
 
   if (!config.enabled) {
-    if (!config.file.empty() || !config.macros.empty() || config.watch.enabled || node["defaults"]) {
+    if (!config.file.empty() || !config.macros.empty() || node["watch"] || node["defaults"]) {
       fail(path, "access settings require enabled: true");
     }
     return config;

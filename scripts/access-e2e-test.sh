@@ -196,12 +196,6 @@ replace_in_place "$FIXTURE_DIR/deny.acf" "$RUN_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:generation 'value int64_t = 2'
 wait_file_contains "$RUN_DIR/monitor.log" Disconnected
 expect_pv_failure pvxget E2E:value
-expect_pv_failure pvxput E2E:value 43
-AFTER_DENY_LENGTH="$(docker exec "$REDIS_CONTAINER" redis-cli XLEN "$STREAM_KEY")"
-if [ "$AFTER_DENY_LENGTH" -ne "$STREAM_LENGTH" ]; then
-  printf 'denied PUT changed Redis stream length from %s to %s\n' "$STREAM_LENGTH" "$AFTER_DENY_LENGTH" >&2
-  exit 1
-fi
 
 # Names remain discoverable while GET_FIELD is denied.
 docker exec "$IOC_CONTAINER" env \
@@ -209,32 +203,45 @@ docker exec "$IOC_CONTAINER" env \
   "$PVX_DIR/pvxlist" -w 3 127.0.0.1:5075 | grep -Fq E2E:value
 expect_pv_failure pvxinfo E2E:value
 
-# Invalid watcher input retains the last good deny policy and reports a
+# The stock put client reads the current value before writing. Move to a
+# read-only policy so that setup succeeds and the WRITE denial itself is
+# exercised; the denied operation must not reach Redis.
+replace_in_place "$FIXTURE_DIR/read-only.acf" "$RUN_DIR/access.acf"
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
+assert_pv_contains E2E:value 'value double = 42'
+expect_pv_failure pvxput E2E:value 43
+AFTER_DENY_LENGTH="$(docker exec "$REDIS_CONTAINER" redis-cli XLEN "$STREAM_KEY")"
+if [ "$AFTER_DENY_LENGTH" -ne "$STREAM_LENGTH" ]; then
+  printf 'denied PUT changed Redis stream length from %s to %s\n' "$STREAM_LENGTH" "$AFTER_DENY_LENGTH" >&2
+  exit 1
+fi
+
+# Invalid watcher input retains the last good read-only policy and reports a
 # line-aware unsupported-construct error.
 replace_in_place "$FIXTURE_DIR/invalid.acf" "$RUN_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
-assert_pv_contains SYS:e2e:access:generation 'value int64_t = 2'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
 assert_pv_contains SYS:e2e:access:lastError 'ACF 6:19:'
 assert_pv_contains SYS:e2e:access:lastError 'CALC'
-expect_pv_failure pvxget E2E:value
+assert_pv_contains E2E:value 'value double = 42'
 
 # Atomic path replacement restores access.
 cp "$FIXTURE_DIR/allow.acf" "$RUN_DIR/access.acf.next"
 mv "$RUN_DIR/access.acf.next" "$RUN_DIR/access.acf"
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 4'
 wait_pv_contains E2E:value 'value double = 42'
 
 # Dedicated reload must activate even when content and fingerprint are unchanged.
 pvxput SYS:e2e:access:reload 1 >"$RUN_DIR/access-reload.txt"
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 4'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 5'
 
 # Whole-config reload and SIGHUP each reread the ACF and advance both generations.
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/config-reload.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 2'
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 5'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 6'
 docker exec "$IOC_CONTAINER" kill -HUP 1
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 3'
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 6'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 7'
 
 # A disabled block may not retain watcher or protection settings that could
 # misleadingly imply active enforcement.
@@ -243,7 +250,7 @@ pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/immutable-reload.txt"
 wait_pv_contains SYS:e2e:config:lastStatus 'reload failed'
 assert_pv_contains SYS:e2e:config:lastError 'access settings require enabled: true'
 assert_pv_contains SYS:e2e:config:generation 'value int64_t = 3'
-assert_pv_contains SYS:e2e:access:generation 'value int64_t = 6'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 7'
 assert_pv_contains E2E:value 'value double = 42'
 replace_config_text 'enabled: false' 'enabled: true'
 
@@ -254,7 +261,7 @@ pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/immutable-clean-reload.txt"
 wait_pv_contains SYS:e2e:config:lastStatus 'reload rejected'
 assert_pv_contains SYS:e2e:config:lastError 'access.enabled is immutable after startup'
 assert_pv_contains SYS:e2e:config:generation 'value int64_t = 3'
-assert_pv_contains SYS:e2e:access:generation 'value int64_t = 6'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 7'
 assert_pv_contains E2E:value 'value double = 42'
 replace_in_place "$FIXTURE_DIR/config.yaml" "$RUN_DIR/config.yaml"
 
@@ -263,15 +270,15 @@ replace_in_place "$FIXTURE_DIR/config.yaml" "$RUN_DIR/config.yaml"
 replace_config_text $'watch:\n    enabled: true' $'watch:\n    enabled: false'
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/disable-watch.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 4'
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 7'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 8'
 assert_pv_contains SYS:e2e:access:watchStatus 'value string = "disabled"'
 replace_in_place "$FIXTURE_DIR/deny.acf" "$RUN_DIR/access.acf"
 sleep 1
-assert_pv_contains SYS:e2e:access:generation 'value int64_t = 7'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 8'
 assert_pv_contains E2E:value 'value double = 42'
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/disabled-watch-config-reload.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 5'
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 8'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 9'
 expect_pv_failure pvxget E2E:value
 
 # Restore the allow policy through whole-config reload while the watcher remains
@@ -279,24 +286,24 @@ expect_pv_failure pvxget E2E:value
 replace_in_place "$FIXTURE_DIR/allow.acf" "$RUN_DIR/access.acf"
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/restore-allow.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 6'
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 9'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 10'
 wait_pv_contains E2E:value 'value double = 42'
 replace_config_text $'watch:\n    enabled: false' $'watch:\n    enabled: true'
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/enable-watch.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 7'
-wait_pv_contains SYS:e2e:access:generation 'value int64_t = 10'
+wait_pv_contains SYS:e2e:access:generation 'value int64_t = 11'
 
 # File deletion retains the last good policy. Restoring identical content clears
 # the watcher error without spuriously activating a duplicate generation.
 mv "$RUN_DIR/access.acf" "$RUN_DIR/access.acf.missing"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
 assert_pv_contains SYS:e2e:access:lastError 'cannot open ACF file'
-assert_pv_contains SYS:e2e:access:generation 'value int64_t = 10'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 11'
 assert_pv_contains E2E:value 'value double = 42'
 mv "$RUN_DIR/access.acf.missing" "$RUN_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch active'
 assert_pv_contains SYS:e2e:access:lastError 'value string = ""'
-assert_pv_contains SYS:e2e:access:generation 'value int64_t = 10'
+assert_pv_contains SYS:e2e:access:generation 'value int64_t = 11'
 
 assert_int_pv_at_least SYS:e2e:access:activeClients 1
 assert_int_pv_at_least SYS:e2e:access:deniedReads 1
@@ -322,7 +329,7 @@ printf '%s\n' \
   "stream_key=$STREAM_KEY" \
   "stream_length_after_denied_write=$AFTER_DENY_LENGTH" \
   'final_config_generation=7' \
-  'final_access_generation=10' \
+  'final_access_generation=11' \
   'result=pass' >"$RUN_DIR/summary.txt"
 
 printf 'ACF end-to-end acceptance passed; artifacts: %s\n' "$RUN_DIR"

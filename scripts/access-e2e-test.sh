@@ -214,7 +214,7 @@ expect_pv_failure pvxinfo E2E:value
 replace_in_place "$FIXTURE_DIR/invalid.acf" "$RUN_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 2'
-assert_pv_contains SYS:e2e:access:lastError 'ACF 8:'
+assert_pv_contains SYS:e2e:access:lastError 'ACF 6:19:'
 assert_pv_contains SYS:e2e:access:lastError 'CALC'
 expect_pv_failure pvxget E2E:value
 

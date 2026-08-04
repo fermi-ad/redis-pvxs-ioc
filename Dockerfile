@@ -52,7 +52,20 @@ RUN cmake -S . -B build \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
 RUN cmake --build build -j"$(nproc)"
-RUN ctest --test-dir build --output-on-failure
+# Run the test suite only when the build platform matches the target platform.
+# Cross-platform buildx legs execute under qemu-user emulation, where the
+# thread/event-heavy tests deadlock (access_runtime_tests never completes).
+# The native leg of a multi-arch build still exercises the full suite; on a
+# classic single-platform `docker build` both ARGs are empty and tests run.
+# NOTE: no default values on these ARGs — a default would override the
+# per-platform value BuildKit injects on multi-platform builds.
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+RUN if [ -n "$TARGETPLATFORM" ] && [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
+      echo "Skipping ctest: cross-build $BUILDPLATFORM -> $TARGETPLATFORM runs under emulation"; \
+    else \
+      ctest --test-dir build --output-on-failure; \
+    fi
 RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" && \
     mkdir -p /opt/runtime/bin /opt/runtime/lib/epics-base /opt/runtime/lib/pvxs /opt/runtime/lib/libevent && \
     cp build/redis-pvxs-ioc /opt/runtime/bin/redis-pvxs-ioc && \

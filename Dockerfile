@@ -52,17 +52,19 @@ RUN cmake -S . -B build \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
 RUN cmake --build build -j"$(nproc)"
-# Run the test suite only when the build platform matches the target platform.
-# Cross-platform buildx legs execute under qemu-user emulation, where the
-# thread/event-heavy tests deadlock (access_runtime_tests never completes).
-# The native leg of a multi-arch build still exercises the full suite; on a
-# classic single-platform `docker build` both ARGs are empty and tests run.
+# Cross-platform buildx legs execute under qemu-user emulation, where
+# access_runtime_tests deadlocks (it passes in 0.5 s natively). On emulated
+# legs run the rest of the suite and exclude only that test; the native leg
+# of a multi-arch build — and a classic single-platform `docker build`, where
+# both ARGs are empty — still runs the full suite.
 # NOTE: no default values on these ARGs — a default would override the
 # per-platform value BuildKit injects on multi-platform builds.
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 RUN if [ -n "$TARGETPLATFORM" ] && [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
-      echo "Skipping ctest: cross-build $BUILDPLATFORM -> $TARGETPLATFORM runs under emulation"; \
+      echo "Cross-build $BUILDPLATFORM -> $TARGETPLATFORM under emulation:" \
+           "excluding access_runtime_tests (deadlocks under qemu-user)"; \
+      ctest --test-dir build -E access_runtime_tests --output-on-failure; \
     else \
       ctest --test-dir build --output-on-failure; \
     fi

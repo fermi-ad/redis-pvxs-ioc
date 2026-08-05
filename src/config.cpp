@@ -529,8 +529,29 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
     }
   }
 
-  pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
-  pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
+  if (node["kind"]) {
+    const auto kind = lowerCopy(parseString(node["kind"], path + ".kind"));
+    if (kind == "ntndarray") {
+      pv.kind = PVKind::NTNDArray;
+    } else if (kind != "value" && kind != "scalar" && kind != "array") {
+      fail(path + ".kind", "unsupported PV kind '" + kind + "'");
+    }
+  }
+
+  if (pv.kind == PVKind::NTNDArray) {
+    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "access"});
+    pv.type = PrimitiveType::UInt8;
+    pv.shape = Shape::Array;
+    if (node["max_frame_bytes"]) {
+      pv.maxFrameBytes = parseNumeric<uint64_t>(node["max_frame_bytes"], path + ".max_frame_bytes");
+    }
+    if (pv.maxFrameBytes == 0u) {
+      fail(path + ".max_frame_bytes", "must be greater than zero");
+    }
+  } else {
+    pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
+    pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
+  }
   pv.read = parseRoute(requireNode(node, "read", path), path + ".read");
 
   if (node["write"]) {
@@ -685,6 +706,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
       adminPVName(config.server, "config:lastStatus"),
       adminPVName(config.server, "config:lastError"),
       adminPVName(config.server, "stats:pvCount"),
+      adminPVName(config.server, "stats:ndarrayInvalidFrames"),
+      adminPVName(config.server, "stats:ndarraySkippedFrames"),
       adminPVName(config.server, "backend:health"),
       adminPVName(config.server, "access:reload"),
       adminPVName(config.server, "access:enabled"),
@@ -785,7 +808,13 @@ std::string summarizeConfig(const AppConfig& config) {
   }
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)
-           << " [" << toString(pv.shape) << " " << toString(pv.type) << "]"
+           << " [";
+    if (pv.kind == PVKind::NTNDArray) {
+      stream << toString(pv.kind) << " max_frame_bytes=" << pv.maxFrameBytes;
+    } else {
+      stream << toString(pv.shape) << " " << toString(pv.type);
+    }
+    stream << "]"
            << " read=" << pv.read.backend << ":" << pv.read.key;
     if (pv.write) {
       stream << " write=" << pv.write->backend << ":" << pv.write->key;
@@ -847,6 +876,14 @@ std::string toString(const Shape shape) {
   return "unknown";
 }
 
+std::string toString(const PVKind kind) {
+  switch (kind) {
+  case PVKind::Value: return "value";
+  case PVKind::NTNDArray: return "ntndarray";
+  }
+  return "unknown";
+}
+
 std::string toString(const DisplayForm form) {
   switch (form) {
   case DisplayForm::Default: return "default";
@@ -879,8 +916,10 @@ bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs) {
        lhs.confirm->timeoutMs == rhs.confirm->timeoutMs);
 
   return lhs.name == rhs.name &&
+         lhs.kind == rhs.kind &&
          lhs.type == rhs.type &&
          lhs.shape == rhs.shape &&
+         lhs.maxFrameBytes == rhs.maxFrameBytes &&
          lhs.read.backend == rhs.read.backend &&
          lhs.read.key == rhs.read.key &&
          sameOptionalRoute(lhs.write, rhs.write) &&

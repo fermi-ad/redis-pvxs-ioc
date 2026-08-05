@@ -220,8 +220,9 @@ pvxs::Value createEmptyNTNDArray(const std::string& reason) {
   return value;
 }
 
-pvxs::Value buildNTNDArrayValue(const NDArrayFrame& frame) {
-  auto value = pvxs::nt::NTNDArray{}.create();
+namespace {
+
+pvxs::Value populateNTNDArrayValue(pvxs::Value value, const NDArrayFrame& frame) {
   switch (frame.dataType) {
   case PrimitiveType::Int8: assignPixels<int8_t>(value, "value->byteValue", frame.payload); break;
   case PrimitiveType::UInt8: assignPixels<uint8_t>(value, "value->ubyteValue", frame.payload); break;
@@ -275,6 +276,16 @@ pvxs::Value buildNTNDArrayValue(const NDArrayFrame& frame) {
   attributes[0] = colorMode;
   value["attribute"] = attributes.freeze();
   return value;
+}
+
+}  // namespace
+
+pvxs::Value buildNTNDArrayValue(const NDArrayFrame& frame) {
+  return populateNTNDArrayValue(pvxs::nt::NTNDArray{}.create(), frame);
+}
+
+pvxs::Value buildNTNDArrayValue(const NDArrayFrame& frame, const pvxs::Value& prototype) {
+  return populateNTNDArrayValue(prototype.cloneEmpty(), frame);
 }
 
 }  // namespace redis_pvxs_ioc

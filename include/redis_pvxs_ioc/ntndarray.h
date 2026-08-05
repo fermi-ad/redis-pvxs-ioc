@@ -35,6 +35,7 @@ size_t elementSize(PrimitiveType type);
 NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs, uint64_t maxFrameBytes);
 pvxs::Value createEmptyNTNDArray(const std::string& reason = "no valid frame");
 pvxs::Value buildNTNDArrayValue(const NDArrayFrame& frame);
+pvxs::Value buildNTNDArrayValue(const NDArrayFrame& frame, const pvxs::Value& prototype);
 void setNTNDArrayInvalidAlarm(pvxs::Value& value, const std::string& reason);
 
 }  // namespace redis_pvxs_ioc

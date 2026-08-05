@@ -112,7 +112,10 @@ private:
     for (const auto& item : data) {
       try {
         const auto frame = parseNDArrayFrame(item.second, maxFrameBytes_);
-        auto value = buildNTNDArrayValue(frame);
+        // SharedPV requires posts to use the exact Type opened by this PV.  A
+        // newly-created NTNDArray has the same schema but not the same Type
+        // identity, so populate an empty clone of the open value.
+        auto value = buildNTNDArrayValue(frame, pv_.fetch());
         {
           std::lock_guard<std::mutex> guard(mutex_);
           if (!active_.load()) return;

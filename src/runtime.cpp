@@ -18,6 +18,7 @@
 #include "RedisAdapter.hpp"
 
 #include "redis_pvxs_ioc/alarm_publisher.h"
+#include "redis_pvxs_ioc/ntndarray.h"
 #include "redis_pvxs_ioc/util.h"
 
 namespace redis_pvxs_ioc {
@@ -40,6 +41,128 @@ std::shared_ptr<RedisAdapter> resolveBackend(const RedisBackendRegistry& redisBa
     throw std::runtime_error("unknown redis backend '" + alias + "' for " + fullName + " " + routeName);
   }
   return it->second;
+}
+
+class NDArrayRuntime final : public PVRuntimeBase, public std::enable_shared_from_this<NDArrayRuntime> {
+public:
+  using ReaderList = RedisAdapter::TimeValList<RedisAdapter::Attrs>;
+
+  NDArrayRuntime(const ServerConfig& serverConfig,
+                 PVConfig config,
+                 std::shared_ptr<RedisAdapter> redis,
+                 std::shared_ptr<RuntimeStats> stats,
+                 const uint64_t generation)
+      : config_(std::move(config)),
+        redis_(std::move(redis)),
+        stats_(std::move(stats)),
+        maxFrameBytes_(config_.maxFrameBytes),
+        fullName_(fullPVName(serverConfig, config_)),
+        generation_(generation),
+        pv_(pvxs::server::SharedPV::buildReadonly()) {}
+
+  ~NDArrayRuntime() override { deactivate("runtime destroyed"); }
+
+  void initialize() {
+    auto initial = createEmptyNTNDArray();
+    RedisAdapter::Attrs snapshot;
+    const auto result = redis_->getSingleValue<RedisAdapter::Attrs>(config_.read.key, snapshot);
+    if (result.ok() && !snapshot.empty()) {
+      try {
+        const auto frame = parseNDArrayFrame(snapshot, result.value, maxFrameBytes_);
+        initial = buildNTNDArrayValue(frame);
+        lastUniqueId_ = frame.uniqueId;
+        haveGoodFrame_ = true;
+      } catch (const std::exception& ex) {
+        ++stats_->ndarrayInvalidFrames;
+        setNTNDArrayInvalidAlarm(initial, ex.what());
+      }
+    }
+    pv_.open(initial);
+
+    auto weak = weak_from_this();
+    redis_->addValuesReader<RedisAdapter::Attrs>(
+        config_.read.key,
+        [weak](const std::string&, const std::string&, const ReaderList& data) {
+          if (const auto self = weak.lock()) self->handleRead(data);
+        });
+  }
+
+  const PVConfig& config() const override { return config_; }
+  const std::string& fullName() const override { return fullName_; }
+  pvxs::server::SharedPV& sharedPV() override { return pv_; }
+  bool structurallyCompatible(const PVConfig& config) const override {
+    return sameReaderTopology(config_, config);
+  }
+
+  void reconfigure(const PVConfig& config, const uint64_t generation) override {
+    std::lock_guard<std::mutex> guard(mutex_);
+    config_ = config;
+    generation_ = generation;
+  }
+
+  void deactivate(const std::string&) override {
+    if (!active_.exchange(false)) return;
+    redis_->removeReader(config_.read.key);
+    if (pv_.isOpen()) pv_.close();
+  }
+
+private:
+  void handleRead(const ReaderList& data) {
+    if (!active_.load()) return;
+    for (const auto& item : data) {
+      try {
+        const auto frame = parseNDArrayFrame(item.second, item.first.value,
+                                             maxFrameBytes_);
+        // SharedPV requires posts to use the exact Type opened by this PV.  A
+        // newly-created NTNDArray has the same schema but not the same Type
+        // identity, so populate an empty clone of the open value.
+        auto value = buildNTNDArrayValue(frame, pv_.fetch());
+        {
+          std::lock_guard<std::mutex> guard(mutex_);
+          if (!active_.load()) return;
+          if (haveGoodFrame_ && frame.uniqueId > lastUniqueId_ + 1) {
+            stats_->ndarraySkippedFrames += static_cast<uint64_t>(frame.uniqueId - lastUniqueId_ - 1);
+          }
+          lastUniqueId_ = frame.uniqueId;
+          haveGoodFrame_ = true;
+        }
+        pv_.post(value);
+      } catch (const std::exception& ex) {
+        ++stats_->ndarrayInvalidFrames;
+        auto value = pv_.fetch();
+        setNTNDArrayInvalidAlarm(value, ex.what());
+        pv_.post(value);
+      }
+    }
+  }
+
+  mutable std::mutex mutex_;
+  PVConfig config_;
+  std::shared_ptr<RedisAdapter> redis_;
+  std::shared_ptr<RuntimeStats> stats_;
+  const uint64_t maxFrameBytes_;
+  std::string fullName_;
+  uint64_t generation_ = 0;
+  pvxs::server::SharedPV pv_;
+  std::atomic<bool> active_{true};
+  int32_t lastUniqueId_ = 0;
+  bool haveGoodFrame_ = false;
+};
+
+std::shared_ptr<PVRuntimeBase> makeNDArrayRuntime(const ServerConfig& serverConfig,
+                                                  const PVConfig& config,
+                                                  const RedisBackendRegistry& redisBackends,
+                                                  const std::shared_ptr<RuntimeStats>& stats,
+                                                  const uint64_t generation) {
+  const auto fullName = fullPVName(serverConfig, config);
+  auto runtime = std::make_shared<NDArrayRuntime>(
+      serverConfig,
+      config,
+      resolveBackend(redisBackends, config.read.backend, fullName, "read route"),
+      stats,
+      generation);
+  runtime->initialize();
+  return runtime;
 }
 
 template <typename T, bool Array>
@@ -454,7 +577,11 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
                                            const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
+                                           const std::shared_ptr<RuntimeStats>& stats,
                                            const uint64_t generation) {
+  if (config.kind == PVKind::NTNDArray) {
+    return makeNDArrayRuntime(serverConfig, config, redisBackends, stats, generation);
+  }
   switch (config.shape) {
   case Shape::Scalar:
     switch (config.type) {

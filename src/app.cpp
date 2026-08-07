@@ -76,6 +76,8 @@ public:
         lastStatus_(pvxs::server::SharedPV::buildReadonly()),
         lastError_(pvxs::server::SharedPV::buildReadonly()),
         pvCount_(pvxs::server::SharedPV::buildReadonly()),
+        ndarrayInvalidFrames_(pvxs::server::SharedPV::buildReadonly()),
+        ndarraySkippedFrames_(pvxs::server::SharedPV::buildReadonly()),
         backendHealth_(pvxs::server::SharedPV::buildReadonly()),
         accessEnabled_(pvxs::server::SharedPV::buildReadonly()),
         accessGeneration_(pvxs::server::SharedPV::buildReadonly()),
@@ -96,6 +98,8 @@ public:
         lastStatusName_(adminPVName(serverConfig, "config:lastStatus")),
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
         pvCountName_(adminPVName(serverConfig, "stats:pvCount")),
+        ndarrayInvalidFramesName_(adminPVName(serverConfig, "stats:ndarrayInvalidFrames")),
+        ndarraySkippedFramesName_(adminPVName(serverConfig, "stats:ndarraySkippedFrames")),
         backendHealthName_(adminPVName(serverConfig, "backend:health")) {
     accessReloadName_ = adminPVName(serverConfig, "access:reload");
     accessEnabledName_ = adminPVName(serverConfig, "access:enabled");
@@ -163,6 +167,13 @@ public:
     countValue["value"] = static_cast<int64_t>(0);
     pvCount_.open(countValue);
 
+    auto invalidFramesValue = makeAdminValue(pvxs::TypeCode::Int64, "Invalid NTNDArray frames since startup");
+    invalidFramesValue["value"] = static_cast<int64_t>(0);
+    ndarrayInvalidFrames_.open(invalidFramesValue);
+    auto skippedFramesValue = makeAdminValue(pvxs::TypeCode::Int64, "Skipped NTNDArray frame IDs since startup");
+    skippedFramesValue["value"] = static_cast<int64_t>(0);
+    ndarraySkippedFrames_.open(skippedFramesValue);
+
     auto backendValue = makeAdminValue(pvxs::TypeCode::String, "Redis backend health");
     backendValue["value"] = std::string("unknown");
     backendHealth_.open(backendValue);
@@ -208,6 +219,8 @@ public:
     add(lastStatusName_, lastStatus_, defaults.adminRead);
     add(lastErrorName_, lastError_, defaults.adminRead);
     add(pvCountName_, pvCount_, defaults.adminRead);
+    add(ndarrayInvalidFramesName_, ndarrayInvalidFrames_, defaults.adminRead);
+    add(ndarraySkippedFramesName_, ndarraySkippedFrames_, defaults.adminRead);
     add(backendHealthName_, backendHealth_, defaults.adminRead);
     add(accessReloadName_, accessReloadCommand_, defaults.adminWrite);
     add(accessEnabledName_, accessEnabled_, defaults.adminRead);
@@ -236,6 +249,8 @@ public:
     remove(lastStatusName_);
     remove(lastErrorName_);
     remove(pvCountName_);
+    remove(ndarrayInvalidFramesName_);
+    remove(ndarraySkippedFramesName_);
     remove(backendHealthName_);
     remove(accessReloadName_);
     remove(accessEnabledName_);
@@ -255,7 +270,8 @@ public:
     access.setAssignment(accessReloadName_, defaults.adminWrite);
     const std::vector<std::string> readNames{
       versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
-      lastStatusName_, lastErrorName_, pvCountName_, backendHealthName_, accessEnabledName_,
+      lastStatusName_, lastErrorName_, pvCountName_, ndarrayInvalidFramesName_,
+      ndarraySkippedFramesName_, backendHealthName_, accessEnabledName_,
       accessGenerationName_, accessLastStatusName_, accessLastErrorName_,
       accessPolicyFingerprintName_, accessWatchStatusName_, accessActiveClientsName_,
       accessDeniedReadsName_, accessDeniedWritesName_, accessRightsChangesName_,
@@ -285,6 +301,11 @@ public:
 
   void setPvCount(const size_t count) {
     setAdminScalar(pvCount_, static_cast<int64_t>(count));
+  }
+
+  void setRuntimeStats(const RuntimeStats& stats) {
+    setAdminScalar(ndarrayInvalidFrames_, static_cast<int64_t>(stats.ndarrayInvalidFrames.load()));
+    setAdminScalar(ndarraySkippedFrames_, static_cast<int64_t>(stats.ndarraySkippedFrames.load()));
   }
 
   void setBackendHealth(const std::string& health) {
@@ -318,6 +339,8 @@ private:
   pvxs::server::SharedPV lastStatus_;
   pvxs::server::SharedPV lastError_;
   pvxs::server::SharedPV pvCount_;
+  pvxs::server::SharedPV ndarrayInvalidFrames_;
+  pvxs::server::SharedPV ndarraySkippedFrames_;
   pvxs::server::SharedPV backendHealth_;
   pvxs::server::SharedPV accessEnabled_;
   pvxs::server::SharedPV accessGeneration_;
@@ -338,6 +361,8 @@ private:
   std::string lastStatusName_;
   std::string lastErrorName_;
   std::string pvCountName_;
+  std::string ndarrayInvalidFramesName_;
+  std::string ndarraySkippedFramesName_;
   std::string backendHealthName_;
   std::string accessReloadName_;
   std::string accessEnabledName_;
@@ -512,6 +537,7 @@ struct Application::Impl {
   uint64_t generation = 0;
   RedisBackendRegistry redisBackends;
   std::shared_ptr<AlarmPublisher> alarmPublisher;
+  std::shared_ptr<RuntimeStats> runtimeStats = std::make_shared<RuntimeStats>();
   RuntimeMap runtimes;
   RpcMap rpcPVs;
   AssignmentMap rpcAssignments;
@@ -623,6 +649,7 @@ void Application::pump() {
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
+      impl_->admin->setRuntimeStats(*impl_->runtimeStats);
     }
   }
 }
@@ -716,7 +743,7 @@ bool Application::replaceAll(const AppConfig& config,
     try {
       for (const auto& pv : config.pvs) {
         const auto name = fullPVName(config.server, pv);
-        staged.emplace(name, makeRuntime(config.server, pv, newRedisBackends, newAlarmPublisher, generation));
+        staged.emplace(name, makeRuntime(config.server, pv, newRedisBackends, newAlarmPublisher, impl_->runtimeStats, generation));
       }
     } catch (...) {
       setDeferReaders(newRedisBackends, false);
@@ -832,10 +859,10 @@ bool Application::applyIncremental(const AppConfig& config,
       setDeferReaders(impl_->redisBackends, true);
       try {
         for (const auto& name : replaceNames) {
-          staged.emplace(name, makeRuntime(config.server, desired.at(name), impl_->redisBackends, impl_->alarmPublisher, generation));
+          staged.emplace(name, makeRuntime(config.server, desired.at(name), impl_->redisBackends, impl_->alarmPublisher, impl_->runtimeStats, generation));
         }
         for (const auto& item : addNames) {
-          staged.emplace(item.first, makeRuntime(config.server, item.second, impl_->redisBackends, impl_->alarmPublisher, generation));
+          staged.emplace(item.first, makeRuntime(config.server, item.second, impl_->redisBackends, impl_->alarmPublisher, impl_->runtimeStats, generation));
         }
       } catch (...) {
         setDeferReaders(impl_->redisBackends, false);

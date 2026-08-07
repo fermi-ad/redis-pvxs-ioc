@@ -168,6 +168,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/channelfinder.cpp
   src/util.cpp
   src/alarm_publisher.cpp
+  src/ntndarray.cpp
   src/runtime.cpp
   src/grpc_bridge.cpp
   src/rpc_pv.cpp
@@ -229,6 +230,10 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME model_tests COMMAND model_tests)
 
+  add_executable(ntndarray_tests tests/ntndarray_tests.cpp)
+  target_link_libraries(ntndarray_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME ntndarray_tests COMMAND ntndarray_tests)
+
   add_executable(alarm_publisher_tests tests/alarm_publisher_tests.cpp)
   target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME alarm_publisher_tests COMMAND alarm_publisher_tests)
@@ -245,6 +250,7 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
       access_control_tests
       access_runtime_tests
       model_tests
+      ntndarray_tests
       alarm_publisher_tests
       channelfinder_tests)
     target_compile_options(${_test_target} PRIVATE -UNDEBUG)

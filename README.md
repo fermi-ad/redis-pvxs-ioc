@@ -28,6 +28,9 @@ Redis-backed EPICS process variables defined by YAML.
 - **Snapshot-plus-stream reads:** each PV opens from the latest Redis value, or
   its YAML `initial` fallback, before live subscription updates take over; Redis
   source timestamps are carried into PVA.
+- **Redis-backed NTNDArray:** read-only image PVs validate a versioned
+  RedisAdapter stream envelope, use the Stream ID as acquisition time, and
+  preserve the last good frame across malformed input.
 - **Confirmed Redis writes:** scalar and array routes may use independent read,
   write, and confirmation keys across multiple backends; readback matching has a
   bounded timeout, and stale-generation operations are fenced during reload.
@@ -121,6 +124,7 @@ immutable digest. `:latest` is only a development convenience. See the
 
 - [Documentation index](docs/README.md)
 - [Configuration reference](docs/configuration.md)
+- [Redis-backed NTNDArray](docs/ntndarray.md)
 - [Operations and diagnostics](docs/operations.md)
 - [Access control](docs/access-control.md)
 - [Performance measurement](docs/performance.md)

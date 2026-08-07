@@ -5,10 +5,10 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 
 #include <alarm.h>
-#include <yaml-cpp/yaml.h>
 
 #include <pvxs/nt.h>
 
@@ -36,18 +36,31 @@ T parseUnsigned(const std::string& value, const char* name) {
   return result;
 }
 
+template <typename T>
+T parseSigned(const std::string& value, const char* name) {
+  static_assert(std::is_signed_v<T>);
+  T result{};
+  const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+  if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+    throw std::runtime_error(std::string("invalid signed integer in '") + name + "'");
+  }
+  return result;
+}
+
 PrimitiveType parseDataType(const std::string& text) {
-  if (text == "int8") return PrimitiveType::Int8;
-  if (text == "uint8") return PrimitiveType::UInt8;
-  if (text == "int16") return PrimitiveType::Int16;
-  if (text == "uint16") return PrimitiveType::UInt16;
-  if (text == "int32") return PrimitiveType::Int32;
-  if (text == "uint32") return PrimitiveType::UInt32;
-  if (text == "int64") return PrimitiveType::Int64;
-  if (text == "uint64") return PrimitiveType::UInt64;
-  if (text == "float32") return PrimitiveType::Float32;
-  if (text == "float64") return PrimitiveType::Float64;
-  throw std::runtime_error("unsupported data_type '" + text + "'");
+  switch (parseUnsigned<uint32_t>(text, "data_type")) {
+  case 0: return PrimitiveType::Int8;
+  case 1: return PrimitiveType::UInt8;
+  case 2: return PrimitiveType::Int16;
+  case 3: return PrimitiveType::UInt16;
+  case 4: return PrimitiveType::Int32;
+  case 5: return PrimitiveType::UInt32;
+  case 6: return PrimitiveType::Int64;
+  case 7: return PrimitiveType::UInt64;
+  case 8: return PrimitiveType::Float32;
+  case 9: return PrimitiveType::Float64;
+  default: throw std::runtime_error("unsupported numeric data_type '" + text + "'");
+  }
 }
 
 NDColorMode parseColorMode(const std::string& text) {
@@ -58,31 +71,80 @@ NDColorMode parseColorMode(const std::string& text) {
   throw std::runtime_error("unsupported color_mode '" + text + "'");
 }
 
-std::vector<int32_t> parseShape(const std::string& text) {
-  YAML::Node root;
-  try {
-    root = YAML::Load(text);
-  } catch (const std::exception& ex) {
-    throw std::runtime_error(std::string("invalid shape JSON: ") + ex.what());
+void skipWhitespace(const std::string_view text, size_t& position) {
+  while (position < text.size() &&
+         (text[position] == ' ' || text[position] == '\t' ||
+          text[position] == '\r' || text[position] == '\n')) {
+    ++position;
   }
-  if (!root.IsSequence() || root.size() < 1u || root.size() > 3u) {
-    throw std::runtime_error("shape must contain one to three dimensions");
-  }
+}
+
+std::vector<int32_t> parseShape(const std::string& value) {
+  const std::string_view text(value);
+  size_t position = 0;
   std::vector<int32_t> shape;
-  shape.reserve(root.size());
-  for (size_t index = 0; index < root.size(); ++index) {
-    uint64_t size = 0;
-    try {
-      size = root[index].as<uint64_t>();
-    } catch (const std::exception&) {
+  skipWhitespace(text, position);
+  if (position == text.size() || text[position++] != '[') {
+    throw std::runtime_error("shape must be a JSON array");
+  }
+  for (;;) {
+    skipWhitespace(text, position);
+    if (position < text.size() && text[position] == ']') {
+      ++position;
+      break;
+    }
+    if (shape.size() == 3u) {
+      throw std::runtime_error("shape must contain one to three dimensions");
+    }
+    const size_t first = position;
+    while (position < text.size() && text[position] >= '0' && text[position] <= '9') {
+      ++position;
+    }
+    if (first == position) {
       throw std::runtime_error("shape dimensions must be positive integers");
     }
-    if (size == 0u || size > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+    const auto size = parseUnsigned<uint64_t>(
+        std::string(text.substr(first, position - first)), "shape dimension");
+    if (size == 0u ||
+        size > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
       throw std::runtime_error("shape dimension is zero or exceeds int32");
     }
     shape.push_back(static_cast<int32_t>(size));
+
+    skipWhitespace(text, position);
+    if (position < text.size() && text[position] == ',') {
+      ++position;
+      continue;
+    }
+    if (position < text.size() && text[position] == ']') {
+      ++position;
+      break;
+    }
+    throw std::runtime_error("invalid shape JSON");
+  }
+  skipWhitespace(text, position);
+  if (position != text.size()) throw std::runtime_error("invalid shape JSON");
+  if (shape.empty()) {
+    throw std::runtime_error("shape must contain one to three dimensions");
   }
   return shape;
+}
+
+NDTimeSource parseTimeSource(const std::string& value) {
+  if (value == "unknown") return NDTimeSource::Unknown;
+  if (value == "host") return NDTimeSource::Host;
+  if (value == "camera_correlated") return NDTimeSource::CameraCorrelated;
+  if (value == "ptp") return NDTimeSource::PTP;
+  if (value == "external_trigger") return NDTimeSource::ExternalTrigger;
+  throw std::runtime_error("unsupported time_source '" + value + "'");
+}
+
+template <typename T>
+std::optional<T> parseOptionalUnsigned(const NDArrayAttrs& attrs,
+                                       const char* name) {
+  const auto it = attrs.find(name);
+  if (it == attrs.end()) return std::nullopt;
+  return parseUnsigned<T>(it->second, name);
 }
 
 bool hostIsLittleEndian() {
@@ -132,17 +194,14 @@ size_t elementSize(const PrimitiveType type) {
   throw std::runtime_error("non-numeric NTNDArray element type");
 }
 
-NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs, const uint64_t maxFrameBytes) {
-  static const std::vector<std::string> allowed{
-      "schema", "payload", "data_type", "shape", "color_mode", "byte_order",
-      "unique_id", "data_timestamp_ns"};
-  for (const auto& field : attrs) {
-    if (std::find(allowed.begin(), allowed.end(), field.first) == allowed.end()) {
-      throw std::runtime_error("unknown field '" + field.first + "'");
-    }
-  }
+NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs,
+                               const int64_t streamTimestampNs,
+                               const uint64_t maxFrameBytes) {
   if (required(attrs, "schema") != kNTNDArrayRedisSchema) {
     throw std::runtime_error("unsupported schema");
+  }
+  if (streamTimestampNs <= 0) {
+    throw std::runtime_error("Redis Stream ID is outside the supported POSIX range");
   }
 
   NDArrayFrame frame;
@@ -150,15 +209,23 @@ NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs, const uint64_t maxFram
   frame.shape = parseShape(required(attrs, "shape"));
   frame.colorMode = parseColorMode(required(attrs, "color_mode"));
   validateColorShape(frame.colorMode, frame.shape);
-  const auto uniqueId = parseUnsigned<uint32_t>(required(attrs, "unique_id"), "unique_id");
-  if (uniqueId > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+  const auto uniqueId = parseSigned<int64_t>(required(attrs, "unique_id"), "unique_id");
+  if (uniqueId < std::numeric_limits<int32_t>::min() ||
+      uniqueId > std::numeric_limits<int32_t>::max()) {
     throw std::runtime_error("unique_id exceeds NTNDArray int32 range");
   }
   frame.uniqueId = static_cast<int32_t>(uniqueId);
-  frame.dataTimestampNs = parseUnsigned<uint64_t>(required(attrs, "data_timestamp_ns"), "data_timestamp_ns");
-  if (frame.dataTimestampNs == 0u || frame.dataTimestampNs > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-    throw std::runtime_error("data_timestamp_ns is outside the supported POSIX range");
+  frame.dataTimestampNs = static_cast<uint64_t>(streamTimestampNs);
+  const auto timeSource = attrs.find("time_source");
+  if (timeSource != attrs.end()) {
+    frame.provenance.source = parseTimeSource(timeSource->second);
   }
+  frame.provenance.uncertaintyNs =
+      parseOptionalUnsigned<uint64_t>(attrs, "time_uncertainty_ns");
+  frame.provenance.cameraTimestamp =
+      parseOptionalUnsigned<uint64_t>(attrs, "camera_timestamp");
+  frame.provenance.cameraTimestampHz =
+      parseOptionalUnsigned<uint64_t>(attrs, "camera_timestamp_hz");
 
   uint64_t elements = 1u;
   for (const auto dimension : frame.shape) {
@@ -176,18 +243,15 @@ NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs, const uint64_t maxFram
   if (expectedBytes > maxFrameBytes) {
     throw std::runtime_error("frame exceeds max_frame_bytes");
   }
-  const auto& payload = required(attrs, "payload");
+  const auto& payload = required(attrs, kNTNDArrayPayloadField);
   if (payload.size() != expectedBytes) {
     throw std::runtime_error("payload length does not match data_type and shape");
   }
   frame.payload.assign(payload.begin(), payload.end());
 
-  const auto& byteOrder = required(attrs, "byte_order");
-  if (byteOrder != "little" && byteOrder != "big") {
-    throw std::runtime_error("byte_order must be 'little' or 'big'");
-  }
-  const bool sourceLittle = byteOrder == "little";
-  if (width > 1u && sourceLittle != hostIsLittleEndian()) {
+  // fermi-ad/redis-adapter/ntndarray:1 fixes multi-byte pixels to little
+  // endian, so no per-frame byte-order field is needed.
+  if (width > 1u && !hostIsLittleEndian()) {
     for (uint64_t offset = 0; offset < expectedBytes; offset += width) {
       std::reverse(frame.payload.begin() + static_cast<ptrdiff_t>(offset),
                    frame.payload.begin() + static_cast<ptrdiff_t>(offset + width));
@@ -260,20 +324,48 @@ pvxs::Value populateNTNDArrayValue(pvxs::Value value, const NDArrayFrame& frame)
   }
   value["dimension"] = dimensions.freeze();
 
-  pvxs::shared_array<pvxs::Value> attributes(1u);
-  auto colorMode = value["attribute"].allocMember();
-  colorMode["name"] = std::string("ColorMode");
-  colorMode["value"] = static_cast<uint16_t>(frame.colorMode);
-  pvxs::shared_array<std::string> tags;
-  colorMode["tags"] = tags.freeze();
-  colorMode["descriptor"] = std::string("NDColorMode_t");
-  colorMode["alarm.severity"] = epicsSevNone;
-  colorMode["alarm.status"] = epicsAlarmNone;
-  colorMode["alarm.message"] = std::string("");
-  assignTimestamp(colorMode["timeStamp"], frame.dataTimestampNs);
-  colorMode["sourceType"] = static_cast<int32_t>(0);
-  colorMode["source"] = std::string("driver");
-  attributes[0] = colorMode;
+  size_t attributeCount = 3u;
+  if (frame.provenance.uncertaintyNs) ++attributeCount;
+  if (frame.provenance.cameraTimestamp) ++attributeCount;
+  if (frame.provenance.cameraTimestampHz) ++attributeCount;
+  pvxs::shared_array<pvxs::Value> attributes(attributeCount);
+  size_t attributeIndex = 0u;
+  const auto addAttribute = [&](const std::string& name,
+                                const std::string& descriptor,
+                                const auto attributeValue,
+                                const std::string& source) {
+    auto attribute = value["attribute"].allocMember();
+    attribute["name"] = name;
+    attribute["value"] = attributeValue;
+    pvxs::shared_array<std::string> tags;
+    attribute["tags"] = tags.freeze();
+    attribute["descriptor"] = descriptor;
+    attribute["alarm.severity"] = epicsSevNone;
+    attribute["alarm.status"] = epicsAlarmNone;
+    attribute["alarm.message"] = std::string("");
+    assignTimestamp(attribute["timeStamp"], frame.dataTimestampNs);
+    attribute["sourceType"] = static_cast<int32_t>(0);
+    attribute["source"] = source;
+    attributes[attributeIndex++] = attribute;
+  };
+  addAttribute("ColorMode", "NDColorMode_t",
+               static_cast<uint16_t>(frame.colorMode), "driver");
+  addAttribute("AcquisitionTimeNs", "POSIX nanoseconds",
+               frame.dataTimestampNs, "Redis Stream ID");
+  addAttribute("AcquisitionTimeSource", "NDTimeSource",
+               static_cast<uint32_t>(frame.provenance.source), "envelope");
+  if (frame.provenance.uncertaintyNs) {
+    addAttribute("AcquisitionTimeUncertaintyNs", "nanoseconds",
+                 *frame.provenance.uncertaintyNs, "envelope");
+  }
+  if (frame.provenance.cameraTimestamp) {
+    addAttribute("CameraTimestamp", "camera clock ticks",
+                 *frame.provenance.cameraTimestamp, "envelope");
+  }
+  if (frame.provenance.cameraTimestampHz) {
+    addAttribute("CameraTimestampFrequency", "ticks per second",
+                 *frame.provenance.cameraTimestampHz, "envelope");
+  }
   value["attribute"] = attributes.freeze();
   return value;
 }

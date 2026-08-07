@@ -18,6 +18,8 @@
 
 ## Integrators
 
+- [Redis-backed NTNDArray](ntndarray.md): versioned image envelope, validation,
+  acquisition-time provenance, and normative-value mapping.
 - [ChannelFinder sync](channelfinder-sync.md): preview and publish configured PV
   catalog entries.
 - [PVA RPC to gRPC forwarding](rpc-forwarding.md): expose reflected gRPC methods

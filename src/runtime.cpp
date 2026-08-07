@@ -68,7 +68,7 @@ public:
     const auto result = redis_->getSingleValue<RedisAdapter::Attrs>(config_.read.key, snapshot);
     if (result.ok() && !snapshot.empty()) {
       try {
-        const auto frame = parseNDArrayFrame(snapshot, maxFrameBytes_);
+        const auto frame = parseNDArrayFrame(snapshot, result.value, maxFrameBytes_);
         initial = buildNTNDArrayValue(frame);
         lastUniqueId_ = frame.uniqueId;
         haveGoodFrame_ = true;
@@ -111,7 +111,8 @@ private:
     if (!active_.load()) return;
     for (const auto& item : data) {
       try {
-        const auto frame = parseNDArrayFrame(item.second, maxFrameBytes_);
+        const auto frame = parseNDArrayFrame(item.second, item.first.value,
+                                             maxFrameBytes_);
         // SharedPV requires posts to use the exact Type opened by this PV.  A
         // newly-created NTNDArray has the same schema but not the same Type
         // identity, so populate an empty clone of the open value.

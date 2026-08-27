@@ -56,8 +56,17 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
 
+      # Keep Harbor robot credentials out of the generated shell script so Bash
+      # does not reinterpret characters such as '$' in the username.
       - name: Registry login
-        run: printf '%s' "${{ secrets.ADREGISTRY_INST_SECRET }}" | docker login adregistry.fnal.gov --username "${{ secrets.ADREGISTRY_INST_USERNAME }}" --password-stdin
+        env:
+          REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          REGISTRY_SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        run: |
+          printf '%s' "${REGISTRY_SECRET}" \
+            | docker login adregistry.fnal.gov \
+                --username "${REGISTRY_USERNAME}" \
+                --password-stdin
 
       - name: Build and push candidate image
         id: publish

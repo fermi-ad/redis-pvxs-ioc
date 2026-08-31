@@ -1,6 +1,8 @@
 # Normative Types Roadmap
 
-`redis-pvxs-ioc` currently serves `NTScalar` and `NTScalarArray` payloads only. The long-term product goal is broader alignment with the EPICS V4 Normative Types specification:
+`redis-pvxs-ioc` serves `NTScalar`, `NTScalarArray`, and an initial read-only
+`NTNDArray` adapter. The long-term product goal is broader alignment with the
+EPICS V4 Normative Types specification:
 
 - general normative types such as `NTEnum`, `NTMatrix`, `NTURI`, `NTNameValue`, `NTTable`, and `NTAttribute`
 - specific normative types such as `NTMultiChannel`, `NTNDArray`, `NTContinuum`, `NTHistogram`, and `NTAggregate`
@@ -12,10 +14,15 @@ Reference specification:
 
 ## Current State
 
-- `NTScalar` and `NTScalarArray` are the only served normative-type families today.
+- `NTScalar` and `NTScalarArray` are the mature value families.
+- `NTNDArray` is the first richer-type implementation sketch. It uses a
+  versioned Redis envelope, strict domain validation, union selection, and
+  last-good-value alarm behavior.
 - The current implementation focuses on scalar/scalar-array values with alarm, timestamp, display, control, and value-alarm metadata.
 - There is no support yet for the other general or specific normative types defined in the EPICS document.
-- There is no reusable internal framework yet for richer normative-type self-identification, validation, or union-heavy payload construction.
+- The NTNDArray slice establishes the adapter/builder boundary, but it is too
+  early to freeze a generic framework before a second richer type tests the
+  abstraction.
 
 ## Backlog Structure
 

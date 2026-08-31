@@ -123,6 +123,20 @@ Every PV requires:
 Boolean and string values are scalar-only. Numeric types support scalar or
 array shapes.
 
+For a read-only image, use `kind: ntndarray` instead of `type` and `shape`:
+
+```yaml
+- name: GE1350:Image
+  aliases: [SPIKE:CAM2:Pva1:Image]
+  kind: ntndarray
+  read: {backend: default, key: ge1350}
+  max_frame_bytes: 33554432
+```
+
+NTNDArray configuration rejects scalar-only fields and write routes. See
+[Redis-backed NTNDArray](ntndarray.md) for its versioned Redis Stream contract,
+acquisition timestamp rules, validation, and alarm behavior.
+
 Aliases are additional names for the same PVXS `SharedPV`; they do not create
 another Redis reader, writer, confirmation route, alarm state, or configured
 runtime. This permits cross-namespace names while retaining a concise canonical

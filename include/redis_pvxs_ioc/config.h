@@ -31,6 +31,11 @@ enum class Shape {
   Array,
 };
 
+enum class PVKind {
+  Value,
+  NTNDArray,
+};
+
 enum class DisplayForm {
   Default,
   String,
@@ -149,6 +154,7 @@ using TypedValue = std::variant<
 struct PVConfig {
   std::string name;
   std::vector<std::string> aliases;
+  PVKind kind = PVKind::Value;
   PrimitiveType type = PrimitiveType::Float64;
   Shape shape = Shape::Scalar;
   RouteConfig read;
@@ -159,6 +165,7 @@ struct PVConfig {
   std::optional<LinearTransformConfig> transform;
   TypedValue initialValue;
   std::optional<AccessAssignment> access;
+  uint64_t maxFrameBytes = 32u * 1024u * 1024u;
 };
 
 struct ServerConfig {
@@ -214,6 +221,7 @@ bool isArrayElementTypeSupported(PrimitiveType type);
 
 std::string toString(PrimitiveType type);
 std::string toString(Shape shape);
+std::string toString(PVKind kind);
 std::string toString(DisplayForm form);
 
 bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);

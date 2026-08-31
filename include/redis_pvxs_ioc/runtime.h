@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -15,6 +16,11 @@ namespace redis_pvxs_ioc {
 class AlarmPublisher;
 
 using RedisBackendRegistry = std::map<std::string, std::shared_ptr<RedisAdapter>>;
+
+struct RuntimeStats {
+  std::atomic<uint64_t> ndarrayInvalidFrames{0};
+  std::atomic<uint64_t> ndarraySkippedFrames{0};
+};
 
 class PVRuntimeBase {
 public:
@@ -32,6 +38,7 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
                                            const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
+                                           const std::shared_ptr<RuntimeStats>& stats,
                                            uint64_t generation);
 
 }  // namespace redis_pvxs_ioc

@@ -25,6 +25,7 @@
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/config_diff.h"
 #include "redis_pvxs_ioc/discovery.h"
 #if REDIS_PVXS_IOC_ENABLE_GRPC
 #include "redis_pvxs_ioc/rpc_pv.h"
@@ -103,6 +104,8 @@ public:
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
         pvCountName_(adminPVName(serverConfig, "stats:pvCount")),
         backendHealthName_(adminPVName(serverConfig, "backend:health")) {
+    lastDiffName_ = adminPVName(serverConfig, "config:lastDiff");
+    openStringPV(lastDiff_, "{}", "Last parsed reload differences; credential values omitted");
     discoveryName_ = adminPVName(serverConfig, "discovery:status");
     using pvxs::TypeCode;
     using pvxs::Member;
@@ -208,6 +211,8 @@ public:
     accessRightsChanges_.open(rightsValue);
   }
 
+  void setLastDiff(const std::string& diff) { setAdminScalar(lastDiff_, diff); }
+
   void setDiscoveryStatus(const DiscoveryStatus& status) {
     auto value = discovery_.fetch();
     value["state"] = status.state; value["peer"] = status.peer; value["lastError"] = status.lastError;
@@ -226,6 +231,7 @@ public:
       if (access) access->addPV(name, pv, assignment);
       else server.addPV(name, pv);
     };
+    add(lastDiffName_, lastDiff_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
     add(reloadName_, reloadCommand_, defaults.adminWrite);
     add(versionName_, version_, defaults.adminRead);
@@ -255,6 +261,7 @@ public:
       if (access) access->removePV(name);
       else server.removePV(name);
     };
+    remove(lastDiffName_);
     remove(discoveryName_);
     remove(reloadName_);
     remove(versionName_);
@@ -283,7 +290,7 @@ public:
     access.setAssignment(reloadName_, defaults.adminWrite);
     access.setAssignment(accessReloadName_, defaults.adminWrite);
     const std::vector<std::string> readNames{
-      discoveryName_, versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
+      lastDiffName_, discoveryName_, versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
       lastStatusName_, lastErrorName_, pvCountName_, backendHealthName_, accessEnabledName_,
       accessGenerationName_, accessLastStatusName_, accessLastErrorName_,
       accessPolicyFingerprintName_, accessWatchStatusName_, accessActiveClientsName_,
@@ -337,6 +344,8 @@ private:
   bool accessConfigured_ = false;
   std::atomic<bool> reloadRequested_{false};
   std::atomic<bool> accessReloadRequested_{false};
+  pvxs::server::SharedPV lastDiff_ = pvxs::server::SharedPV::buildReadonly();
+  std::string lastDiffName_;
   pvxs::server::SharedPV discovery_ = pvxs::server::SharedPV::buildReadonly();
   std::string discoveryName_;
   pvxs::server::SharedPV reloadCommand_;
@@ -606,7 +615,7 @@ Application::Application(std::string configPath)
 
 Application::~Application() = default;
 
-bool Application::validateOnly(std::string& summary, std::string& error) const {
+bool Application::validateOnly(std::string& summary, std::string& error, AppConfig* normalized) const {
   try {
     const auto config = loadConfigFile(configPath_);
 #if !REDIS_PVXS_IOC_ENABLE_GRPC
@@ -620,6 +629,7 @@ bool Application::validateOnly(std::string& summary, std::string& error) const {
       return false;
     }
     summary = summarizeConfig(config);
+    if (normalized) *normalized = config;
     if (!policyFingerprint.empty()) summary += " access_fingerprint=" + policyFingerprint;
     error.clear();
     return true;
@@ -737,6 +747,8 @@ void Application::stop() {
 }
 
 bool Application::applyConfig(const AppConfig& config, const bool initialLoad, std::string& error) {
+  if (!initialLoad && impl_->hasConfig && impl_->admin)
+    impl_->admin->setLastDiff(formatConfigDiff(diffConfigs(impl_->currentConfig, config), true));
   if (!initialLoad && impl_->hasConfig && !sameServerConfig(impl_->currentConfig.server, config.server)) {
     error = "server namespace/bind settings are immutable after startup";
     return false;

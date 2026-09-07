@@ -5,14 +5,26 @@ Use `--check-config` before deployment:
 
 ```sh
 redis-pvxs-ioc --check-config /path/to/config.yaml
+redis-pvxs-ioc --check-config /path/to/config.yaml --json
 ```
 
 The command prints the resolved instance, namespace, Redis backends, configured
-PVs, and RPC services. It does not connect to Redis or start a PVA server.
+PVs, and RPC services. It does not connect to Redis or start a PVA server. JSON
+mode returns `valid`, `schema_version`, `legacy_input`, configured counts and a
+summary, or `valid: false` and an error. Invalid input exits with status 1.
+
+Use `schema_version: 1` for new definitions. An omitted version accepts the
+compatible v0.8 form and normalizes to version 1. Unknown versions, unknown keys,
+duplicate keys (including properties/defaults), recursive YAML aliases, unsafe
+narrowing, nonfinite numeric settings/initial values and inconsistent limits
+are rejected. Validation permits up to 64 nesting levels and one million node
+visits, including alias expansion. Old prototype `PVList`/`PVBase`/`RedisBase`
+inputs remain unsupported.
 
 ## Top-level structure
 
 ```yaml
+schema_version: 1
 server: {}
 access: {}                # optional; disabled by default
 redis: {}                 # or redis_backends, exactly one form
@@ -79,6 +91,8 @@ redis_backends:
 
 Each backend requires `base_key`, `host`, and `port`. `user` and `password`
 default to empty; `workers` and `readers` default to `1`.
+Worker/reader counts must be 1–256 and the Redis port must be 1–65535. Server
+ports may still be zero to request an ephemeral port.
 
 Routes may omit `backend` when exactly one backend exists. With multiple
 backends, every read/write/confirm route and `alarms.backend` must name a defined
@@ -186,6 +200,8 @@ confirmation observations do not change displayed readback. This establishes
 observed readback, not causal acknowledgement by the command consumer. Repeated
 commands each require a new matching observation. The wait is bounded by
 `timeout_ms`, and reload deactivation fences puts from an older generation.
+The supported confirmation wait is 1–300000 ms; zero and negative waits are
+rejected. Control limits remain advisory metadata by default.
 
 Malformed scalar or array payloads retain the last good value and set an INVALID
 alarm. A missing source uses the configured `initial` fallback with an INVALID
@@ -292,3 +308,33 @@ operational namespace.
   process with no Redis-backed PV definitions.
 - [`../demo/config.access.yaml`](../demo/config.access.yaml): explicitly enabled
   ACF policy, endpoint assignments, and file monitoring.
+
+## Offline configuration differences
+
+```sh
+redis-pvxs-ioc --diff-config old.yaml new.yaml
+redis-pvxs-ioc --diff-config old.yaml new.yaml --json
+```
+
+The command compares validated, normalized definitions without Redis, RPC
+reflection or PVA startup. It reports additions, removals, replacements,
+metadata/access changes, changed backends/services, alarm/catalog changes, and
+settings requiring a restart. Credential values are never included. An omitted
+schema version and explicit version 1 compare equally. Alias ordering alone is
+not a change.
+
+A replacement includes type/route/confirmation changes, alias-set changes (which
+can reconnect clients), and affected PVs when a backend definition changes.
+Metadata changes include metadata, alarm thresholds, transforms and initial
+fallback definitions. They retain the runtime's subscription topology; changing
+a transform can cancel pending commands. Access changes are listed separately.
+External ACF file contents and environment variables are not inputs to this
+file-to-file diff. RPC service differences are shown offline; reflected endpoint
+names and availability still require staging-time discovery.
+
+Numeric display/control limits must have `low <= high`; alarm thresholds must
+be ordered `low_alarm <= low_warning <= high_warning <= high_alarm` among the
+thresholds that are present. Hysteresis and minimum step must not be
+negative. Transform coefficients must be finite, and scale must be nonzero with
+a finite inverse. Legacy `metadata.control.min_step` remains accepted and retains
+its precedence over `metadata.min_step` when both are supplied.

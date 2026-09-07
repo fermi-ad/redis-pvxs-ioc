@@ -176,6 +176,7 @@ endif()
 add_library(redis-pvxs-ioc-core STATIC
   src/access_control.cpp
   src/config.cpp
+  src/config_diff.cpp
   src/discovery.cpp
   src/util.cpp
   src/alarm_publisher.cpp
@@ -244,6 +245,9 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  add_test(NAME config_cli_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/config_cli_tests.py $<TARGET_FILE:redis-pvxs-ioc>)
+  set_tests_properties(config_cli_tests PROPERTIES TIMEOUT 60)
   add_executable(runtime_tests tests/runtime_tests.cpp)
   target_link_libraries(runtime_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(runtime_tests PRIVATE -UNDEBUG)

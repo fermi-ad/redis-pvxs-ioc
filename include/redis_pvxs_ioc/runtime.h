@@ -25,6 +25,7 @@ public:
   virtual pvxs::server::SharedPV& sharedPV() = 0;
   virtual bool structurallyCompatible(const PVConfig& config) const = 0;
   virtual void reconfigure(const PVConfig& config, uint64_t generation) = 0;
+  virtual void activate() = 0;
   virtual void deactivate(const std::string& reason) = 0;
 };
 

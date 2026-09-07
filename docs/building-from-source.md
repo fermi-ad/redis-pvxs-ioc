@@ -32,6 +32,10 @@ Required tools and libraries are:
 - gRPC C++ and Protocol Buffers development libraries;
 - `protoc` and the gRPC C++ code-generation plugin.
 
+The default test build also requires Python 3 and `redis-server`. CTest starts
+an isolated loopback Redis fixture and removes it when the runtime test exits.
+Use `-DREDIS_PVXS_IOC_BUILD_TESTS=OFF` only for builds that will be tested separately.
+
 gRPC and Protocol Buffers are mandatory build dependencies even when the
 runtime configuration has no `rpc_services`.
 
@@ -42,13 +46,13 @@ sudo apt-get update
 sudo apt-get install \
   build-essential ca-certificates cmake git libcurl4-openssl-dev \
   libreadline-dev libgrpc++-dev libprotobuf-dev perl pkg-config \
-  protobuf-compiler protobuf-compiler-grpc
+  protobuf-compiler protobuf-compiler-grpc python3 redis-server
 ```
 
 macOS with Homebrew:
 
 ```sh
-brew install cmake curl grpc protobuf readline pkg-config
+brew install cmake curl grpc protobuf readline pkg-config python redis
 ```
 
 ## Build the pinned EPICS dependencies

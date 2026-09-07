@@ -124,36 +124,28 @@ AlarmState evaluateNumericAlarm(const PVConfig& config, const double value, cons
   const auto& alarms = config.alarms;
   const double hyst = alarms.hysteresis;
 
-  if (!hasAlarmRules(config)) {
-    return state;
+  if (!std::isfinite(value)) {
+    return {epicsSevInvalid, epicsAlarmUDF, "Non-finite source value"};
   }
+  if (!hasAlarmRules(config)) return state;
 
-  if (alarms.highAlarm && priorStatus == epicsAlarmHiHi && value >= *alarms.highAlarm - hyst) {
+  // Select current major conditions before retaining an earlier warning.
+  if (alarms.highAlarm && value >= *alarms.highAlarm)
     return {epicsSevMajor, epicsAlarmHiHi, "High alarm"};
-  }
-  if (alarms.highWarning && priorStatus == epicsAlarmHigh && value >= *alarms.highWarning - hyst) {
-    return {epicsSevMinor, epicsAlarmHigh, "High warning"};
-  }
-  if (alarms.lowAlarm && priorStatus == epicsAlarmLoLo && value <= *alarms.lowAlarm + hyst) {
+  if (alarms.lowAlarm && value <= *alarms.lowAlarm)
     return {epicsSevMajor, epicsAlarmLoLo, "Low alarm"};
-  }
-  if (alarms.lowWarning && priorStatus == epicsAlarmLow && value <= *alarms.lowWarning + hyst) {
-    return {epicsSevMinor, epicsAlarmLow, "Low warning"};
-  }
-
-  if (alarms.highAlarm && value >= *alarms.highAlarm) {
+  if (alarms.highAlarm && priorStatus == epicsAlarmHiHi && value >= *alarms.highAlarm - hyst)
     return {epicsSevMajor, epicsAlarmHiHi, "High alarm"};
-  }
-  if (alarms.lowAlarm && value <= *alarms.lowAlarm) {
+  if (alarms.lowAlarm && priorStatus == epicsAlarmLoLo && value <= *alarms.lowAlarm + hyst)
     return {epicsSevMajor, epicsAlarmLoLo, "Low alarm"};
-  }
-  if (alarms.highWarning && value >= *alarms.highWarning) {
+  if (alarms.highWarning && value >= *alarms.highWarning)
     return {epicsSevMinor, epicsAlarmHigh, "High warning"};
-  }
-  if (alarms.lowWarning && value <= *alarms.lowWarning) {
+  if (alarms.lowWarning && value <= *alarms.lowWarning)
     return {epicsSevMinor, epicsAlarmLow, "Low warning"};
-  }
-
+  if (alarms.highWarning && priorStatus == epicsAlarmHigh && value >= *alarms.highWarning - hyst)
+    return {epicsSevMinor, epicsAlarmHigh, "High warning"};
+  if (alarms.lowWarning && priorStatus == epicsAlarmLow && value <= *alarms.lowWarning + hyst)
+    return {epicsSevMinor, epicsAlarmLow, "Low warning"};
   return state;
 }
 

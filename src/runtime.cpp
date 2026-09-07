@@ -46,383 +46,298 @@ template <typename T, bool Array>
 class TypedRuntime final : public PVRuntimeBase, public std::enable_shared_from_this<TypedRuntime<T, Array>> {
 public:
   using ValueType = std::conditional_t<Array, std::vector<T>, T>;
-  using ReaderValueType = ValueType;
-  using ReaderList = typename RedisAdapter::TimeValList<ReaderValueType>;
 
-  TypedRuntime(const ServerConfig& serverConfig,
-               PVConfig config,
+  TypedRuntime(const ServerConfig& serverConfig, PVConfig config,
                std::shared_ptr<RedisAdapter> readRedis,
                std::shared_ptr<RedisAdapter> writeRedis,
                std::shared_ptr<RedisAdapter> confirmRedis,
-               std::shared_ptr<AlarmPublisher> alarmPublisher,
-               const uint64_t generation)
-      : config_(std::move(config)),
-        readRedis_(std::move(readRedis)),
-        writeRedis_(std::move(writeRedis)),
-        confirmRedis_(std::move(confirmRedis)),
-        alarmPublisher_(std::move(alarmPublisher)),
-        fullName_(fullPVName(serverConfig, config_)),
+               std::shared_ptr<AlarmPublisher> alarmPublisher, uint64_t generation)
+      : config_(std::move(config)), readRedis_(std::move(readRedis)),
+        writeRedis_(std::move(writeRedis)), confirmRedis_(std::move(confirmRedis)),
+        alarmPublisher_(std::move(alarmPublisher)), fullName_(fullPVName(serverConfig, config_)),
         generation_(generation),
         pv_(config_.write ? pvxs::server::SharedPV::buildMailbox() : pvxs::server::SharedPV::buildReadonly()) {}
 
-  ~TypedRuntime() override {
-    deactivate("runtime destroyed");
-  }
+  ~TypedRuntime() override { deactivate("runtime destroyed"); }
 
   void initialize() {
+    if constexpr (Array) lastRaw_ = initialVectorOr<T>(config_.initialValue);
+    else lastRaw_ = initialScalarOr<T>(config_.initialValue, T{});
+    const auto snapshot = readRedis_->getStreamSnapshot(config_.read.key);
+    readCursor_ = snapshot.id;
+    ValueType decoded{};
+    if (snapshot.present() && decode(snapshot.fields, decoded) && RA_Time(snapshot.id).ok()) {
+      lastRaw_ = std::move(decoded);
+      lastTimestampNs_ = static_cast<uint64_t>(RA_Time(snapshot.id).value);
+      sourceValid_ = true;
+    } else {
+      sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : "No source data; using initial fallback";
+    }
     auto initial = createInitialValue(config_);
-    loadInitialValue(initial);
-
+    populateValue(initial);
+    pv_.open(initial);
+    auto weak = this->weak_from_this();
     if (config_.write) {
-      auto weak = this->weak_from_this();
-      pv_.onPut([weak](pvxs::server::SharedPV& pv,
-                       std::unique_ptr<pvxs::server::ExecOp>&& op,
+      pv_.onPut([weak](pvxs::server::SharedPV&, std::unique_ptr<pvxs::server::ExecOp>&& op,
                        pvxs::Value&& value) {
-        if (const auto self = weak.lock()) {
-          self->handlePut(pv, std::move(op), std::move(value));
-        } else {
-          op->error("runtime unavailable");
-        }
+        if (const auto self = weak.lock()) self->handlePut(std::move(op), std::move(value));
+        else op->error("runtime unavailable");
       });
     }
-
-    pv_.open(initial);
-    registerReaders();
+    const bool readConfirms = config_.confirm && sameRouteTarget(config_.read, *config_.confirm);
+    readReader_ = readRedis_->subscribeStream(config_.read.key,
+        [weak, readConfirms](const auto&, const auto&, const RedisAdapter::StreamBatch& data) {
+          if (const auto self = weak.lock()) self->handleRead(data, true, readConfirms);
+        }, readCursor_);
+    if (config_.confirm && !readConfirms) {
+      const auto confirmation = confirmRedis_->getStreamSnapshot(config_.confirm->key);
+      confirmReader_ = confirmRedis_->subscribeStream(config_.confirm->key,
+          [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data) {
+            if (const auto self = weak.lock()) self->handleRead(data, false, true);
+          }, confirmation.id);
+    }
   }
 
-  const PVConfig& config() const override {
-    return config_;
-  }
+  const PVConfig& config() const override { return config_; }
+  const std::string& fullName() const override { return fullName_; }
+  pvxs::server::SharedPV& sharedPV() override { return pv_; }
+  bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
+  void activate() override { activated_ = true; }
 
-  const std::string& fullName() const override {
-    return fullName_;
-  }
-
-  pvxs::server::SharedPV& sharedPV() override {
-    return pv_;
-  }
-
-  bool structurallyCompatible(const PVConfig& config) const override {
-    return sameReaderTopology(config_, config);
-  }
-
-  void reconfigure(const PVConfig& config, const uint64_t generation) override {
-    ValueType lastRaw{};
-    uint64_t lastTimestamp = 0;
-    bool haveLastRaw = false;
-
+  void reconfigure(const PVConfig& config, uint64_t generation) override {
+    AlarmState state;
+    bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_) return;
+      const bool sameTransform = config_.transform.has_value() == config.transform.has_value() &&
+          (!config_.transform || (config_.transform->scale == config.transform->scale &&
+                                  config_.transform->offset == config.transform->offset));
+      if (!sameTransform) {
+        ++commandEpoch_;
+        failPendingLocked("write transform changed during reload");
+      }
       config_ = config;
       generation_ = generation;
-      if constexpr (Array) {
-        lastRaw = lastRaw_;
-      } else {
-        lastRaw = lastRaw_;
-      }
-      lastTimestamp = lastTimestampNs_;
-      haveLastRaw = haveLastRaw_;
-    }
-
-    if (haveLastRaw) {
-      handleRawUpdate(lastRaw, lastTimestamp, true);
-    } else {
       auto value = pv_.fetch();
-      applyStandardMetadata(value, config);
-      applyTimestamp(value, lastTimestamp);
-      if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-        applyAlarmFields(value, config, AlarmState{epicsSevNone, epicsAlarmNone, ""});
-      }
+      state = populateValue(value);
+      transition = recordAlarmLocked(state);
       pv_.post(value);
     }
+    publishAlarm(state, transition);
   }
 
   void deactivate(const std::string& reason) override {
-    const bool wasActive = active_.exchange(false);
-    if (!wasActive) {
-      return;
-    }
-
-    std::vector<std::shared_ptr<PendingPut>> pending;
+    if (!active_.exchange(false)) return;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      for (auto& item : pendingPuts_) {
-        item.second->done = true;
-        item.second->error = reason;
-        pending.push_back(item.second);
-      }
-      pendingPuts_.clear();
+      ++commandEpoch_;
+      failPendingLocked(reason);
     }
-    for (const auto& item : pending) {
-      item->cv.notify_all();
-    }
-
-    if (readRedis_) {
-      readRedis_->removeReader(config_.read.key);
-      if (config_.confirm && confirmRedis_ && !sameRouteTarget(config_.read, *config_.confirm)) {
-        confirmRedis_->removeReader(config_.confirm->key);
-      }
-    }
-
-    if (pv_.isOpen()) {
-      pv_.close();
-    }
+    readReader_.reset();
+    confirmReader_.reset();
+    if (pv_.isOpen()) pv_.close();
   }
 
 private:
   struct PendingPut {
     uint64_t id = 0;
     ValueType expectedRaw{};
+    std::string afterId;
     bool done = false;
     std::string error;
     std::condition_variable cv;
   };
 
-  void loadInitialValue(pvxs::Value& initial) {
-    ValueType raw{};
-    if constexpr (Array) {
-      raw = initialVectorOr<T>(config_.initialValue);
-    } else {
-      raw = initialScalarOr<T>(config_.initialValue, T{});
-    }
-
-    uint64_t timestamp = 0;
-    loadSnapshot(raw, timestamp);
-    haveLastRaw_ = true;
-    lastRaw_ = raw;
-    lastTimestampNs_ = timestamp;
-
-    const auto present = applyForwardTransform(config_, raw);
-    if constexpr (Array) {
-      assignArrayValue(initial, present);
-    } else {
-      assignScalarValue(initial, present);
-    }
-
-    applyTimestamp(initial, timestamp);
-
-    if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-      const auto alarmState = evaluateNumericAlarm(config_, static_cast<double>(present), epicsAlarmNone);
-      applyAlarmFields(initial, config_, alarmState);
-      lastPublishedStatus_ = alarmState.status;
-      lastPublishedSeverity_ = alarmState.severity;
-    } else {
-      applyAlarmFields(initial, config_, AlarmState{epicsSevNone, epicsAlarmNone, ""});
-    }
+  static bool decode(const RedisAdapter::Attrs& fields, ValueType& raw) {
+    if constexpr (Array) return RedisAdapter::decodeArray(fields, raw);
+    else return RedisAdapter::decodeScalar(fields, raw);
   }
 
-  void loadSnapshot(ValueType& raw, uint64_t& timestamp) {
-    if constexpr (Array) {
-      const auto result = readRedis_->getSingleList<T>(config_.read.key, raw);
-      timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
-    } else if constexpr (std::is_same_v<T, double>) {
-      const auto result = readRedis_->getSingleValue<double>(config_.read.key, raw);
-      timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
-    } else {
-      const auto result = readRedis_->getSingleValue<T>(config_.read.key, raw);
-      timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
+  AlarmState populateValue(pvxs::Value& value) {
+    const auto present = applyForwardTransform(config_, lastRaw_);
+    if constexpr (Array) assignArrayValue(value, present);
+    else assignScalarValue(value, present);
+    applyStandardMetadata(value, config_);
+    if (lastTimestampNs_) applyTimestamp(value, lastTimestampNs_);
+    else {
+      value["timeStamp.secondsPastEpoch"] = static_cast<int64_t>(0);
+      value["timeStamp.nanoseconds"] = static_cast<int32_t>(0);
+      value["timeStamp.userTag"] = static_cast<int32_t>(0);
     }
+    AlarmState state{epicsSevNone, epicsAlarmNone, ""};
+    if (!sourceValid_) state = {epicsSevInvalid, epicsAlarmUDF, sourceError_};
+    else if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
+      const int prior = value["alarm.status"].as<int>();
+      state = evaluateNumericAlarm(config_, static_cast<double>(present), prior);
+    }
+    applyAlarmFields(value, config_, state);
+    return state;
   }
 
-  void registerReaders() {
-    auto weak = this->weak_from_this();
+  bool recordAlarmLocked(const AlarmState& state) {
+    const bool changed = state.status != lastPublishedStatus_ || state.severity != lastPublishedSeverity_;
+    lastPublishedStatus_ = state.status;
+    lastPublishedSeverity_ = state.severity;
+    return changed;
+  }
 
-    if constexpr (Array) {
-      readRedis_->addListsReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-        if (const auto self = weak.lock()) {
-          self->handleRead(data, true);
-        }
-      });
-    } else {
-      readRedis_->addValuesReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-        if (const auto self = weak.lock()) {
-          self->handleRead(data, true);
-        }
-      });
-    }
+  void publishAlarm(const AlarmState& state, bool changed) {
+    if (changed && active_.load() && activated_.load() && alarmPublisher_)
+      alarmPublisher_->publishTransition(fullName_, state);
+  }
 
-    if (config_.confirm && !sameRouteTarget(config_.read, *config_.confirm)) {
-      if constexpr (Array) {
-        confirmRedis_->addListsReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-          if (const auto self = weak.lock()) {
-            self->handleRead(data, false);
-          }
-        });
-      } else {
-        confirmRedis_->addValuesReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-          if (const auto self = weak.lock()) {
-            self->handleRead(data, false);
-          }
-        });
+  void handleRead(const RedisAdapter::StreamBatch& data, bool updateValue, bool canConfirm) {
+    // Evaluate every observed sample for alarms and confirmations, including
+    // intermediate values in a batch. Confirmation data never changes readback.
+    for (const auto& entry : data) {
+      if (!active_) return;
+      ValueType raw{};
+      const auto timestamp = RA_Time(entry.first);
+      if (!decode(entry.second, raw) || !timestamp.ok()) {
+        if (updateValue) markInvalid("Invalid Redis payload or source timestamp");
+        continue;
       }
+      handleRawUpdate(raw, static_cast<uint64_t>(timestamp.value), updateValue, canConfirm, entry.first);
     }
   }
 
-  void handleRead(const ReaderList& data, const bool updateValue) {
-    if (!active_.load() || data.empty()) {
-      return;
-    }
-    const auto& latest = data.back();
-    handleRawUpdate(latest.second, static_cast<uint64_t>(latest.first.value), updateValue);
-  }
-
-  void handleRawUpdate(const ValueType& raw, const uint64_t timestamp, const bool updateValue) {
-    pvxs::Value value;
-    AlarmState alarmState{epicsSevNone, epicsAlarmNone, ""};
-    bool publishTransition = false;
-
+  void markInvalid(const std::string& error) {
+    AlarmState state;
+    bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_.load()) {
-        return;
-      }
+      if (!active_) return;
+      sourceValid_ = false;
+      sourceError_ = error;
+      auto value = pv_.fetch();
+      state = populateValue(value);
+      transition = recordAlarmLocked(state);
+      pv_.post(value);
+    }
+    publishAlarm(state, transition);
+  }
 
-      haveLastRaw_ = true;
+  void handleRawUpdate(const ValueType& raw, uint64_t timestamp, bool updateValue,
+                       bool canConfirm = false, const std::string& streamId = {}) {
+    AlarmState state;
+    bool transition = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_) return;
+      if (canConfirm) {
+        for (auto& item : pendingPuts_) {
+          auto& pending = *item.second;
+          if (!pending.done && RedisAdapter::compareStreamIds(streamId, pending.afterId) > 0 &&
+              valuesEqual(pending.expectedRaw, raw)) {
+            pending.done = true;
+            pending.cv.notify_all();
+          }
+        }
+      }
+      if (!updateValue) return;
       lastRaw_ = raw;
       lastTimestampNs_ = timestamp;
-      completePendingLocked(raw);
-
-      if (!updateValue) {
-        return;
-      }
-
-      value = pv_.fetch();
-      const auto currentConfig = config_;
-      const auto present = applyForwardTransform(currentConfig, raw);
-
-      if constexpr (Array) {
-        assignArrayValue(value, present);
-      } else {
-        assignScalarValue(value, present);
-      }
-
-      applyStandardMetadata(value, currentConfig);
-      applyTimestamp(value, timestamp);
-
-      if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-        const int priorStatus = value["alarm.status"].valid() ? value["alarm.status"].as<int>() : epicsAlarmNone;
-        alarmState = evaluateNumericAlarm(currentConfig, static_cast<double>(present), priorStatus);
-        applyAlarmFields(value, currentConfig, alarmState);
-        publishTransition = (alarmState.status != lastPublishedStatus_ ||
-                             alarmState.severity != lastPublishedSeverity_);
-        lastPublishedStatus_ = alarmState.status;
-        lastPublishedSeverity_ = alarmState.severity;
-      } else {
-        applyAlarmFields(value, currentConfig, AlarmState{epicsSevNone, epicsAlarmNone, ""});
-      }
+      sourceValid_ = true;
+      sourceError_.clear();
+      auto value = pv_.fetch();
+      state = populateValue(value);
+      transition = recordAlarmLocked(state);
+      // Serialize posts with config changes and deactivation, not just fetches.
+      pv_.post(value);
     }
-
-    pv_.post(value);
-    if (publishTransition && alarmPublisher_) {
-      alarmPublisher_->publishTransition(fullName_, alarmState);
-    }
+    publishAlarm(state, transition);
   }
 
-  void completePendingLocked(const ValueType& raw) {
+  void failPendingLocked(const std::string& reason) {
     for (auto& item : pendingPuts_) {
-      if (!item.second->done && valuesEqual(item.second->expectedRaw, raw)) {
-        item.second->done = true;
-        item.second->cv.notify_all();
-      }
+      item.second->done = true;
+      item.second->error = reason;
+      item.second->cv.notify_all();
     }
   }
 
-  void handlePut(pvxs::server::SharedPV&,
-                 std::unique_ptr<pvxs::server::ExecOp>&& op,
-                 pvxs::Value&& value) {
-    if (!active_.load()) {
-      op->error("generation is no longer active");
-      return;
-    }
-
-    PVConfig currentConfig;
-    uint64_t generation = 0;
+  void handlePut(std::unique_ptr<pvxs::server::ExecOp>&& op, pvxs::Value&& value) {
+    PVConfig current;
+    uint64_t epoch;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      currentConfig = config_;
-      generation = generation_;
+      if (!active_ || !activated_) { op->error("generation is no longer active"); return; }
+      current = config_;
+      epoch = commandEpoch_;
     }
-
     ValueType present{};
-    if constexpr (Array) {
-      present = arrayValueFrom<T>(value);
-    } else {
-      present = scalarValueFrom<T>(value);
+    try {
+      if constexpr (Array) present = arrayValueFrom<T>(value);
+      else present = scalarValueFrom<T>(value);
+    } catch (const std::exception& ex) {
+      op->error(std::string("invalid put value: ") + ex.what());
+      return;
     }
-
-    const auto raw = applyInverseTransform(currentConfig, present);
-
+    const auto raw = applyInverseTransform(current, present);
     std::shared_ptr<PendingPut> pending;
-    if (currentConfig.confirm) {
+    if (current.confirm) {
+      const auto snapshot = confirmRedis_->getStreamSnapshot(current.confirm->key);
+      if (!snapshot.connected) { op->error("confirmation backend unavailable"); return; }
       pending = std::make_shared<PendingPut>();
       pending->expectedRaw = raw;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
+      pending->afterId = snapshot.id;
+    }
+    RA_Time writeTime;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_ || commandEpoch_ != epoch) { op->error("write configuration changed"); return; }
+      if (pending) {
         pending->id = ++nextPendingId_;
         pendingPuts_[pending->id] = pending;
       }
+      // Serialize the acceptance boundary with retirement. The v0.9 executor
+      // moves this bounded network operation off the PVA callback thread.
+      writeTime = writeToRedis(current, raw);
+      if (!writeTime.ok() && pending) pendingPuts_.erase(pending->id);
     }
-
-    const auto writeTime = writeToRedis(currentConfig, raw);
-    if (!writeTime.ok()) {
-      if (pending) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pendingPuts_.erase(pending->id);
-      }
-      op->error("redis write failed");
-      return;
-    }
-
-    if (!currentConfig.confirm) {
-      if (currentConfig.write && sameRouteTarget(currentConfig.read, *currentConfig.write)) {
+    if (!writeTime.ok()) { op->error("redis write failed; not retried"); return; }
+    if (!pending) {
+      if (sameRouteTarget(current.read, *current.write))
         handleRawUpdate(raw, static_cast<uint64_t>(writeTime.value), true);
-      }
       op->reply();
       return;
     }
-
     std::unique_lock<std::mutex> lock(mutex_);
-    const auto timeout = std::chrono::milliseconds(currentConfig.confirm->timeoutMs);
-    const bool completed = pending->cv.wait_for(lock, timeout, [&]() {
-      return pending->done || !active_.load() || generation_ != generation;
+    const bool completed = pending->cv.wait_for(lock, std::chrono::milliseconds(current.confirm->timeoutMs), [&] {
+      return pending->done || !active_ || commandEpoch_ != epoch;
     });
-
     pendingPuts_.erase(pending->id);
-
-    if (!completed || !pending->done) {
-      op->error("backend confirmation timeout");
-      return;
-    }
-    if (!pending->error.empty()) {
-      op->error(pending->error);
-      return;
-    }
-    op->reply();
+    const auto error = pending->error;
+    const bool confirmed = completed && pending->done;
+    lock.unlock();
+    if (!error.empty()) op->error(error);
+    else if (!confirmed) op->error("backend confirmation timeout");
+    else op->reply();
   }
 
   RA_Time writeToRedis(const PVConfig& config, const ValueType& raw) {
-    if constexpr (Array) {
-      return writeRedis_->addSingleList<T>(config.write->key, raw);
-    } else if constexpr (std::is_same_v<T, double>) {
-      return writeRedis_->addSingleDouble(config.write->key, raw);
-    } else {
-      return writeRedis_->addSingleValue<T>(config.write->key, raw);
-    }
+    if constexpr (Array) return writeRedis_->addSingleList<T>(config.write->key, raw);
+    else if constexpr (std::is_same_v<T, double>) return writeRedis_->addSingleDouble(config.write->key, raw);
+    else return writeRedis_->addSingleValue<T>(config.write->key, raw);
   }
 
   mutable std::mutex mutex_;
   PVConfig config_;
-  std::shared_ptr<RedisAdapter> readRedis_;
-  std::shared_ptr<RedisAdapter> writeRedis_;
-  std::shared_ptr<RedisAdapter> confirmRedis_;
+  std::shared_ptr<RedisAdapter> readRedis_, writeRedis_, confirmRedis_;
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
   std::string fullName_;
   uint64_t generation_ = 0;
+  uint64_t commandEpoch_ = 0;
   pvxs::server::SharedPV pv_;
   std::atomic<bool> active_{true};
+  std::atomic<bool> activated_{false};
+  RedisAdapter::ReaderHandle readReader_, confirmReader_;
+  std::string readCursor_;
   ValueType lastRaw_{};
-  bool haveLastRaw_ = false;
   uint64_t lastTimestampNs_ = 0;
+  bool sourceValid_ = false;
+  std::string sourceError_;
   int lastPublishedStatus_ = epicsAlarmNone;
   int lastPublishedSeverity_ = epicsSevNone;
   uint64_t nextPendingId_ = 0;

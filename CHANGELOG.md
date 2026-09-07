@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.8.2 - unreleased
+
+- use individually owned upstream redis-adapter subscriptions so replacing or
+  rejecting a staged runtime cannot remove another runtime's reader
+- resume live reads from the exact snapshot stream ID, preserving updates
+  between snapshot acquisition and reader activation
+- isolate displayed readback from confirmation observations and require a
+  confirmation stream position newer than the pre-command snapshot; metadata
+  changes no longer replay observations into pending writes
+- evaluate major alarm thresholds before warning hysteresis retention
+- decode scalars and arrays with validated lengths and safe copying; accept
+  empty numeric arrays and preserve the last good value on malformed input
+- mark initial-only fallback values invalid until valid source data arrives,
+  without attributing a fabricated source timestamp to them
+- fence retired callbacks and suppress commands and alarm publication from
+  staged runtimes until activation
+- run Redis/PVA regression tests with an isolated, automatically cleaned-up
+  Redis fixture as part of the normal CTest and image build
+
 ## v0.8.0 - 2026-08-03
 
 - add explicitly enabled native EPICS ACF enforcement for PV, RPC, and admin

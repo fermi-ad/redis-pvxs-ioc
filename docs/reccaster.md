@@ -110,3 +110,25 @@ property translation, alias retirement, and receiver restart. Hosted native CI
 runs this acceptance without a production catalog. Release qualification also
 requires the isolated deployed ChannelFinder/PVA discovery exercise before the
 legacy sidecar retirement is promoted.
+
+For the HTTP catalog exercise, start the pinned, resource-limited fixture in
+`tests/discovery-catalog.compose.yml`. Its only published port binds to loopback,
+and its demo credentials apply only to the fixture. With a built native service,
+the pinned receiver source above, and a virtual environment containing
+`tests/recceiver-requirements.txt`:
+
+```sh
+docker compose -f tests/discovery-catalog.compose.yml up -d --wait
+CATALOG_ADDRESS=$(docker compose -f tests/discovery-catalog.compose.yml port channelfinder 8080)
+EPICS_HOST_ARCH=$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)
+build/recceiver-venv/bin/python scripts/run-with-redis.py --redis-server "$(command -v redis-server)" -- \
+  build/recceiver-venv/bin/python tests/recceiver_acceptance.py \
+  --source build/recceiver-source/server --ioc build/redis-pvxs-ioc \
+  --pvxget "third_party/pvxs/bin/$EPICS_HOST_ARCH/pvxget" \
+  --cf-url "http://$CATALOG_ADDRESS/ChannelFinder"
+docker compose -f tests/discovery-catalog.compose.yml down -v
+```
+
+The test reads the registered `iocIP` and `pvaPort` back from the catalog and
+uses those fields to resolve and GET aliases with UDP search disabled. It
+repeats this check after reload and receiver restart.

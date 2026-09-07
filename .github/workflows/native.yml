@@ -2,7 +2,7 @@ name: Native Redis/PVA validation
 
 on:
   pull_request:
-    branches: [main, dev/runtime-correctness-v0.8.2]
+    branches: [main, 'dev/**']
   push:
     branches: [main]
   workflow_dispatch:
@@ -60,3 +60,16 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build --output-on-failure
+      - name: Check out the receiver acceptance dependency
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ChannelFinder/recsync
+          ref: 864b162cb05fa140e67e056bda86ed750447c3d4
+          path: build/recceiver-source
+      - name: Test with real RecCeiver and its ChannelFinder processor
+        run: |
+          python3 -m venv build/recceiver-venv
+          build/recceiver-venv/bin/python -m pip install -r tests/recceiver-requirements.txt
+          build/recceiver-venv/bin/python scripts/run-with-redis.py --redis-server "$(command -v redis-server)" -- \
+            build/recceiver-venv/bin/python tests/recceiver_acceptance.py \
+            --source build/recceiver-source/server --ioc build/redis-pvxs-ioc

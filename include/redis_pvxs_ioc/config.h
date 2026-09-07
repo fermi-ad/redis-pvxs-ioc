@@ -194,12 +194,23 @@ struct ChannelFinderConfig {
   std::map<std::string, std::string> properties;
 };
 
+struct DiscoveryConfig {
+  bool enabled = true;
+  std::string bindAddress = "0.0.0.0";
+  uint16_t udpPort = 5049;
+  uint32_t timeoutMs = 20000;
+  uint32_t maxHoldoffMs = 10000;
+  uint32_t maxRecords = 100000;
+  uint64_t maxBytes = 16u * 1024u * 1024u;
+};
+
 struct AppConfig {
   ServerConfig server;
   AccessConfig access;
   RedisBackendConfigs redisBackends;
   AlarmStreamConfig alarms;
   ChannelFinderConfig channelFinder;
+  DiscoveryConfig discovery;
   std::vector<PVConfig> pvs;
   std::vector<RpcServiceConfig> rpcServices;
 };
@@ -229,5 +240,7 @@ std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig&
 std::string adminPVName(const ServerConfig& server, const std::string& suffix);
 std::string versionPVName(const ServerConfig& server);
 std::string revisionPVName(const ServerConfig& server);
+std::vector<std::string> adminPVNames(const ServerConfig& server);
+bool sameDiscoveryConfig(const DiscoveryConfig& lhs, const DiscoveryConfig& rhs);
 
 }  // namespace redis_pvxs_ioc

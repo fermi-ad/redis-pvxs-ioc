@@ -18,6 +18,7 @@ access: {}                # optional; disabled by default
 redis: {}                 # or redis_backends, exactly one form
 alarms: {}                # optional
 channelfinder: {}         # optional
+discovery: {}             # optional; automatic RecCeiver registration enabled
 pvs: []                   # optional when rpc_services is non-empty
 rpc_services: []          # optional when pvs is non-empty
 ```
@@ -107,6 +108,28 @@ changes are written to this Redis stream.
 
 Tags and property names must not be empty. See
 [`channelfinder-sync.md`](channelfinder-sync.md).
+
+## `discovery`
+
+RecCeiver registration is enabled by default. It uses the core service's active
+PV catalog and needs no conventional IOC or ChannelFinder credentials.
+
+| Field | Default | Supported values |
+| --- | --- | --- |
+| `enabled` | `true` | Boolean |
+| `bind_address` | `0.0.0.0` | IPv4 listen address |
+| `udp_port` | `5049` | 0–65535; zero allocates a local test port |
+| `timeout_ms` | `20000` | 1–300000; total connect/greeting/upload deadline |
+| `max_holdoff_ms` | `10000` | 0–60000; randomized receiver connection delay |
+| `max_records` | `100000` | 1–1000000; includes aliases and admin/RPC endpoints |
+| `max_bytes` | `16777216` | 1024–1073741824; encoded catalog byte bound |
+
+These settings require a process restart to change. Successful PV/alias/metadata
+reloads automatically replace the catalog; failed staging keeps the previous
+session/catalog active. Staging validates protocol field sizes and count/byte
+bounds. The worker retains at most one active upload and one latest replacement;
+socket buffers and temporary encoding storage add to the encoded byte count.
+See [Discovery](reccaster.md) for networking and status semantics.
 
 ## `pvs`
 

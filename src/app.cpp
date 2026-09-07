@@ -22,7 +22,9 @@
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/config.h"
+#if REDIS_PVXS_IOC_ENABLE_GRPC
 #include "redis_pvxs_ioc/rpc_pv.h"
+#endif
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/util.h"
 #include "redis_pvxs_ioc/version.h"
@@ -432,7 +434,7 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 }
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
-using RpcMap = std::unordered_map<std::string, std::shared_ptr<RpcPV>>;
+using RpcMap = std::unordered_map<std::string, std::shared_ptr<pvxs::server::SharedPV>>;
 using PVBindingMap = std::map<std::string, std::string>;
 using AssignmentMap = std::unordered_map<std::string, AccessAssignment>;
 
@@ -465,6 +467,7 @@ std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
 RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
   RpcMap rpcPVs;
   assignments.clear();
+#if REDIS_PVXS_IOC_ENABLE_GRPC
   for (const auto& svc : config.rpcServices) {
     auto bridge = std::make_shared<GrpcBridge>(svc.endpoint);
 
@@ -492,12 +495,17 @@ RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
       std::string leaf = methodToPvLeaf(m.method) + svc.suffix;
       std::string name =
           config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
-      rpcPVs.emplace(name, std::make_shared<RpcPV>(bridge, m, svc.defaults));
+      auto runtime = std::make_shared<RpcPV>(bridge, m, svc.defaults);
+      rpcPVs.emplace(name, std::shared_ptr<pvxs::server::SharedPV>(runtime, &runtime->sharedPV()));
       assignments.emplace(name, svc.access.value_or(config.access.defaults.rpc));
       std::fprintf(stderr, "[redis-pvxs-ioc] rpc PV %s -> %s/%s\n",
                    name.c_str(), m.service.c_str(), m.method.c_str());
     }
   }
+#else
+  if (!config.rpcServices.empty())
+    throw std::runtime_error("rpc_services requires a build with REDIS_PVXS_IOC_ENABLE_GRPC=ON");
+#endif
   return rpcPVs;
 }
 
@@ -543,6 +551,10 @@ Application::~Application() = default;
 bool Application::validateOnly(std::string& summary, std::string& error) const {
   try {
     const auto config = loadConfigFile(configPath_);
+#if !REDIS_PVXS_IOC_ENABLE_GRPC
+    if (!config.rpcServices.empty())
+      throw std::runtime_error("rpc_services requires a build with REDIS_PVXS_IOC_ENABLE_GRPC=ON");
+#endif
     std::string policyFingerprint;
     if (!validateAccessPolicy(config.access, requiredAccessAsgs(config), policyFingerprint, error)) {
       summary.clear();
@@ -760,7 +772,7 @@ bool Application::replaceAll(const AppConfig& config,
     impl_->rpcPVs = std::move(stagedRpcPVs);
     impl_->rpcAssignments = std::move(stagedRpcAssignments);
     for (auto& item : impl_->rpcPVs) {
-      impl_->addEndpoint(item.first, item.second->sharedPV(), impl_->rpcAssignments.at(item.first));
+      impl_->addEndpoint(item.first, *item.second, impl_->rpcAssignments.at(item.first));
     }
 
     impl_->redisBackends = std::move(newRedisBackends);
@@ -931,7 +943,7 @@ bool Application::applyIncremental(const AppConfig& config,
     impl_->rpcPVs = std::move(stagedRpcPVs);
     impl_->rpcAssignments = std::move(stagedRpcAssignments);
     for (auto& item : impl_->rpcPVs) {
-      impl_->addEndpoint(item.first, item.second->sharedPV(), impl_->rpcAssignments.at(item.first));
+      impl_->addEndpoint(item.first, *item.second, impl_->rpcAssignments.at(item.first));
     }
 
     impl_->currentConfig = config;

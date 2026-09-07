@@ -19,12 +19,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(REDIS_PVXS_IOC_BUILD_TESTS "Build redis-pvxs-ioc unit tests" ON)
+option(REDIS_PVXS_IOC_ENABLE_GRPC "Build reflected PVA RPC to gRPC forwarding" ON)
+option(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER "Build the one-shot ChannelFinder publication tool" ON)
 
 set(EPICS_BASE "${CMAKE_SOURCE_DIR}/third_party/epics-base" CACHE PATH "Path to built epics-base")
 set(PVXS_ROOT "${CMAKE_SOURCE_DIR}/third_party/pvxs" CACHE PATH "Path to built pvxs")
 
 find_package(Perl REQUIRED)
-find_package(CURL REQUIRED)
+if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
+  find_package(CURL REQUIRED)
+endif()
 
 # ---- gRPC + protobuf for the RPC->gRPC forwarding feature ------------------
 # Provided by the dev packages installed in the Dockerfile
@@ -32,8 +36,10 @@ find_package(CURL REQUIRED)
 # source build. Protobuf in MODULE mode (Ubuntu ships no ProtobufConfig.cmake;
 # CMake's FindProtobuf provides Protobuf_PROTOC_EXECUTABLE + protobuf::libprotobuf).
 # gRPC ships gRPCConfig.cmake (gRPC::grpc++ + gRPC::grpc_cpp_plugin).
-find_package(Protobuf REQUIRED)
-find_package(gRPC CONFIG REQUIRED)
+if(REDIS_PVXS_IOC_ENABLE_GRPC)
+  find_package(Protobuf REQUIRED)
+  find_package(gRPC CONFIG REQUIRED)
+endif()
 
 set(
   REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE
@@ -122,7 +128,9 @@ set(PVXS_EXTRA_INCLUDE_DIRS)
 set(PVXS_EXTRA_LINK_LIBS)
 if(EXISTS "${PVXS_BUNDLE_EVENT_LIB}")
   list(APPEND PVXS_EXTRA_INCLUDE_DIRS "${PVXS_USR}/include")
-  list(APPEND PVXS_EXTRA_LINK_LIBS "${PVXS_BUNDLE_EVENT_LIB}")
+  # PVXS already links event_core and event_pthreads. Linking monolithic
+  # libevent as well creates two copies of its global threading state on macOS
+  # and can deadlock server construction. Follow PVXS's transitive dependencies.
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR
     "Missing bundled libevent: ${PVXS_BUNDLE_EVENT_LIB}\n"
@@ -136,6 +144,7 @@ add_subdirectory(third_party/redis-adapter)
 # ---- Generated gRPC server-reflection stubs --------------------------------
 # The IOC compiles in only the standard gRPC reflection proto; it discovers any
 # backend service's schema at runtime, so it carries no application proto.
+if(REDIS_PVXS_IOC_ENABLE_GRPC)
 set(REFLECTION_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/reflection.proto")
 set(BRIDGE_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
 file(MAKE_DIRECTORY "${BRIDGE_GEN_DIR}")
@@ -162,15 +171,14 @@ target_link_libraries(bpm-query-proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
 target_include_directories(bpm-query-proto PUBLIC "${BRIDGE_GEN_DIR}" ${Protobuf_INCLUDE_DIRS})
 set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+endif()
+
 add_library(redis-pvxs-ioc-core STATIC
   src/access_control.cpp
   src/config.cpp
-  src/channelfinder.cpp
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
-  src/grpc_bridge.cpp
-  src/rpc_pv.cpp
   src/app.cpp
   ${REDIS_ADAPTER_SOURCES}
 )
@@ -190,25 +198,46 @@ target_include_directories(redis-pvxs-ioc-core
 target_link_libraries(redis-pvxs-ioc-core
   PUBLIC
     yaml-cpp
-    bpm-query-proto
-    gRPC::grpc++
-    protobuf::libprotobuf
     ${REDIS_ADAPTER_LIBRARIES}
     ${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}
     ${PVXS_LIB}/libpvxs${SHARED_LIB_EXT}
     ${PVXS_EXTRA_LINK_LIBS}
 )
 
+target_compile_definitions(redis-pvxs-ioc-core PUBLIC
+  REDIS_PVXS_IOC_ENABLE_GRPC=$<BOOL:${REDIS_PVXS_IOC_ENABLE_GRPC}>
+  REDIS_PVXS_IOC_ENABLE_CHANNELFINDER=$<BOOL:${REDIS_PVXS_IOC_ENABLE_CHANNELFINDER}>)
+if(REDIS_PVXS_IOC_ENABLE_GRPC)
+  target_sources(redis-pvxs-ioc-core PRIVATE src/grpc_bridge.cpp src/rpc_pv.cpp)
+  target_link_libraries(redis-pvxs-ioc-core PUBLIC bpm-query-proto)
+endif()
+
+# Require the narrow Base extension used to refresh live HAG membership.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES "${EPICS_BASE}/include" "${EPICS_BASE}/include/${EPICS_COMPILER_DIR}" "${EPICS_BASE}/include/${EPICS_OS_DIR}")
+set(CMAKE_REQUIRED_LIBRARIES "${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}")
+check_cxx_source_compiles("#include <asLib.h>\nint main() { unsigned changed = 0; return asRefreshHag(&changed); }" REDIS_PVXS_IOC_HAS_HAG_REFRESH)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if(NOT REDIS_PVXS_IOC_HAS_HAG_REFRESH)
+  message(FATAL_ERROR "EPICS Base must provide asRefreshHag(). Build the pinned Base extension; see docs/access-control.md.")
+endif()
+
 add_executable(redis-pvxs-ioc src/main.cpp)
 target_link_libraries(redis-pvxs-ioc PRIVATE redis-pvxs-ioc-core)
 
-add_executable(redis-pvxs-channelfinder-sync tools/channelfinder_sync.cpp)
-target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-ioc-core CURL::libcurl)
+if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
+  add_library(redis-pvxs-channelfinder STATIC src/channelfinder.cpp)
+  target_link_libraries(redis-pvxs-channelfinder PUBLIC redis-pvxs-ioc-core)
+  add_executable(redis-pvxs-channelfinder-sync tools/channelfinder_sync.cpp)
+  target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-channelfinder CURL::libcurl)
+  install(TARGETS redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
+endif()
 
 add_executable(redis-pvxs-access-benchmark tools/access_benchmark.cpp)
 target_link_libraries(redis-pvxs-access-benchmark PRIVATE redis-pvxs-ioc-core)
 
-install(TARGETS redis-pvxs-ioc redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
+install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
@@ -242,9 +271,12 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME alarm_publisher_tests COMMAND alarm_publisher_tests)
 
-  add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
-  target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-ioc-core)
-  add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
+  if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
+    add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
+    target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-channelfinder)
+    target_compile_options(channelfinder_tests PRIVATE -UNDEBUG)
+    add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
+  endif()
 
   # redis-plus-plus supplies a default Release build type when callers don't
   # specify one.  These small test executables use assert() as their test
@@ -254,8 +286,8 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
       access_control_tests
       access_runtime_tests
       model_tests
-      alarm_publisher_tests
-      channelfinder_tests)
+      alarm_publisher_tests)
     target_compile_options(${_test_target} PRIVATE -UNDEBUG)
+    set_tests_properties(${_test_target} PROPERTIES TIMEOUT 60)
   endforeach()
 endif()

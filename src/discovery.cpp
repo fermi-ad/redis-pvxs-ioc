@@ -287,21 +287,37 @@ struct DiscoveryPublisher::Impl {
             if (!catalog) { wait(-1, 0, Clock::now() + std::chrono::hours(24), expected); continue; }
             state("listening");
             wait(udp.fd, POLLIN, Clock::now() + std::chrono::hours(24), expected);
-            std::array<uint8_t, 64> announcement;
-            sockaddr_in peer{}; socklen_t length = sizeof(peer);
-            const auto count = recvfrom(udp.fd, announcement.data(), announcement.size(), 0,
-                reinterpret_cast<sockaddr*>(&peer), &length);
-            if (count < 0 && (errno == EAGAIN || errno == EINTR)) continue;
-            if (count < 16 || read16(announcement.data()) != magic || announcement[2] != 0 ||
-                !read16(announcement.data() + 8) || !read32(announcement.data() + 4)) {
-              std::lock_guard<std::mutex> guard(mutex); ++current.invalidAnnouncements; continue;
+            sockaddr_in server{};
+            uint32_t serverKey = 0;
+            bool candidate = false;
+            // Announcements may queue while TCP is connected. Consume a bounded
+            // batch and use the newest valid endpoint, rather than retrying a
+            // departed receiver once per stale datagram after its restart.
+            for (unsigned batch = 0; batch < 256; ++batch) {
+              check(expected);
+              std::array<uint8_t, 64> announcement;
+              sockaddr_in peer{}; socklen_t length = sizeof(peer);
+              const auto count = recvfrom(udp.fd, announcement.data(), announcement.size(), 0,
+                  reinterpret_cast<sockaddr*>(&peer), &length);
+              if (count < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (errno == EINTR) continue;
+                socketError("discovery announcement");
+              }
+              if (count < 16 || read16(announcement.data()) != magic || announcement[2] != 0 ||
+                  !read16(announcement.data() + 8) || !read32(announcement.data() + 4)) {
+                std::lock_guard<std::mutex> guard(mutex); ++current.invalidAnnouncements; continue;
+              }
+              server.sin_family = AF_INET;
+              server.sin_port = htons(read16(announcement.data() + 8));
+              const auto ip = read32(announcement.data() + 4);
+              server.sin_addr.s_addr = ip == 0xffffffff ? peer.sin_addr.s_addr : htonl(ip);
+              serverKey = read32(announcement.data() + 12);
+              candidate = true;
             }
-            sockaddr_in server{}; server.sin_family = AF_INET;
-            server.sin_port = htons(read16(announcement.data() + 8));
-            const auto ip = read32(announcement.data() + 4);
-            server.sin_addr.s_addr = ip == 0xffffffff ? peer.sin_addr.s_addr : htonl(ip);
+            if (!candidate) continue;
             delay(std::uniform_int_distribution<uint32_t>(0, config.maxHoldoffMs)(random), expected);
-            connectAndUpload(server, read32(announcement.data() + 12), *catalog, expected);
+            connectAndUpload(server, serverKey, *catalog, expected);
           } catch (const Interrupted&) {
             continue; // Successful reload wakes I/O and replaces only the catalog.
           } catch (const std::exception& error) {

@@ -72,4 +72,5 @@ jobs:
           build/recceiver-venv/bin/python -m pip install -r tests/recceiver-requirements.txt
           build/recceiver-venv/bin/python scripts/run-with-redis.py --redis-server "$(command -v redis-server)" -- \
             build/recceiver-venv/bin/python tests/recceiver_acceptance.py \
-            --source build/recceiver-source/server --ioc build/redis-pvxs-ioc
+            --source build/recceiver-source/server --ioc build/redis-pvxs-ioc \
+            --pvxget "third_party/pvxs/bin/$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)/pvxget"

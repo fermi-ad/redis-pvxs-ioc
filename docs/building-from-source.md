@@ -163,5 +163,5 @@ docker run --rm redis-pvxs-ioc:local \
 REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local ./scripts/smoke-test.sh
 ```
 
-The optional legacy sidecar has a separate dependency surface and build
-overlay. See [Legacy IOC sidecar](legacy-sidecar.md).
+Native RecCeiver discovery is part of the service and requires no additional
+support-module checkout or build. See [Discovery](reccaster.md).

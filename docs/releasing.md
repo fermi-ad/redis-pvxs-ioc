@@ -41,8 +41,7 @@ ctest --test-dir build --output-on-failure
    - the validation commands used
 12. Open a post-release pin-sync PR that replaces every checked-in main-runtime
     image example with `image:v${VERSION}@sha256:<digest>`.
-13. Validate and merge that PR. Do not change the legacy-sidecar tag unless a
-    separate sidecar release was intentionally built and validated.
+13. Validate and merge that PR.
 
 ## Automated workflows
 
@@ -63,10 +62,6 @@ The primary runtime image release process is split into three workflows:
   verifies the tag commit is contained in `origin/main`, builds and pushes
   `vX.Y.Z` plus `latest`, captures the digest, validates the pushed image, and
   creates or updates the GitHub Release.
-
-The legacy sidecar has its own version and immutable digest. It is published
-only as a separate, intentional sidecar release. Standardizing it into an
-automated workflow is a separate scoped change.
 
 ## Image reference policy
 
@@ -102,40 +97,18 @@ docker build \
 docker push "${IMAGE}"
 docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest
 
-LEGACY_IMAGE="${LEGACY_IOC_IMAGE:?set the independently versioned legacy sidecar image}"
-
-LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
-  docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.legacy-sidecar.yml \
-    -f docker-compose.legacy-sidecar.build.yml \
-    --profile legacy \
-    build legacy-ioc
-
-LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
-  docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.legacy-sidecar.yml \
-    -f docker-compose.legacy-sidecar.build.yml \
-    --profile legacy \
-    push legacy-ioc
-
-docker tag "${LEGACY_IMAGE}" adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:latest
-docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:latest
 ```
 
 Capture the immutable digest after push:
 
 ```sh
 docker image inspect "${IMAGE}" --format '{{join .RepoDigests "\n"}}'
-docker image inspect "${LEGACY_IMAGE}" --format '{{join .RepoDigests "\n"}}'
 ```
 
 When updating deployment compose files, keep the tag and digest together:
 
 ```sh
 image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}@sha256:<digest>
-image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:<sidecar-version>@sha256:<digest>
 ```
 
 ## Manual GitHub release

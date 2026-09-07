@@ -28,5 +28,5 @@ ctest --test-dir build --output-on-failure
 ./build/redis-pvxs-ioc --check-config demo/config.yaml
 ```
 
-The legacy sidecar has a separate build overlay and dependency surface. See
-[`legacy-sidecar.md`](legacy-sidecar.md); it is not required for core changes.
+Core checkout, builds and validation use only EPICS Base, PVXS, redis-adapter
+and yaml-cpp. Native RecCeiver discovery is implemented in this service.

@@ -188,6 +188,7 @@ For verbose server-side networking diagnostics, run the IOC with PVXS logging:
 PVXS_LOG='pvxs.server*=DEBUG pvxs.tcp*=DEBUG pvxs.udp*=DEBUG' docker compose up ioc
 ```
 
-RecCaster/RecSync and ChannelFinder are separate cataloging mechanisms. They
-can publish record or PV metadata, but they do not replace PVAccess UDP
-search/beacon visibility for `pvxhosts`/`pvxlist`.
+Native RecCeiver registration maintains the ChannelFinder catalog automatically.
+The catalog's PVA address and port can drive TCP lookup; `pvxhosts`/`pvxlist`
+still need their normal search/beacon visibility. See [Discovery](reccaster.md)
+for registration networking and catalog-driven PVA validation.

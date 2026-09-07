@@ -1,205 +1,54 @@
-# Legacy IOC Sidecar
+# Legacy sidecar retirement
 
-> **Status:** Optional and experimental. The sidecar is independently versioned
-> from the main runtime while [issue #68](https://github.com/fermi-ad/redis-pvxs-ioc/issues/68)
-> decides its long-term product ownership.
+The conventional IOC sidecar is retired from the core product on the path to
+v0.9.0. Its source, build overlays, support-module build scripts, fourteen
+legacy-only submodules, and vendored PCRE tree are removed from the active
+checkout. Historical Git tags and published images remain available. There is
+no replacement repository or new sidecar release track.
 
-The legacy sidecar is an optional conventional EPICS IOC container that can run beside `redis-pvxs-ioc`.
+Discovery is preserved in the standalone service. Native RecCeiver registration
+advertises the actual Redis/PVXS PVs, aliases, diagnostics and reflected RPCs,
+updates on successful reload, and recovers after receiver restart. It needs no
+EPICS database, support modules or CA server. See [Discovery](reccaster.md).
 
-If you already have a working `.db` / `.dbd` IOC or a support module people depend on, start here. The sidecar lets that IOC join the PVA testbed without changing the Redis-first runtime.
+## Historical identity
 
-The rule is simple: keep `redis-pvxs-ioc` clean, put legacy EPICS record/device-support behavior in a separate sidecar image, publish that image to the registry, and run both containers on the same PVA network.
+- Last published sidecar image:
+  `adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.5.0@sha256:91848ceecca14f65195be671a5fd78982366d9e28ad93bd91e046b69f75bd401`.
+- Historical release source: tag `v0.5.0`, commit
+  `add1dd8577fdb33f9cfb79ce7ba3e3db88e6d618` in this repository.
+- Source and build instructions remain accessible through that tag. Preserving
+  this source reference does not create new provenance for the old image.
 
-## What This Supports
+The inspected image has no source-revision label (only an inherited Ubuntu
+version label). The release tag above identifies the historical source; it is
+not an assertion of reproducible-build provenance for that old image.
 
-- a conventional IOC startup script
-- base records from `.db` files
-- PVA exposure through `pvxsIoc` / QSRV2
-- RecCaster status records and RecCeiver/ChannelFinder advertisement for conventional IOC records
-- a prelinked compatibility bundle: `seq`, `sscan`, `calc`, `asyn`, `std`, `pcre`, `StreamDevice`, `lua`, `iocStats`, `alive`, `autosave`, `busy`, `caPutLog`, and `linStat`
-- an optional compose service on the same PVA network as `redis-pvxs-ioc`
-- a template that teams can derive from for real support-module images
+## Migration
 
-## What This Does Not Support
+1. Keep the deployment's existing immutable image references, configuration,
+   startup files and persistent data available for rollback.
+2. Validate the standalone release in isolation. Ensure the service receives
+   RecCeiver announcements on UDP 5049 and that PVA clients can reach its
+   advertised address and TCP port.
+3. Verify the canonical PVs and aliases in ChannelFinder, read the structured
+   `SYS:<instance>:discovery:status`, and perform PVA reads using the registered
+   address and port. Verify alias/metadata changes and receiver restart before
+   changing the deployment.
+4. If the old sidecar exists only for discovery, remove it from the deployment's
+   Compose definition during that deployment's normal change procedure.
+   If it hosts device logic or conventional records, retain the historical image
+   until those consumers have a separately reviewed migration. Such hosting is
+   outside this service's product boundary.
 
-- loading arbitrary support modules into `redis-pvxs-ioc`
-- mounting an unknown `.dbd` file and expecting missing C/C++ registrar or device-support code to appear
-- re-exporting sidecar PVs through `redis-pvxs-ioc`
-- Redis shadowing of sidecar values
-- CA compatibility by default
-- hot reload of legacy `.dbd` or `.db` structure after `iocInit()`
+The legacy RecCaster enumerated the sidecar's own database records. Native
+discovery enumerates the standalone service's configured registry; it does not
+invent replacements for conventional support records. The legacy
+`<prefix>:RecCaster:State-Sts` and `Msg-I` records are replaced operationally by
+the structured native discovery status PV. Existing device PV names and aliases
+remain governed by their YAML definitions.
 
-## Why A `.dbd` Is Not Enough
-
-A `.dbd` file describes record types, device support, menus, functions, and registrars. If it references a support module, the corresponding compiled code must be linked into the IOC application image.
-
-The sample sidecar image now links the controls compatibility bundle listed above. That makes it a useful out-of-the-box testbed for common EPICS module workflows, but it is still not a universal `.dbd` loader.
-
-For a support module outside this bundle, derive a custom sidecar image and link that module into the IOC app.
-
-## Run The Sample
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
-Validate:
-
-```sh
-IOC_CONTAINER=redis-pvxs-ioc-demo
-PV_ENV='EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=239.128.1.6'
-PVX_BIN_DIR='/opt/redis-pvxs-ioc/bin/pvxs'
-
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:readback"
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput LEGACY:setpoint 2.5"
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:setpoint"
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:State-Sts"
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:Msg-I"
-```
-
-Use a different startup script:
-
-```sh
-LEGACY_IOC_STARTUP_HOST=/path/to/st.cmd \
-  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
-The overlay publishes UDP `5049` by default for RecCaster discovery. If another local test stack already owns that host port, set `RECCASTER_UDP_HOST_PORT`.
-
-## Optional Channel Access
-
-CA is disabled by default. Enable it only for a sidecar that must serve legacy CA clients:
-
-```sh
-LEGACY_IOC_ENABLE_CA=YES \
-  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
-## Optional linStat
-
-`linStat` is compiled into source-built sidecar images. The sidecar has an
-independent release history; a main-runtime release does not imply a matching
-sidecar tag.
-
-It is inactive by default. To use it, provide a startup script that loads the
-relevant records:
-
-```sh
-LEGACY_IOC_STARTUP_HOST=/path/to/linstat.st.cmd \
-  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
-Load the specific Linux/container statistics databases you want, such as
-`linStatHost.db`, `linStatProc.db`, `linStatNIC.db`, or `linStatFS.db`.
-
-The default `st.cmd` does not load linStat records.
-
-## Deriving A Real Support-Module Sidecar
-
-Fast path:
-
-```sh
-cp -R legacy-sidecar /path/to/my-project/legacy-sidecar
-```
-
-Then edit:
-
-- `legacy-sidecar/app/legacyIocApp/src/Makefile`
-- `legacy-sidecar/iocBoot/st.cmd`
-- `legacy-sidecar/app/legacyIocApp/Db/`
-- `legacy-sidecar/Dockerfile` if the support module needs extra source packages or build steps
-
-A user-owned sidecar image should contain:
-
-- the conventional IOC executable
-- its generated `.dbd`
-- all linked support-module libraries needed by that `.dbd`
-- `.db` files
-- startup script
-- EPICS Base runtime libraries
-- `pvxs` and `pvxsIoc` when PVA exposure is required
-- `reccaster` when conventional records should advertise through RecCeiver/ChannelFinder
-
-If your support module is already in the sample compatibility bundle, you usually only need a project startup script and `.db` files. If your support module is not in the bundle, use this application pattern:
-
-```makefile
-PROD_IOC = legacy
-
-DBD += legacy.dbd
-legacy_DBD += base.dbd
-legacy_DBD += pvxsIoc.dbd
-legacy_DBD += reccaster.dbd
-legacy_DBD += mySupportModule.dbd
-
-legacy_SRCS += legacy_registerRecordDeviceDriver.cpp
-legacy_SRCS_DEFAULT += legacyMain.cpp
-
-legacy_LIBS += reccaster
-legacy_LIBS += mySupportModule
-legacy_LIBS += pvxsIoc
-legacy_LIBS += pvxs
-legacy_LIBS += $(EPICS_BASE_IOC_LIBS)
-```
-
-And the startup pattern is:
-
-```iocsh
-epicsEnvSet("PVXS_QSRV_ENABLE", "YES")
-
-dbLoadDatabase("/opt/legacy-ioc/dbd/legacy.dbd")
-legacy_registerRecordDeviceDriver(pdbbase)
-
-addReccasterEnvVars("CONTACT", "BUILDING", "SECTOR")
-dbLoadRecords("/opt/legacy-ioc/db/records.db", "P=LEGACY:")
-dbLoadRecords("/opt/legacy-ioc/db/reccaster.db", "P=LEGACY:RecCaster:")
-
-iocInit()
-```
-
-The sidecar and `redis-pvxs-ioc` share a PVA network, but they are separate processes with separate failure domains.
-See [`reccaster.md`](reccaster.md) for RecCaster discovery and RecCeiver configuration details.
-
-Common mistakes:
-
-- Do not mount only a `.dbd` and expect missing support code to appear.
-- Do not make normal users build images locally.
-- Do not enable CA unless the sidecar must serve legacy CA clients.
-
-## Use Your Sidecar Image
-
-Push the project sidecar image to the registry, then override the image:
-
-```yaml
-services:
-  legacy-ioc:
-    image: adregistry.fnal.gov/instrumentation/my-device-legacy-ioc@sha256:<digest>
-    environment:
-      LEGACY_IOC_ENABLE_CA: "NO"
-    volumes:
-      - ./iocBoot/st.cmd:/etc/legacy-ioc/st.cmd:ro
-```
-
-## Publishing The Sample Sidecar Image
-
-Maintainers only:
-
-```sh
-LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.5.0@sha256:91848ceecca14f65195be671a5fd78982366d9e28ad93bd91e046b69f75bd401 \
-  docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.legacy-sidecar.yml \
-    -f docker-compose.legacy-sidecar.build.yml \
-    --profile legacy \
-    build legacy-ioc
-
-LEGACY_IOC_IMAGE=adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:v0.5.0@sha256:91848ceecca14f65195be671a5fd78982366d9e28ad93bd91e046b69f75bd401 \
-  docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.legacy-sidecar.yml \
-    -f docker-compose.legacy-sidecar.build.yml \
-    --profile legacy \
-    push legacy-ioc
-```
-
-Project-specific sidecars should follow the same pattern: build a derived image, push it to the registry, then set `LEGACY_IOC_IMAGE` in that project's compose override. Do not make normal project startup depend on local image builds.
+Qualification used an isolated real RecCeiver, ChannelFinder 4.7.3 and
+Elasticsearch 8.11.4, including catalog-driven PVA reads with UDP disabled,
+rejected staging, alias/metadata updates, and receiver restart on a different
+port. Production fleet rollout is a separate deployment task.

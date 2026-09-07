@@ -31,6 +31,8 @@ not an assertion of reproducible-build provenance for that old image.
 2. Validate the standalone release in isolation. Ensure the service receives
    RecCeiver announcements on UDP 5049 and that PVA clients can reach its
    advertised address and TCP port.
+   The supplied core Compose stack publishes UDP 5049 directly, retaining the
+   `RECCASTER_UDP_HOST_PORT` host-port override.
 3. Verify the canonical PVs and aliases in ChannelFinder, read the structured
    `SYS:<instance>:discovery:status`, and perform PVA reads using the registered
    address and port. Verify alias/metadata changes and receiver restart before

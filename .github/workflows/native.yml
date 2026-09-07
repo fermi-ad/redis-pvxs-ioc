@@ -1,0 +1,62 @@
+name: Native Redis/PVA validation
+
+on:
+  pull_request:
+    branches: [main, dev/runtime-correctness-v0.8.2]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            sanitizer: none
+          - runner: ubuntu-24.04-arm
+            sanitizer: none
+          - runner: macos-14
+            sanitizer: none
+          - runner: ubuntu-24.04
+            sanitizer: address,undefined
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Fetch core dependencies
+        run: git submodule update --init --recursive third_party/epics-base third_party/pvxs third_party/redis-adapter third_party/yaml-cpp
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake perl libreadline-dev python3 redis-server
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install cmake readline redis
+      - name: Build pinned EPICS dependencies
+        run: |
+          make -C third_party/epics-base configure.install src.install -j4
+          make -C third_party/epics-base/modules libcom.install -j4
+          printf 'EPICS_BASE=%s/third_party/epics-base\n' "$PWD" > third_party/pvxs/configure/RELEASE.local
+          make -C third_party/pvxs/bundle libevent
+          make -C third_party/pvxs configure.install setup.install src.install tools.install -j4
+      - name: Configure and build minimal service
+        env:
+          SANITIZERS: ${{ matrix.sanitizer }}
+        run: |
+          flags=""
+          if test "$SANITIZERS" != none; then flags="-fsanitize=$SANITIZERS -fno-omit-frame-pointer"; fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DREDIS_PVXS_IOC_ENABLE_GRPC=OFF -DREDIS_PVXS_IOC_ENABLE_CHANNELFINDER=OFF \
+            -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_C_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="$flags"
+          cmake --build build -j4
+      - name: Test native runtime and access control
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build --output-on-failure

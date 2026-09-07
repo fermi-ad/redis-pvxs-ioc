@@ -195,7 +195,12 @@ def main():
                 assert "ALIAS:new" in get("ALIAS:new")
 
                 # A receiver restart gets a complete current-generation upload.
-                second.close()
+                # Queue stale advertisements, then restart on a different TCP
+                # port. Recovery must not spend a retry interval on each one.
+                for _ in range(50):
+                    receiver.udp.sendto(receiver.packet, receiver.target)
+                receiver.close()
+                receiver = Receiver(udp_port)
                 third = receiver.connect()
                 replay, identity = receiver.catalog(third)
                 assert replay == records and identity["CONFIG_GENERATION"] == "2"

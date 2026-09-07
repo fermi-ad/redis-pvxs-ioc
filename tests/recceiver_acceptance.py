@@ -104,6 +104,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, help="Path containing the upstream recceiver Python package")
     parser.add_argument("--ioc")
+    parser.add_argument("--pvxget")
     parser.add_argument("--receiver", action="store_true")
     parser.add_argument("--port", type=int)
     parser.add_argument("--catalog")
@@ -157,6 +158,17 @@ def main():
                 time.sleep(0.05)
             raise AssertionError("real RecCeiver catalog did not reach expected state")
 
+        def read_from_catalog(name, catalog):
+            if not args.pvxget:
+                return
+            location = properties(catalog[name])
+            endpoint = f"{location['iocIP']}:{location['pvaPort']}"
+            env = dict(os.environ, EPICS_PVA_AUTO_ADDR_LIST="NO", EPICS_PVA_ADDR_LIST="",
+                       EPICS_PVA_NAME_SERVERS=endpoint)
+            result = subprocess.check_output([args.pvxget, "-w", "3", name], env=env,
+                                             text=True, stderr=subprocess.STDOUT, timeout=5)
+            assert name in result
+
         try:
             receiver = start_receiver()
             ioc = subprocess.Popen([args.ioc, "--config", str(path)], stdout=log, stderr=log)
@@ -170,6 +182,7 @@ def main():
             assert value["units"] == "A"
             assert properties(catalog["RC:old-alias"])["alias"] == "RC:value"
             assert "SYS:recceiver-acceptance:discovery:status" in catalog
+            read_from_catalog("RC:old-alias", catalog)
             config["pvs"][0]["aliases"] = ["RC:new-alias"]
             config["pvs"][0]["metadata"]["units"] = "mA"
             temporary = path.with_suffix(".tmp")
@@ -180,6 +193,7 @@ def main():
                                     properties(data["RC:new-alias"]).get("pvStatus") == "Active" and
                                     properties(data["RC:old-alias"]).get("pvStatus") == "Inactive")
             assert properties(catalog["RC:value"])["units"] == "mA"
+            read_from_catalog("RC:new-alias", catalog)
             # A fresh receiver with an empty catalog is repopulated automatically.
             receiver.terminate()
             receiver.wait(timeout=5)
@@ -188,6 +202,7 @@ def main():
             catalog = await_catalog(lambda data: "RC:new-alias" in data and
                                     properties(data["RC:new-alias"]).get("pvStatus") == "Active")
             assert "RC:old-alias" not in catalog or properties(catalog["RC:old-alias"])["pvStatus"] == "Inactive"
+            read_from_catalog("RC:new-alias", catalog)
             backend = "HTTP ChannelFinder" if args.cf_url else "in-memory ChannelFinder client"
             print(f"real RecCeiver with {backend}: registration, aliases, metadata, removal and receiver restart passed")
         except Exception:

@@ -13,6 +13,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <unistd.h>
+#include <cstdlib>
+#include <epicsVersion.h>
 
 #include <pvxs/nt.h>
 #include <pvxs/server.h>
@@ -22,6 +25,7 @@
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/discovery.h"
 #if REDIS_PVXS_IOC_ENABLE_GRPC
 #include "redis_pvxs_ioc/rpc_pv.h"
 #endif
@@ -99,6 +103,17 @@ public:
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
         pvCountName_(adminPVName(serverConfig, "stats:pvCount")),
         backendHealthName_(adminPVName(serverConfig, "backend:health")) {
+    discoveryName_ = adminPVName(serverConfig, "discovery:status");
+    using pvxs::TypeCode;
+    using pvxs::Member;
+    auto discoveryValue = pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:discovery:1.0", {
+      Member(TypeCode::String, "state"), Member(TypeCode::String, "peer"), Member(TypeCode::String, "lastError"),
+      Member(TypeCode::UInt64, "desiredGeneration"), Member(TypeCode::UInt64, "synchronizedGeneration"),
+      Member(TypeCode::UInt64, "records"), Member(TypeCode::UInt64, "aliases"), Member(TypeCode::UInt64, "bytes"),
+      Member(TypeCode::UInt64, "uploads"), Member(TypeCode::UInt64, "failures"), Member(TypeCode::UInt64, "coalesced"),
+      Member(TypeCode::UInt64, "invalidAnnouncements"), Member(TypeCode::UInt16, "port")}).create();
+    discoveryValue["state"] = "disabled";
+    discovery_.open(discoveryValue);
     accessReloadName_ = adminPVName(serverConfig, "access:reload");
     accessEnabledName_ = adminPVName(serverConfig, "access:enabled");
     accessGenerationName_ = adminPVName(serverConfig, "access:generation");
@@ -193,6 +208,16 @@ public:
     accessRightsChanges_.open(rightsValue);
   }
 
+  void setDiscoveryStatus(const DiscoveryStatus& status) {
+    auto value = discovery_.fetch();
+    value["state"] = status.state; value["peer"] = status.peer; value["lastError"] = status.lastError;
+    value["desiredGeneration"] = status.desiredGeneration; value["synchronizedGeneration"] = status.synchronizedGeneration;
+    value["records"] = status.records; value["aliases"] = status.aliases; value["bytes"] = status.bytes;
+    value["uploads"] = status.uploads; value["failures"] = status.failures; value["coalesced"] = status.coalesced;
+    value["invalidAnnouncements"] = status.invalidAnnouncements; value["port"] = status.port;
+    discovery_.post(value);
+  }
+
   void install(pvxs::server::Server& server,
                AccessController* access,
                const AccessDefaultsConfig& defaults) {
@@ -201,6 +226,7 @@ public:
       if (access) access->addPV(name, pv, assignment);
       else server.addPV(name, pv);
     };
+    add(discoveryName_, discovery_, defaults.adminRead);
     add(reloadName_, reloadCommand_, defaults.adminWrite);
     add(versionName_, version_, defaults.adminRead);
     add(revisionName_, revision_, defaults.adminRead);
@@ -229,6 +255,7 @@ public:
       if (access) access->removePV(name);
       else server.removePV(name);
     };
+    remove(discoveryName_);
     remove(reloadName_);
     remove(versionName_);
     remove(revisionName_);
@@ -256,7 +283,7 @@ public:
     access.setAssignment(reloadName_, defaults.adminWrite);
     access.setAssignment(accessReloadName_, defaults.adminWrite);
     const std::vector<std::string> readNames{
-      versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
+      discoveryName_, versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
       lastStatusName_, lastErrorName_, pvCountName_, backendHealthName_, accessEnabledName_,
       accessGenerationName_, accessLastStatusName_, accessLastErrorName_,
       accessPolicyFingerprintName_, accessWatchStatusName_, accessActiveClientsName_,
@@ -310,6 +337,8 @@ private:
   bool accessConfigured_ = false;
   std::atomic<bool> reloadRequested_{false};
   std::atomic<bool> accessReloadRequested_{false};
+  pvxs::server::SharedPV discovery_ = pvxs::server::SharedPV::buildReadonly();
+  std::string discoveryName_;
   pvxs::server::SharedPV reloadCommand_;
   pvxs::server::SharedPV accessReloadCommand_;
   pvxs::server::SharedPV version_;
@@ -509,10 +538,39 @@ RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
   return rpcPVs;
 }
 
+std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
+    const AppConfig& config, const RpcMap& rpcs, unsigned short port, uint64_t generation) {
+  if (!config.discovery.enabled) return {};
+  std::map<std::string, std::string> identity{
+    {"IOCNAME", config.server.instance}, {"PVAS_SERVER_PORT", std::to_string(port)},
+    {"PVXS_PROTOCOL", "pva"}, {"EPICS_VERSION", EPICS_VERSION_STRING},
+    {"REDIS_PVXS_IOC_VERSION", REDIS_PVXS_IOC_VERSION}, {"CONFIG_GENERATION", std::to_string(generation)}};
+  char hostname[256]{};
+  if (gethostname(hostname, sizeof(hostname) - 1) == 0) identity["HOSTNAME"] = hostname;
+  for (const auto* key : {"HOSTNAME", "ENGINEER", "LOCATION", "CONTACT", "BUILDING", "SECTOR"})
+    if (const auto* value = std::getenv(key); value && *value) identity[key] = value;
+  std::vector<DiscoveryRecord> records;
+  for (const auto& pv : config.pvs) {
+    DiscoveryRecord record;
+    record.name = fullPVName(config.server, pv);
+    record.type = pv.shape == Shape::Array ? "epics:nt/NTScalarArray:1.0" : "epics:nt/NTScalar:1.0";
+    record.aliases = pv.aliases;
+    record.properties = {{"protocol", "pva"}, {"DESC", pv.metadata.description}, {"units", pv.metadata.units},
+                         {"type", toString(pv.type)}, {"shape", toString(pv.shape)}};
+    records.push_back(std::move(record));
+  }
+  for (const auto& name : adminPVNames(config.server))
+    records.push_back({name, "pvxs:diagnostic", {}, {{"protocol", "pva"}}});
+  for (const auto& rpc : rpcs) records.push_back({rpc.first, "pvxs:RPC", {}, {{"protocol", "pva"}}});
+  return prepareDiscoveryCatalog(config.discovery, generation, identity, records);
+}
+
 }  // namespace
 
 struct Application::Impl {
   pvxs::server::Server server;
+  std::unique_ptr<DiscoveryPublisher> discovery;
+  std::shared_ptr<const DiscoveryCatalog> catalog;
   std::shared_ptr<AccessController> access;
   std::unique_ptr<AdminNamespace> admin;
   AppConfig currentConfig;
@@ -556,6 +614,7 @@ bool Application::validateOnly(std::string& summary, std::string& error) const {
       throw std::runtime_error("rpc_services requires a build with REDIS_PVXS_IOC_ENABLE_GRPC=ON");
 #endif
     std::string policyFingerprint;
+    buildDiscoveryCatalog(config, {}, config.server.tcpPort.value_or(5075), 1);
     if (!validateAccessPolicy(config.access, requiredAccessAsgs(config), policyFingerprint, error)) {
       summary.clear();
       return false;
@@ -587,6 +646,11 @@ bool Application::start(std::string& error) {
       return false;
     }
     impl_->server.start();
+    if (config.discovery.enabled) {
+      impl_->discovery = std::make_unique<DiscoveryPublisher>(config.discovery);
+      impl_->discovery->publish(impl_->catalog);
+      impl_->admin->setDiscoveryStatus(impl_->discovery->status());
+    }
     started_ = true;
     return true;
   } catch (const std::exception& ex) {
@@ -634,6 +698,7 @@ void Application::pump() {
     impl_->lastHealthUpdate = now;
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
+      impl_->admin->setDiscoveryStatus(impl_->discovery ? impl_->discovery->status() : DiscoveryStatus{});
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     }
   }
@@ -644,6 +709,8 @@ void Application::stop() {
     return;
   }
 
+  impl_->discovery.reset();
+  impl_->catalog.reset();
   for (const auto& binding : pvBindings(impl_->currentConfig)) {
     impl_->removeEndpoint(binding.first);
   }
@@ -680,6 +747,10 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
     return false;
   }
 
+  if (!initialLoad && !sameDiscoveryConfig(impl_->currentConfig.discovery, config.discovery)) {
+    error = "discovery listener settings are immutable after startup; restart is required";
+    return false;
+  }
   bool policyActivated = false;
   const BeforeCommit activatePolicy = [&](std::string& activationError) {
     if (initialLoad || !impl_->access) return true;
@@ -741,6 +812,7 @@ bool Application::replaceAll(const AppConfig& config,
 
     AssignmentMap stagedRpcAssignments;
     auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments);
+    auto stagedCatalog = buildDiscoveryCatalog(config, stagedRpcPVs, impl_->server.config().tcp_port, generation);
     if (!beforeCommit(error)) {
       for (auto& item : staged) item.second->deactivate("staged config rejected");
       return false;
@@ -780,6 +852,8 @@ bool Application::replaceAll(const AppConfig& config,
     impl_->currentConfig = config;
     impl_->hasConfig = true;
     impl_->generation = generation;
+    impl_->catalog = std::move(stagedCatalog);
+    if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
 
     if (impl_->admin) {
       impl_->admin->setGeneration(generation);
@@ -868,6 +942,7 @@ bool Application::applyIncremental(const AppConfig& config,
 
     AssignmentMap stagedRpcAssignments;
     auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments);
+    auto stagedCatalog = buildDiscoveryCatalog(config, stagedRpcPVs, impl_->server.config().tcp_port, generation);
     if (!beforeCommit(error)) {
       for (auto& item : staged) item.second->deactivate("staged config rejected");
       return false;
@@ -948,6 +1023,8 @@ bool Application::applyIncremental(const AppConfig& config,
 
     impl_->currentConfig = config;
     impl_->generation = generation;
+    impl_->catalog = std::move(stagedCatalog);
+    if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
 
     if (impl_->admin) {
       impl_->admin->setGeneration(generation);

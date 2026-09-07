@@ -1,93 +1,112 @@
-# RecCaster Sidecar
+# Discovery
 
-RecCaster is included in the legacy IOC sidecar so conventional EPICS records can register with RecCeiver/ChannelFinder.
+Discovery is part of the core service. PVA clients find and connect to PVs using
+normal PVXS discovery. A native RecCaster-compatible client also registers the
+active catalog with RecCeiver, whose ChannelFinder processor maintains the
+searchable catalog. No sidecar, EPICS database, `iocInit()`, CA facade, manual
+upload, or IOC-side ChannelFinder credentials are needed.
 
-## Run
+This implementation targets v0.9.0. Published v0.8 images retain their previous
+behavior until upgraded to a validated release.
 
-```sh
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
+## Automatic registration
+
+Registration is enabled by default and listens for RecCeiver announcements on
+UDP 5049. RecCeiver supplies its TCP endpoint and server key. The service uploads
+canonical PVs, their aliases, built-in diagnostics, and successfully reflected
+RPC endpoints. The `IOCNAME` is `server.instance`, and `PVAS_SERVER_PORT` is the
+actual bound PVA TCP port, including when an ephemeral port was requested.
+`HOSTNAME` defaults to the system hostname; the environment can override it.
+`ENGINEER`, `LOCATION`, `CONTACT`, `BUILDING`, and `SECTOR` are included when set.
+No CA port is advertised.
+
+On each successful configuration reload, a new immutable catalog replaces the
+previous session. RecCeiver reconciles additions, removals, aliases, and changed
+metadata. Failed staging preserves the active catalog. A receiver restart
+triggers another full upload automatically. The direct
+[ChannelFinder tool](channelfinder-sync.md) remains available for explicit
+one-shot publication; it is not needed for automatic discovery.
+
+## Network setup
+
+Routed or host-network containers must receive UDP 5049 and reach the TCP
+endpoint advertised by RecCeiver. A bridge-network container needs a UDP mapping:
+
+```yaml
+services:
+  ioc:
+    ports:
+      - "5049:5049/udp"
 ```
 
-Check the RecCaster status records:
+Use a routed container address or a distinct configured port/announcement target
+for multiple services on one host. PVA clients also need the PVA routes described
+in [PVAccess networking](pva-networking.md); a catalog entry alone does not make
+a private container address reachable.
 
-```sh
-IOC_CONTAINER=redis-pvxs-ioc-demo
-PV_ENV='EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=239.128.1.6'
-PVX_BIN_DIR='/opt/redis-pvxs-ioc/bin/pvxs'
-
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:State-Sts"
-docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:Msg-I"
-```
-
-## How It Connects
-
-RecCaster does not know the ChannelFinder URL.
-
-- RecCaster listens for RecCeiver UDP announcements on port `5049`.
-- RecCeiver advertises its TCP host, TCP port, and server key.
-- RecCaster connects to that advertised TCP endpoint and uploads records.
-- RecCeiver writes to ChannelFinder when its `cf` processor is configured.
-
-The sample compose overlay publishes UDP `5049` from the host to the legacy sidecar so it can receive RecCeiver announcements on a bridge network:
-
-```sh
-RECCASTER_UDP_HOST_PORT=5049 \
-  docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
-Use a different `RECCASTER_UDP_HOST_PORT` only when running multiple local test stacks on the same host. Production `ipvlan` or directly routed container networking may not need host port publishing.
-
-RecCeiver-side settings are the important network/catalog settings:
+Existing RecCeiver installations use the same protocol. A typical receiver
+configuration is:
 
 ```ini
 [recceiver]
-addrlist = <ioc-broadcast-or-multicast-target>:5049
-bind = <recceiver-listen-ip>:<stable-tcp-port>
+addrlist = <service-broadcast-or-routed-address>:5049
+bind = <receiver-address>:<stable-tcp-port>
+procs = cf
 
 [cf]
-baseUrl = https://<channel-finder-host>/ChannelFinder
+baseUrl = https://<catalog-host>/ChannelFinder
 cfUsername = <service-user>
 cfPassword = <secret>
 verifySSL = True
+alias = True
+iocConnectionInfo = True
+recordType = True
+recordDesc = True
+infotags = protocol units type shape
+environment_vars = PVXS_PROTOCOL:protocol
 ```
 
-## IOC-Side Settings
+Retain existing site-specific receiver properties in `environment_vars` and
+`infotags`. RecCeiver owns catalog authorization and downstream delivery.
+RecCaster announcements and uploads use the existing unauthenticated protocol
+and belong on the trusted controls network. ACF still controls PVA operations;
+PV names remain discoverable when their values require authorization.
 
-The sample sidecar sets these defaults before startup:
+## Status and failure behavior
 
-```sh
-IOCNAME=legacy-ioc
-ENGINEER=redis-pvxs-ioc
-LOCATION=redis-pvxs-ioc-demo
-CONTACT=redis-pvxs-ioc
-BUILDING=demo
-SECTOR=demo
-RECCAST_TIMEOUT=20
-RECCAST_MAX_HOLDOFF=10
-```
+Read `SYS:<instance>:discovery:status` for structured fields:
 
-Override them as normal compose environment variables. `CONTACT`, `BUILDING`, and `SECTOR` are sent with each RecCaster upload.
+- `state`: idle, listening, connecting, uploading, uploaded, synchronized, error,
+  or disabled;
+- `peer`, `port`, and bounded `lastError`;
+- desired and synchronized config generations;
+- catalog records, aliases and encoded bytes;
+- uploads, failures, coalesced replacements, and invalid announcements.
 
-## Upstream Source and Fermilab Delta
+`uploaded` means the complete catalog was sent. `synchronized` additionally
+means the RecCeiver heartbeat exchange is working. Neither is a downstream
+ChannelFinder transaction acknowledgement; use the receiver's logs and catalog
+for that delivery status. Counters are process-local.
 
-RecCaster is pinned from the standalone public
-[`ChannelFinder/reccaster`](https://github.com/ChannelFinder/reccaster)
-repository. Upstream moved it from `ChannelFinder/recsync/client` in June 2026
-and subsequently removed that old source tree.
+Network operations run on one worker with a total connect/greeting/upload
+budget. Heartbeat receive waits are bounded at four times that budget. Reload
+and shutdown interrupt socket waits immediately. A stalled receiver never
+blocks a PVA callback. The newest catalog supersedes older queued replacements;
+there is no unbounded queue of generations. Catalog length/count limits and
+protocol field limits are checked before activation. See the
+[configuration reference](configuration.md#discovery) for overrides.
 
-The local Fermilab `RecCaster-1.8` tree was originally compared with the public
-`ChannelFinder/recsync` client tag `1.9.2`. The pinned `1.9.2` client source was
-then compared with standalone RecCaster commit
-`254723063a2b7a7c80d8e50f05efa8d748f429dd` during the repository migration.
+## Acceptance
 
-Observed differences are build/layout only:
+`discovery_e2e` exercises the real IOC with a protocol receiver and verifies PVA
+lookups, aliases, rejected reloads, replacement, reconnect, malformed control
+messages, and bounded shutdown. `discovery_tests` covers catalog count/byte
+limits, invalid names, and coalesced replacements.
 
-- Fermilab's top-level `Makefile` disables upstream demo/iocBoot dirs.
-- Fermilab's `configure/RELEASE` adjusts local include depth for
-  `RELEASE.local`.
-- The standalone upstream commit updates documentation and
-  `configure/RELEASE` include paths for its new repository root.
-
-No C source, DBD, database, or protocol differences were observed. This project
-tracks public RecCaster directly and should only add a patch layer if a real
-source delta appears later.
+`tests/recceiver_acceptance.py` uses upstream RecCeiver commit
+`864b162cb05fa140e67e056bda86ed750447c3d4` and its unmodified ChannelFinder
+processor with an in-memory client. It verifies actual protocol parsing,
+property translation, alias retirement, and receiver restart. Hosted native CI
+runs this acceptance without a production catalog. Release qualification also
+requires the isolated deployed ChannelFinder/PVA discovery exercise before the
+legacy sidecar retirement is promoted.

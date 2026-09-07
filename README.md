@@ -9,6 +9,10 @@ Redis-backed EPICS process variables defined by YAML.
 
 ## Key features
 
+- **Automatic discovery:** PVA search stays native, and the service registers
+  its PVs, aliases, diagnostics, and reflected RPCs with RecCeiver automatically.
+  Catalog updates follow successful reloads and recover after receiver restarts.
+  See [Discovery](docs/reccaster.md).
 - **Generation-based hot reload:** reload through `SIGHUP` or a PVA command;
   compatible Redis subscriptions stay live, changed PVs are staged, and invalid
   replacements are rejected while the active generation keeps serving.

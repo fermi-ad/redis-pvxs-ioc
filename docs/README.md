@@ -24,7 +24,7 @@
   as RPC PVs.
 - [Legacy IOC sidecar](legacy-sidecar.md): experimental `.db` and support-module
   compatibility lane.
-- [RecCaster sidecar](reccaster.md): conventional IOC record cataloging.
+- [Discovery](reccaster.md): native RecCeiver catalog registration and PVA search.
 
 ## Contributors
 

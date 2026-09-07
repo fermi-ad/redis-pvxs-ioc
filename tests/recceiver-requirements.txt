@@ -1,0 +1,3 @@
+Twisted==25.5.0
+requests==2.32.5
+channelfinder @ https://github.com/ChannelFinder/pyCFClient/archive/62e8f909feb2f2efdc0324c7f521f0c78abbf89b.zip

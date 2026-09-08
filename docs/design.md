@@ -12,8 +12,8 @@ variables over PVAccess without loading an EPICS database or calling `iocInit()`
   forwarding.
 - Redis is the value plane for configured reads, writes, confirmations, and alarm
   stream events. One generation may use multiple independent Redis servers.
-- The legacy conventional IOC is a separate, optional sidecar with its own image
-  and release history.
+- Native RecCeiver registration publishes the active PVA catalog automatically.
+  Discovery has its own bounded worker and follows successful generation activation.
 
 ## Startup and configuration
 
@@ -78,8 +78,8 @@ verification commands are in [`operations.md`](operations.md).
   generation and publication for configured Redis PVs.
 - [`rpc-forwarding.md`](rpc-forwarding.md) documents reflection-based PVA RPC to
   gRPC forwarding.
-- [`legacy-sidecar.md`](legacy-sidecar.md) documents the experimental conventional
-  IOC compatibility path. It is not part of the main runtime process.
+- [`reccaster.md`](reccaster.md) documents native RecCeiver discovery and catalog
+  reconciliation without a conventional IOC.
 
 ## Dependencies and releases
 

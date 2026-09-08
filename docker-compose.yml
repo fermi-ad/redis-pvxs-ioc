@@ -13,6 +13,8 @@ services:
   ioc:
     image: ${REDIS_PVXS_IOC_IMAGE:-adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.1@sha256:73ef6e1ca9e8e6c344e2663f841186050629b49a3f1ebe3c3ffa1e73ce4bfad5}
     container_name: ${REDIS_PVXS_IOC_CONTAINER_NAME:-redis-pvxs-ioc-demo}
+    ports:
+      - "${RECCASTER_UDP_HOST_PORT:-5049}:5049/udp"
     networks:
       - redis-pvxs-ioc
     depends_on:

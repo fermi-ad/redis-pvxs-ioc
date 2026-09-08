@@ -30,7 +30,10 @@ one-shot publication; it is not needed for automatic discovery.
 ## Network setup
 
 Routed or host-network containers must receive UDP 5049 and reach the TCP
-endpoint advertised by RecCeiver. A bridge-network container needs a UDP mapping:
+endpoint advertised by RecCeiver. A bridge-network container needs a UDP mapping.
+
+The supplied Compose stack already publishes UDP 5049 for the core service;
+`RECCASTER_UDP_HOST_PORT` overrides the host port. Custom bridge deployments use:
 
 ```yaml
 services:

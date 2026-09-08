@@ -2,7 +2,8 @@
 
 `redis-pvxs-ioc` is a released, standalone PVAccess service with a YAML definition
 plane and Redis value plane. This document separates current behavior from tracked
-future work; it is not ordered by business priority.
+future work. The ordered [path to v0.9.0 and v1.0 RC](roadmap-v0.9.md)
+is the release checklist and maps each review finding to an outcome.
 
 ## Supported now
 
@@ -27,8 +28,7 @@ future work; it is not ordered by business priority.
 - generic reflection-based PVA RPC to gRPC forwarding
 - semver, embedded source revision, OCI image metadata, and immutable image digests
 - packaged PVXS command-line tools in the runtime image
-- an independently versioned, experimental conventional IOC sidecar for selected
-  `.db`, RecCaster, and support-module workflows
+- native RecCeiver catalog registration with alias/metadata updates and recovery
 
 ## Not supported now
 
@@ -64,19 +64,12 @@ definition set before cutover and leave the active generation untouched on error
 See [`normative-types-roadmap.md`](normative-types-roadmap.md) for the target type
 families and implementation guardrails.
 
-### Compatibility boundaries
+### Product boundary
 
-- [#13: Define a CA compatibility facade](https://github.com/fermi-ad/redis-pvxs-ioc/issues/13)
-- [#68: Decide whether the legacy sidecar remains in the core product](https://github.com/fermi-ad/redis-pvxs-ioc/issues/68)
-
-The main process remains PVA-first. Any CA or conventional IOC compatibility path
-must stay outside the main runtime so it does not reintroduce database lifecycle
-or weaken hot-reload guarantees.
-
-The initial sidecar implementation issue
-[#14](https://github.com/fermi-ad/redis-pvxs-ioc/issues/14) is complete. Further
-support-module expansion is deferred while #68 determines whether the sidecar is
-a maintained product surface, an example, or a separately owned project.
+Automatic discovery is a v0.9.0 release requirement. The standalone PVA service
+owns it; conventional IOC hosting and a CA facade are outside this product.
+The legacy sidecar is retired, with historical images and source retained in
+[the migration notes](legacy-sidecar.md). No replacement repository is planned.
 
 ### Release maturity
 
@@ -88,8 +81,7 @@ and keeping checked-in image examples synchronized with immutable release digest
 ## Expected public-interface evolution
 
 Future work may introduce a versioned definition schema, new normative PVA types,
-Redis-backed definitions, and ASG assignment. Compatibility work may add separate
-PVA/CA client adapters. None of these should silently reinterpret an existing YAML
+and Redis-backed definitions. Native ASG assignment already exists. None of these should silently reinterpret an existing YAML
 contract or change the meaning of current `NTScalar`/`NTScalarArray` PVs.
 
 ## Acceptance principles

@@ -45,7 +45,6 @@ body:
         - Published container image
         - Locally built container image
         - Native build
-        - Legacy sidecar
         - Other
     validations:
       required: true

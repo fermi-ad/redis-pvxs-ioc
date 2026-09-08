@@ -176,6 +176,7 @@ endif()
 add_library(redis-pvxs-ioc-core STATIC
   src/access_control.cpp
   src/config.cpp
+  src/discovery.cpp
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
@@ -250,6 +251,18 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- $<TARGET_FILE:runtime_tests>)
   set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
+
+  add_test(NAME discovery_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/discovery_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(discovery_e2e PROPERTIES TIMEOUT 75)
+
+  add_executable(discovery_tests tests/discovery_tests.cpp)
+  target_link_libraries(discovery_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(discovery_tests PRIVATE -UNDEBUG)
+  add_test(NAME discovery_tests COMMAND discovery_tests)
+  set_tests_properties(discovery_tests PROPERTIES TIMEOUT 15)
 
   add_executable(config_tests tests/config_tests.cpp)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)

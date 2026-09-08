@@ -5,6 +5,7 @@ import os
 import pathlib
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -42,8 +43,10 @@ with tempfile.TemporaryDirectory(prefix='redis-pvxs-test-') as directory:
             result = subprocess.run(command, env=dict(os.environ, REDIS_PVXS_TEST_REDIS_PORT=str(port)),
                                     timeout=args.timeout)
             if result.returncode:
-                print(logfile.read_text(), flush=True)
                 raise SystemExit(result.returncode)
+        except (Exception, SystemExit):
+            print(logfile.read_text(), file=sys.stderr, flush=True)
+            raise
         finally:
             redis.terminate()
             try:

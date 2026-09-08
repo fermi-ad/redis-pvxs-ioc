@@ -102,14 +102,14 @@ public:
   const std::string& fullName() const override { return fullName_; }
   pvxs::server::SharedPV& sharedPV() override { return pv_; }
   bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
-  void activate() override { activated_ = true; }
+  void activate() override { committed_ = true; }
 
   void reconfigure(const PVConfig& config, uint64_t generation) override {
     AlarmState state;
     bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_) return;
+      if (!alive_) return;
       const bool sameTransform = config_.transform.has_value() == config.transform.has_value() &&
           (!config_.transform || (config_.transform->scale == config.transform->scale &&
                                   config_.transform->offset == config.transform->offset));
@@ -128,7 +128,7 @@ public:
   }
 
   void deactivate(const std::string& reason) override {
-    if (!active_.exchange(false)) return;
+    if (!alive_.exchange(false)) return;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++commandEpoch_;
@@ -183,7 +183,7 @@ private:
   }
 
   void publishAlarm(const AlarmState& state, bool changed) {
-    if (changed && active_.load() && activated_.load() && alarmPublisher_)
+    if (changed && alive_.load() && committed_.load() && alarmPublisher_)
       alarmPublisher_->publishTransition(fullName_, state);
   }
 
@@ -191,7 +191,7 @@ private:
     // Evaluate every observed sample for alarms and confirmations, including
     // intermediate values in a batch. Confirmation data never changes readback.
     for (const auto& entry : data) {
-      if (!active_) return;
+      if (!alive_) return;
       ValueType raw{};
       const auto timestamp = RA_Time(entry.first);
       if (!decode(entry.second, raw) || !timestamp.ok()) {
@@ -207,7 +207,7 @@ private:
     bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_) return;
+      if (!alive_) return;
       sourceValid_ = false;
       sourceError_ = error;
       auto value = pv_.fetch();
@@ -224,7 +224,7 @@ private:
     bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_) return;
+      if (!alive_) return;
       if (canConfirm) {
         for (auto& item : pendingPuts_) {
           auto& pending = *item.second;
@@ -262,7 +262,7 @@ private:
     uint64_t epoch;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_ || !activated_) { op->error("generation is no longer active"); return; }
+      if (!alive_ || !committed_) { op->error("generation is no longer active"); return; }
       current = config_;
       epoch = commandEpoch_;
     }
@@ -286,7 +286,7 @@ private:
     RA_Time writeTime;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_ || commandEpoch_ != epoch) { op->error("write configuration changed"); return; }
+      if (!alive_ || commandEpoch_ != epoch) { op->error("write configuration changed"); return; }
       if (pending) {
         pending->id = ++nextPendingId_;
         pendingPuts_[pending->id] = pending;
@@ -305,7 +305,7 @@ private:
     }
     std::unique_lock<std::mutex> lock(mutex_);
     const bool completed = pending->cv.wait_for(lock, std::chrono::milliseconds(current.confirm->timeoutMs), [&] {
-      return pending->done || !active_ || commandEpoch_ != epoch;
+      return pending->done || !alive_ || commandEpoch_ != epoch;
     });
     pendingPuts_.erase(pending->id);
     const auto error = pending->error;
@@ -330,8 +330,8 @@ private:
   uint64_t generation_ = 0;
   uint64_t commandEpoch_ = 0;
   pvxs::server::SharedPV pv_;
-  std::atomic<bool> active_{true};
-  std::atomic<bool> activated_{false};
+  std::atomic<bool> alive_{true};       // false once retired
+  std::atomic<bool> committed_{false};  // true after staging commits
   RedisAdapter::ReaderHandle readReader_, confirmReader_;
   std::string readCursor_;
   ValueType lastRaw_{};

@@ -36,8 +36,20 @@ The default test build also requires Python 3 and `redis-server`. CTest starts
 an isolated loopback Redis fixture and removes it when the runtime test exits.
 Use `-DREDIS_PVXS_IOC_BUILD_TESTS=OFF` only for builds that will be tested separately.
 
-gRPC and Protocol Buffers are mandatory build dependencies even when the
-runtime configuration has no `rpc_services`.
+The official image enables both integrations. A minimal Redis/PVA build needs
+neither gRPC/Protobuf nor curl:
+
+```sh
+cmake -S . -B build \
+  -DREDIS_PVXS_IOC_ENABLE_GRPC=OFF \
+  -DREDIS_PVXS_IOC_ENABLE_CHANNELFINDER=OFF
+```
+
+The two options are independent and default to `ON`. A build without gRPC
+rejects configured `rpc_services` explicitly in both `--check-config` and
+startup. Disabling ChannelFinder omits its publication tool and tests; stored
+catalog metadata remains compatible. CMake verifies the pinned Base
+`asRefreshHag(unsigned*)` extension at configuration time.
 
 Ubuntu 24.04:
 
@@ -74,6 +86,12 @@ make -C third_party/pvxs configure.install setup.install src.install \
 
 The main service links EPICS `libCom` and standalone PVXS. It does not require
 an EPICS database, `pvxsIoc`, or `iocInit()`.
+
+Let PVXS select its libevent libraries. Linking the monolithic `libevent` in
+addition to PVXS's `event_core` and `event_pthreads` dependencies creates
+duplicate event-threading state on macOS and can block PVA server startup.
+The native CI jobs exercise actual PVA server/client operations on Linux amd64,
+Linux arm64, and macOS arm64 to detect this class of build problem.
 
 ## Build and test the service
 

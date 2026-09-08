@@ -86,3 +86,10 @@ write, alarm, successful reload, rejected reload, and diagnostic PV validation.
 The default Compose stack uses a private bridge, so validate it inside the
 container. A real controls deployment needs a routable `ipvlan`, `macvlan`, or
 host-network identity. See [`pva-networking.md`](pva-networking.md).
+
+
+The `SYS:<instance>:config:lastDiff` read-only PV contains the JSON difference
+between the active configuration and the last successfully parsed reload
+request, including requests later rejected during staging. It uses the same
+categories as `--diff-config` and does not include credential values. Existing
+config status/error/generation PVs remain available.

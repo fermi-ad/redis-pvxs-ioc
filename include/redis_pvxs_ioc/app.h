@@ -12,7 +12,7 @@ public:
   explicit Application(std::string configPath);
   ~Application();
 
-  bool validateOnly(std::string& summary, std::string& error) const;
+  bool validateOnly(std::string& summary, std::string& error, struct AppConfig* normalized = nullptr) const;
   bool start(std::string& error);
   void requestReload();
   void pump();

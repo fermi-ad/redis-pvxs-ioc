@@ -33,6 +33,7 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:access:deniedReads` | int64/read | Process-lifetime denied-read count |
 | `SYS:<instance>:access:deniedWrites` | int64/read | Process-lifetime denied-write count |
 | `SYS:<instance>:access:rightsChanges` | int64/read | Process-lifetime changed-rights count |
+| `SYS:<instance>:access:operations` | structure/read | Authorized PUT/RPC counts, completion outcomes and live denial-rate state |
 
 ## Reload
 

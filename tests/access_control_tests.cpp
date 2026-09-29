@@ -288,6 +288,17 @@ ASG(DECISION) {
   watched.pump();
   assert(watched.status().generation == beforeConcurrentReloads + 16u);
   assert(watched.status().lastError.find("cannot open") != std::string::npos);
+  file.write("ASG(WATCHED) { RULE(0, WRITE) }\n");
+  std::this_thread::sleep_for(std::chrono::milliseconds(110));
+  watched.pump();
+  assert(watched.status().generation == beforeConcurrentReloads + 16u);
+  assert(watched.status().lastStatus == "watch active" && watched.status().lastError.empty());
+  file.write("ASG(WATCHED) { RULE(0, READ) }\n");
+  std::this_thread::sleep_for(std::chrono::milliseconds(110));
+  watched.pump();
+  std::this_thread::sleep_for(std::chrono::milliseconds(110));
+  watched.pump();
+  assert(watched.status().generation == beforeConcurrentReloads + 17u);
   auto disabledReload = config;
   disabledReload.enabled = false;
   assert(!watched.reconfigure(disabledReload, {"WATCHED"}, error));

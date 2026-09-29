@@ -42,6 +42,14 @@ def main():
         versioned = dict(base, schema_version=1)
         assert check(versioned)["legacy_input"] is False
         unchanged(diff(versioned))
+        defaults = dict(write_workers=4, queued_writes_per_pv=16, queued_write_bytes=67108864,
+                        max_payload_bytes=33554432)
+        unchanged(diff(dict(base, limits=defaults)))
+        check(dict(base, limits=defaults))
+        assert diff(dict(base, limits=dict(defaults, operation_timeout_ms=2000)))["restart_required"] == ["limits"]
+        for invalid in (dict(write_workers=0), dict(queued_writes_per_pv=0), dict(queued_write_bytes=1023),
+                        dict(max_payload_bytes=0), dict(operation_timeout_ms=0), dict(unknown=1)):
+            check(dict(base, limits=invalid), False)
         reordered = copy.deepcopy(versioned)
         reordered["pvs"][0]["aliases"].reverse()
         unchanged(diff(reordered))

@@ -181,6 +181,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/util.cpp
   src/alarm_publisher.cpp
   src/runtime.cpp
+  src/operation_queue.cpp
   src/app.cpp
   ${REDIS_ADAPTER_SOURCES}
 )
@@ -243,6 +244,14 @@ install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
+  find_package(Threads REQUIRED)
+
+  add_executable(operation_queue_tests tests/operation_queue_tests.cpp src/operation_queue.cpp)
+  target_include_directories(operation_queue_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(operation_queue_tests PRIVATE Threads::Threads)
+  target_compile_options(operation_queue_tests PRIVATE -UNDEBUG)
+  add_test(NAME operation_queue_tests COMMAND operation_queue_tests)
+  set_tests_properties(operation_queue_tests PROPERTIES TIMEOUT 15)
 
   add_executable(endpoint_tests tests/endpoint_tests.cpp)
   target_link_libraries(endpoint_tests PRIVATE redis-pvxs-ioc-core)
@@ -284,6 +293,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- $<TARGET_FILE:runtime_tests>)
   set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
+
+  add_executable(operation_runtime_tests tests/operation_runtime_tests.cpp)
+  target_link_libraries(operation_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(operation_runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME operation_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:operation_runtime_tests>)
+  set_tests_properties(operation_runtime_tests PROPERTIES TIMEOUT 75)
 
   add_test(NAME reload_resources_e2e COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --

@@ -18,6 +18,8 @@
 #include "RedisAdapter.hpp"
 
 #include "redis_pvxs_ioc/alarm_publisher.h"
+#include "redis_pvxs_ioc/access_control.h"
+#include "redis_pvxs_ioc/queued_exec.h"
 #include "redis_pvxs_ioc/util.h"
 
 namespace redis_pvxs_ioc {
@@ -51,11 +53,13 @@ public:
                std::shared_ptr<RedisAdapter> readRedis,
                std::shared_ptr<RedisAdapter> writeRedis,
                std::shared_ptr<RedisAdapter> confirmRedis,
-               std::shared_ptr<AlarmPublisher> alarmPublisher, uint64_t generation)
+               std::shared_ptr<AlarmPublisher> alarmPublisher, uint64_t generation,
+               std::shared_ptr<OperationQueue> operations, OperationLimitsConfig limits)
       : config_(std::move(config)), readRedis_(std::move(readRedis)),
         writeRedis_(std::move(writeRedis)), confirmRedis_(std::move(confirmRedis)),
         alarmPublisher_(std::move(alarmPublisher)), fullName_(fullPVName(serverConfig, config_)),
-        generation_(generation),
+        generation_(generation), operations_(std::move(operations)), limits_(limits),
+        confirmationMs_(config_.confirm ? config_.confirm->timeoutMs : 0),
         pv_(config_.write ? pvxs::server::SharedPV::buildMailbox() : pvxs::server::SharedPV::buildReadonly()) {}
 
   ~TypedRuntime() override { deactivate("runtime destroyed"); }
@@ -154,9 +158,9 @@ private:
     std::condition_variable cv;
   };
 
-  static bool decode(const RedisAdapter::Attrs& fields, ValueType& raw) {
-    if constexpr (Array) return RedisAdapter::decodeArray(fields, raw);
-    else return RedisAdapter::decodeScalar(fields, raw);
+  bool decode(const RedisAdapter::Attrs& fields, ValueType& raw) const {
+    if constexpr (Array) return RedisAdapter::decodeArray(fields, raw, limits_.maxPayloadBytes);
+    else return RedisAdapter::decodeScalar(fields, raw, limits_.maxPayloadBytes);
   }
 
   AlarmState populateValue(pvxs::Value& value) {
@@ -267,62 +271,116 @@ private:
   }
 
   void handlePut(std::unique_ptr<pvxs::server::ExecOp>&& op, pvxs::Value&& value) {
+    // Admission must not wait behind the worker's network dispatch fence.
+    if (!alive_ || !committed_) { op->error("generation is no longer active"); return; }
+    const auto epoch = commandEpoch_.load();
+    size_t bytes = sizeof(T);
+    try {
+      if constexpr (Array) {
+        const auto array = value["value"].as<pvxs::shared_array<const T>>();
+        if (array.size() > limits_.maxPayloadBytes / sizeof(T)) {
+          op->error("write payload exceeds max_payload_bytes"); return;
+        }
+        bytes = array.size() * sizeof(T);
+      } else if constexpr (std::is_same_v<T, std::string>) {
+        bytes = value["value"].as<std::string>().size();
+      }
+      if (bytes > limits_.maxPayloadBytes) { op->error("write payload exceeds max_payload_bytes"); return; }
+    } catch (const std::exception& ex) {
+      op->error(std::string("invalid put value: ") + ex.what()); return;
+    }
+    const auto deadline = OperationQueue::Clock::now() + std::chrono::milliseconds(
+        limits_.operationTimeoutMs.value_or(static_cast<uint32_t>(std::max(5000, confirmationMs_ + 2000))));
+    auto request = QueuedExec::create(std::move(op), operations_);
+    auto self = this->shared_from_this();
+    const auto ticket = operations_->submit({fullName_, bytes, deadline,
+        [self, request, epoch, deadline, value = std::move(value)]() mutable {
+          self->dispatchPut(request, std::move(value), epoch, deadline);
+        },
+        [request](OperationFailure, const std::string& message) { request->error(message); }});
+    request->ticket(operations_, ticket);
+  }
+
+  void dispatchPut(const std::shared_ptr<QueuedExec>& request, pvxs::Value value,
+                   uint64_t epoch, OperationQueue::Clock::time_point deadline) {
+    if (request->stopped()) return;
     PVConfig current;
-    uint64_t epoch;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!alive_ || !committed_) { op->error("generation is no longer active"); return; }
+      if (!alive_ || !committed_ || commandEpoch_ != epoch) {
+        request->error("write configuration changed before dispatch"); return;
+      }
       current = config_;
-      epoch = commandEpoch_;
     }
     ValueType present{};
     try {
       if constexpr (Array) present = arrayValueFrom<T>(value);
       else present = scalarValueFrom<T>(value);
     } catch (const std::exception& ex) {
-      op->error(std::string("invalid put value: ") + ex.what());
-      return;
+      request->error(std::string("invalid put value: ") + ex.what()); return;
     }
     const auto raw = applyInverseTransform(current, present);
     std::shared_ptr<PendingPut> pending;
     if (current.confirm) {
+      if (request->stopped()) return;
       const auto snapshot = confirmRedis_->getStreamSnapshot(current.confirm->key);
-      if (!snapshot.connected) { op->error("confirmation backend unavailable"); return; }
+      if (!snapshot.connected) { request->error("confirmation backend unavailable"); return; }
       pending = std::make_shared<PendingPut>();
       pending->expectedRaw = raw;
       pending->afterId = snapshot.id;
+      std::weak_ptr<PendingPut> weak = pending;
+      request->wake([weak] { if (const auto item = weak.lock()) item->cv.notify_all(); });
     }
     RA_Time writeTime;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!alive_ || commandEpoch_ != epoch) { op->error("write configuration changed"); return; }
+      if (!alive_ || commandEpoch_ != epoch) { request->error("write configuration changed"); return; }
+      if (request->stopped()) return;
+      if (OperationQueue::Clock::now() >= deadline) {
+        request->error("total operation deadline exceeded before dispatch"); return;
+      }
+      const auto operation = request->operation();
+      if (!operation) return;
+      if (!authorizeWriteDispatch(*operation, value)) {
+        request->error("access denied at dispatch"); return;
+      }
+      if (request->stopped()) return;
       if (pending) {
         pending->id = ++nextPendingId_;
         pendingPuts_[pending->id] = pending;
       }
-      // Serialize the acceptance boundary with retirement. The v0.9 executor
-      // moves this bounded network operation off the PVA callback thread.
-      writeTime = writeToRedis(current, raw);
+      // Only one worker per canonical PV reaches this acceptance boundary.
+      // Retirement is serialized with dispatch; no command is ever replayed.
+      try { writeTime = writeToRedis(current, raw); }
+      catch (...) { if (pending) pendingPuts_.erase(pending->id); throw; }
       if (!writeTime.ok() && pending) pendingPuts_.erase(pending->id);
     }
-    if (!writeTime.ok()) { op->error("redis write failed; not retried"); return; }
+    if (!writeTime.ok()) { request->error("redis write failed; not retried"); return; }
     if (!pending) {
+      if (request->stopped()) return;
       if (sameRouteTarget(current.read, *current.write))
         handleRawUpdate(raw, static_cast<uint64_t>(writeTime.value), true);
-      op->reply();
+      if (OperationQueue::Clock::now() >= deadline)
+        request->error("total operation deadline exceeded after dispatch; not retried");
+      else request->reply();
       return;
     }
     std::unique_lock<std::mutex> lock(mutex_);
-    const bool completed = pending->cv.wait_for(lock, std::chrono::milliseconds(current.confirm->timeoutMs), [&] {
-      return pending->done || !alive_ || commandEpoch_ != epoch;
+    const auto confirmationDeadline = std::min(deadline,
+        OperationQueue::Clock::now() + std::chrono::milliseconds(current.confirm->timeoutMs));
+    const bool completed = pending->cv.wait_until(lock, confirmationDeadline, [&] {
+      return pending->done || request->stopped() || !alive_ || commandEpoch_ != epoch;
     });
     pendingPuts_.erase(pending->id);
     const auto error = pending->error;
     const bool confirmed = completed && pending->done;
     lock.unlock();
-    if (!error.empty()) op->error(error);
-    else if (!confirmed) op->error("backend confirmation timeout");
-    else op->reply();
+    if (request->stopped()) return;
+    if (!error.empty()) request->error(error);
+    else if (OperationQueue::Clock::now() >= deadline)
+      request->error("total operation deadline exceeded after dispatch; not retried");
+    else if (!confirmed) request->error("backend confirmation timeout; not retried");
+    else request->reply();
   }
 
   RA_Time writeToRedis(const PVConfig& config, const ValueType& raw) {
@@ -337,7 +395,10 @@ private:
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
   std::string fullName_;
   uint64_t generation_ = 0;
-  uint64_t commandEpoch_ = 0;
+  std::atomic<uint64_t> commandEpoch_{0};
+  std::shared_ptr<OperationQueue> operations_;
+  const OperationLimitsConfig limits_;
+  const int confirmationMs_;
   pvxs::server::SharedPV pv_;
   std::atomic<bool> alive_{true};       // false once retired
   std::atomic<bool> committed_{false};  // true after staging commits
@@ -358,7 +419,9 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
                                                 const PVConfig& config,
                                                 const RedisBackendRegistry& redisBackends,
                                                 const std::shared_ptr<AlarmPublisher>& alarmPublisher,
-                                                const uint64_t generation) {
+                                                const uint64_t generation,
+                                                std::shared_ptr<OperationQueue> operations,
+                                                OperationLimitsConfig limits) {
   const auto fullName = fullPVName(serverConfig, config);
   auto runtime = std::make_shared<TypedRuntime<T, Array>>(
       serverConfig,
@@ -367,7 +430,7 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
       config.write ? resolveBackend(redisBackends, config.write->backend, fullName, "write route") : nullptr,
       config.confirm ? resolveBackend(redisBackends, config.confirm->backend, fullName, "confirm route") : nullptr,
       alarmPublisher,
-      generation);
+      generation, std::move(operations), limits);
   runtime->initialize();
   return runtime;
 }
@@ -378,36 +441,42 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
                                            const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
-                                           const uint64_t generation) {
+                                           const uint64_t generation,
+                                                std::shared_ptr<OperationQueue> operations,
+                                                OperationLimitsConfig limits) {
+  if (!operations) {
+    static auto defaultOperations = std::make_shared<OperationQueue>();
+    operations = defaultOperations;
+  }
   switch (config.shape) {
   case Shape::Scalar:
     switch (config.type) {
-    case PrimitiveType::Boolean: return makeTypedRuntime<bool, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float32: return makeTypedRuntime<float, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float64: return makeTypedRuntime<double, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::String: return makeTypedRuntime<std::string, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Boolean: return makeTypedRuntime<bool, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Float32: return makeTypedRuntime<float, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Float64: return makeTypedRuntime<double, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::String: return makeTypedRuntime<std::string, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
     }
     break;
   case Shape::Array:
     switch (config.type) {
-    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float32: return makeTypedRuntime<float, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float64: return makeTypedRuntime<double, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Float32: return makeTypedRuntime<float, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
+    case PrimitiveType::Float64: return makeTypedRuntime<double, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits);
     case PrimitiveType::Boolean:
     case PrimitiveType::String:
       break;

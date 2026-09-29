@@ -31,12 +31,33 @@ redis: {}                 # or redis_backends, exactly one form
 alarms: {}                # optional
 channelfinder: {}         # optional
 discovery: {}             # optional; automatic RecCeiver registration enabled
+limits: {}                # optional; bounded write queues, deadlines and payloads
 pvs: []                   # optional when rpc_services is non-empty
 rpc_services: []          # optional when pvs is non-empty
 ```
 
 At least one `pvs` or `rpc_services` entry is required. The old `PVList`,
 `PVBase`, and `RedisBase` prototype keys are rejected.
+
+## Operation limits
+
+The optional top-level `limits` mapping controls write admission and scalar/array
+payload validation. Its defaults apply to omitted-version configurations as well
+as schema version 1. Changing limits requires a restart and is reported by the
+offline difference command.
+
+| Field | Default | Supported values |
+| --- | --- | --- |
+| `write_workers` | `4` | 1–64 |
+| `queued_writes_per_pv` | `16` | 1–4096, shared by canonical name and aliases |
+| `queued_write_bytes` | `67108864` | 1024–1073741824 bytes, including active reservations |
+| `max_payload_bytes` | `33554432` | 1–1073741824 bytes per scalar/array payload |
+| `operation_timeout_ms` | derived | 1–300000; omitted uses max(5000, confirmation timeout + 2000) |
+
+Oversized writes and full queues return explicit PVA errors. Oversized source
+payloads preserve the last good value and set an invalid alarm. Existing control
+limits remain advisory; this mapping does not enable value-range enforcement.
+
 
 ## `server`
 

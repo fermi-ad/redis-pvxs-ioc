@@ -66,4 +66,7 @@ bool validateAccessPolicy(const AccessConfig& config,
                           std::string& fingerprint,
                           std::string& error);
 
+// Recheck a queued write's current channel rights immediately before dispatch.
+bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value);
+
 }  // namespace redis_pvxs_ioc

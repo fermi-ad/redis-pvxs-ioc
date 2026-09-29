@@ -204,6 +204,15 @@ struct DiscoveryConfig {
   uint64_t maxBytes = 16u * 1024u * 1024u;
 };
 
+struct OperationLimitsConfig {
+  uint32_t writeWorkers = 4;
+  uint32_t queuedWritesPerPV = 16;
+  uint64_t queuedWriteBytes = 64u * 1024u * 1024u;
+  uint64_t maxPayloadBytes = 32u * 1024u * 1024u;
+  // Omitted: max(5 seconds, configured confirmation wait + 2 seconds).
+  std::optional<uint32_t> operationTimeoutMs;
+};
+
 struct AppConfig {
   uint32_t schemaVersion = 1;
   bool legacyInput = true;
@@ -213,6 +222,7 @@ struct AppConfig {
   AlarmStreamConfig alarms;
   ChannelFinderConfig channelFinder;
   DiscoveryConfig discovery;
+  OperationLimitsConfig limits;
   std::vector<PVConfig> pvs;
   std::vector<RpcServiceConfig> rpcServices;
 };
@@ -244,5 +254,6 @@ std::string versionPVName(const ServerConfig& server);
 std::string revisionPVName(const ServerConfig& server);
 std::vector<std::string> adminPVNames(const ServerConfig& server);
 bool sameDiscoveryConfig(const DiscoveryConfig& lhs, const DiscoveryConfig& rhs);
+bool sameOperationLimits(const OperationLimitsConfig& lhs, const OperationLimitsConfig& rhs);
 
 }  // namespace redis_pvxs_ioc

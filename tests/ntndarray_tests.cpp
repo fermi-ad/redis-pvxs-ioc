@@ -1,6 +1,7 @@
 #include <cassert>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,17 @@ bool throws(const std::function<void()>& fn) {
 }  // namespace
 
 int main() {
+  const auto minimumId = std::numeric_limits<int32_t>::min();
+  const auto maximumId = std::numeric_limits<int32_t>::max();
+  assert(skippedNDArrayFrames(10, 11) == 0);
+  assert(skippedNDArrayFrames(10, 14) == 3);
+  assert(skippedNDArrayFrames(10, 10) == 0);
+  assert(skippedNDArrayFrames(100, 0) == 0);  // producer reset
+  assert(skippedNDArrayFrames(maximumId, minimumId) == 0);  // rollover
+  assert(skippedNDArrayFrames(maximumId, maximumId) == 0);
+  assert(skippedNDArrayFrames(minimumId, maximumId) == 4294967294ULL);
+  assert(skippedNDArrayFrames(minimumId, 0) == 2147483647ULL);
+  assert(skippedNDArrayFrames(maximumId - 1, maximumId) == 0);
   const std::vector<std::pair<std::string, size_t>> types{
       {"0", 1}, {"1", 1}, {"2", 2}, {"3", 2}, {"4", 4},
       {"5", 4}, {"6", 8}, {"7", 8}, {"8", 4}, {"9", 8}};
@@ -121,6 +133,9 @@ int main() {
   assert(decoded.size() == endianInput.size());
   assert(decoded[0] == endianInput[0]);
   assert(decoded[1] == endianInput[1]);
+  const auto repeated = buildNTNDArrayValue(endianFrame, endianValue);
+  const auto repeatedPixels = repeated["value"].as<pvxs::shared_array<const uint16_t>>();
+  assert(repeatedPixels.size() == 2u && repeatedPixels[0] == 0x0102u && repeatedPixels[1] == 0xa0b0u);
 
   auto empty = createEmptyNTNDArray();
   assert(empty["alarm.severity"].as<int32_t>() == epicsSevInvalid);

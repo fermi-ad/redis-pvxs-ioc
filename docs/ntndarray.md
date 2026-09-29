@@ -86,6 +86,11 @@ increments `SYS:<instance>:stats:ndarrayInvalidFrames`. The next valid entry
 clears the alarm. Gaps in increasing frame IDs increment
 `SYS:<instance>:stats:ndarraySkippedFrames`.
 
+Frame-gap accounting uses the full signed 32-bit identifier range without
+overflow. Only forward gaps increment the skipped-frame count. Repeated IDs and
+backward changes, including producer resets and rollover, establish a new
+baseline without inventing a missing-frame count.
+
 ## Normative-type architecture
 
 NTNDArray is a concrete vertical slice, not a special-purpose camera service.

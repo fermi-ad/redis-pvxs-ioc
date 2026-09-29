@@ -120,9 +120,8 @@ private:
         {
           std::lock_guard<std::mutex> guard(mutex_);
           if (!active_.load()) return;
-          if (haveGoodFrame_ && frame.uniqueId > lastUniqueId_ + 1) {
-            stats_->ndarraySkippedFrames += static_cast<uint64_t>(frame.uniqueId - lastUniqueId_ - 1);
-          }
+          if (haveGoodFrame_)
+            stats_->ndarraySkippedFrames += skippedNDArrayFrames(lastUniqueId_, frame.uniqueId);
           lastUniqueId_ = frame.uniqueId;
           haveGoodFrame_ = true;
         }

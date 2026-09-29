@@ -162,9 +162,8 @@ void validateColorShape(const NDColorMode mode, const std::vector<int32_t>& shap
 
 template <typename T>
 void assignPixels(pvxs::Value& value, const char* member, const std::vector<uint8_t>& payload) {
-  std::vector<T> pixels(payload.size() / sizeof(T));
-  if (!payload.empty()) std::memcpy(pixels.data(), payload.data(), payload.size());
-  pvxs::shared_array<T> array(pixels.begin(), pixels.end());
+  pvxs::shared_array<T> array(payload.size() / sizeof(T));
+  if (!payload.empty()) std::memcpy(array.data(), payload.data(), payload.size());
   value[member] = array.freeze();
 }
 
@@ -192,6 +191,11 @@ size_t elementSize(const PrimitiveType type) {
   case PrimitiveType::String: break;
   }
   throw std::runtime_error("non-numeric NTNDArray element type");
+}
+
+uint64_t skippedNDArrayFrames(const int32_t previous, const int32_t current) noexcept {
+  const auto difference = static_cast<int64_t>(current) - static_cast<int64_t>(previous);
+  return difference > 1 ? static_cast<uint64_t>(difference - 1) : 0u;
 }
 
 NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs,

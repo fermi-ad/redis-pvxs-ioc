@@ -65,3 +65,8 @@ jobs:
           docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
           docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
             'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/NOTICE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
+
+      - name: Validate runtime identity and secret mounts
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: python3 tests/container_runtime.py "$IMAGE"

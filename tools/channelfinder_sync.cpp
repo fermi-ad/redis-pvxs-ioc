@@ -10,6 +10,7 @@
 
 #include "redis_pvxs_ioc/channelfinder.h"
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/secrets.h"
 
 namespace {
 
@@ -106,16 +107,11 @@ struct Headers {
   }
 };
 
-std::string envValue(const char* name) {
-  const auto* value = std::getenv(name);
-  return value == nullptr ? std::string{} : std::string{value};
-}
-
 void publishChannels(const redis_pvxs_ioc::ChannelFinderConfig& config, const std::string& json,
                      const Options& options) {
   const auto url = redis_pvxs_ioc::normalizeChannelFinderChannelsUrl(config.url);
-  const auto username = envValue("CHANNELFINDER_USERNAME");
-  const auto password = envValue("CHANNELFINDER_PASSWORD");
+  const auto username = redis_pvxs_ioc::credentialFromEnvironment("CHANNELFINDER_USERNAME");
+  const auto password = redis_pvxs_ioc::credentialFromEnvironment("CHANNELFINDER_PASSWORD");
   if (username.empty() != password.empty()) {
     throw std::runtime_error("CHANNELFINDER_USERNAME and CHANNELFINDER_PASSWORD must be set together");
   }

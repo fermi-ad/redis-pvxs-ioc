@@ -102,8 +102,13 @@ COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/redis-pvxs-ioc/
 
 RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 
+RUN groupadd --gid 10001 ioc && \
+    useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ioc
+
 ENV PATH=/opt/redis-pvxs-ioc/bin/pvxs:/opt/redis-pvxs-ioc/bin/epics-base:$PATH
 ENV LD_LIBRARY_PATH=/opt/redis-pvxs-ioc/lib/epics-base:/opt/redis-pvxs-ioc/lib/pvxs:/opt/redis-pvxs-ioc/lib/libevent
+
+USER 10001:10001
 
 ENTRYPOINT ["/opt/redis-pvxs-ioc/bin/container-entrypoint.sh"]
 CMD ["--config", "/etc/redis-pvxs-ioc/config.yaml"]

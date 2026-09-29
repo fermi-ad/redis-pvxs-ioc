@@ -41,7 +41,15 @@ docker compose \
   --config /etc/redis-pvxs-ioc/config.yaml
 ```
 
-Credentials come only from `CHANNELFINDER_USERNAME` and `CHANNELFINDER_PASSWORD`.
+Credentials come from `CHANNELFINDER_USERNAME` and `CHANNELFINDER_PASSWORD`, or
+their `_FILE` alternatives. For example, set `CHANNELFINDER_PASSWORD_FILE` to a
+mounted secret's path inside the container. Nonempty inline and file inputs for
+the same credential are mutually exclusive; an empty inline environment variable
+counts as unset for Compose compatibility. Username and password must still be
+supplied together. File inputs use the same bounded text-file rules as Redis
+credentials. They are not loaded during `--dry-run`, since it does not authenticate.
+See [Container runtime and secret files](container-runtime.md) for mounts and UID
+permissions. Credential files retain the same prohibition on authenticated redirects.
 
 The publisher uses a 3-second connection timeout, a 10-second total request
 deadline, and a 1 MiB response limit. Override them with

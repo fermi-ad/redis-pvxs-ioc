@@ -122,7 +122,9 @@ set(PVXS_EXTRA_INCLUDE_DIRS)
 set(PVXS_EXTRA_LINK_LIBS)
 if(EXISTS "${PVXS_BUNDLE_EVENT_LIB}")
   list(APPEND PVXS_EXTRA_INCLUDE_DIRS "${PVXS_USR}/include")
-  list(APPEND PVXS_EXTRA_LINK_LIBS "${PVXS_BUNDLE_EVENT_LIB}")
+  # PVXS already links event_core and event_pthreads. Linking monolithic
+  # libevent as well creates two copies of its global threading state on macOS
+  # and can deadlock server construction. Follow PVXS's transitive dependencies.
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR
     "Missing bundled libevent: ${PVXS_BUNDLE_EVENT_LIB}\n"

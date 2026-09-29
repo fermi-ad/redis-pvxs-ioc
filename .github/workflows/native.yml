@@ -25,6 +25,8 @@ jobs:
           - runner: ubuntu-24.04
             sanitizer: address,undefined
     runs-on: ${{ matrix.runner }}
+    # Linux ARM is a portability signal, not a 0.9.0 release platform.
+    continue-on-error: ${{ matrix.runner == 'ubuntu-24.04-arm' }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

@@ -15,6 +15,8 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:config:generation` | int64/read | Active generation, starting at `1` |
 | `SYS:<instance>:config:lastStatus` | string/read | Active/rejected/failed status |
 | `SYS:<instance>:config:lastError` | string/read | Last reload error; empty after success |
+| `SYS:<instance>:config:lastDiff` | string/read | JSON differences for the current attempt; `{}` if parsing failed |
+| `SYS:<instance>:config:reloadStatus` | structure/read | Attempt, phase, duration, change counts and per-backend outcomes |
 | `SYS:<instance>:stats:pvCount` | int64/read | Configured Redis-backed and RPC PV count |
 | `SYS:<instance>:stats:operations` | structure/read | Write queue counts, reservations, peaks and configured limits |
 | `SYS:<instance>:alarms:status` | structure/read | Alarm delivery state, outcomes, reconciliation and reservations |
@@ -44,6 +46,34 @@ The runtime parses and validates the entire replacement file, stages the next
 generation, and only then applies it. A successful reload increments
 `config:generation`, reports `generation <n> active`, and clears
 `config:lastError`.
+
+`config:reloadStatus` describes the latest startup or whole-file reload attempt.
+Its monotonically increasing `attempt` is separate from `activeGeneration` and
+`candidateGeneration`: rejected attempts do not advance the active generation.
+It reports the schema version, elapsed `durationMs` at each published phase, and
+`running`, `committed`, `committed-with-error`, `rejected` or `failed` state. The
+terminal duration includes parsing, preparation, cutover and synchronous refresh.
+Asynchronous alarm/discovery convergence is reported by their own diagnostics.
+Startup failures before PVA is available remain visible in the configuration log.
+
+Counts describe the parsed candidate's canonical Redis PVs: `added`, `removed`,
+`recreated` and `retained`; `metadataChanged` counts updates within retained
+runtimes. `aliasesChanged` and `accessChanged` are independent difference counts
+(access includes a policy/defaults/watcher entry). RPC changes remain in
+`config:lastDiff` and the `rpc` preparation phase. Counts on a rejected attempt
+describe proposed changes, not applied changes. `diffKnown=false` means parsing
+failed: counts and backend rows are cleared, as is `config:lastDiff`, so an older
+attempt cannot be mistaken for the failed candidate.
+
+The aligned `backends.name/action/preconnect/cutover` arrays record Redis backend
+preparation. Actions are `retained`, `created` or `removed`; preconnect is
+`connected`, `disconnected`, `failed`, `not-tested` or `not-applicable` at the
+time of preparation. A disconnected backend can still commit with fallback values;
+this snapshot is not a continuing health or readiness claim. Cutover is `active`
+or `removed` after commit, and `previous-preserved` or `not-activated` after
+rejection. Only attempted backends are included if construction fails early.
+No endpoints, credentials or values are embedded in these rows. A structured
+configuration log records the same terminal result, duration and counts.
 
 Parsing or schema errors report `reload failed`. A replacement that parses but
 cannot be safely applied reports `reload rejected`. In both cases the generation

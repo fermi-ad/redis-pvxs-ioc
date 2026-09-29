@@ -120,7 +120,11 @@ def main():
         assert diff(changed)["replacements"] == ["C:value"]
         changed = copy.deepcopy(base)
         changed["pvs"][0]["aliases"] = ["A:new"]
-        assert diff(changed)["replacements"] == ["C:value"]
+        report = diff(changed)
+        assert report["alias_changes"] == ["C:value"] and not report["replacements"]
+        changed["pvs"][0]["metadata"] = dict(description="retained metadata and alias change")
+        report = diff(changed)
+        assert report["metadata_changes"] == ["C:value"] and not report["replacements"]
         changed = copy.deepcopy(base)
         changed["pvs"][0]["name"] = "renamed"
         report = diff(changed)
@@ -134,6 +138,8 @@ def main():
         assert "secret-that-must-not-appear" not in json.dumps(check(changed))
         changed = copy.deepcopy(base)
         changed["pvs"][0]["aliases"] = ["SYS:offline:config:lastDiff"]
+        check(changed, False)
+        changed["pvs"][0]["aliases"] = ["SYS:offline:config:reloadStatus"]
         check(changed, False)
         changed = copy.deepcopy(base)
         changed["server"]["tcp_port"] = 5100

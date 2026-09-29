@@ -8,6 +8,7 @@ struct ConfigDiff {
   std::vector<std::string> removed;
   std::vector<std::string> replaced;
   std::vector<std::string> metadataChanged;
+  std::vector<std::string> aliasesChanged;
   std::vector<std::string> accessChanged;
   std::vector<std::string> backendsChanged;
   std::vector<std::string> rpcServicesChanged;

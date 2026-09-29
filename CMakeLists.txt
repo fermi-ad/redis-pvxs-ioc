@@ -285,6 +285,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     -- $<TARGET_FILE:runtime_tests>)
   set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
 
+  add_test(NAME reload_resources_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/reload_resources_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+    --pvxput ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxput)
+  set_tests_properties(reload_resources_e2e PROPERTIES TIMEOUT 75)
+
   add_test(NAME discovery_e2e COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/discovery_e2e.py

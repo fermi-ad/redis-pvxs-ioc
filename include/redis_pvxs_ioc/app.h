@@ -22,10 +22,6 @@ private:
   using BeforeCommit = std::function<bool(std::string&)>;
 
   bool applyConfig(const struct AppConfig& config, bool initialLoad, std::string& error);
-  bool replaceAll(const struct AppConfig& config,
-                  uint64_t generation,
-                  const BeforeCommit& beforeCommit,
-                  std::string& error);
   bool applyIncremental(const struct AppConfig& config,
                         uint64_t generation,
                         const BeforeCommit& beforeCommit,

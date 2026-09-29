@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--client", required=True)
     args = parser.parse_args()
     redis_port = int(os.environ["REDIS_PVXS_TEST_REDIS_PORT"])
-    for case, elements, clients in (("scalar", 1, 1), ("array", 32, 1), ("fanout", 32, 4)):
+    for case, elements, clients in (("scalar", 1, 1), ("array", 32, 1), ("fanout", 32, 16)):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]

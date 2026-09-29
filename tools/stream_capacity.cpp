@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
     require(producer.connected(), "private Redis unavailable");
     require(!producer.getStreamSnapshot("data").present(), "stream exists; use an isolated base key");
     pvxs::client::Config config; config.autoAddrList = false; config.addressList = {address};
+    config.udp_port = 0; // independent search listeners for clients sharing one test host
     std::vector<pvxs::client::Context> clients;
     std::mutex mutex;
     std::condition_variable changed;
@@ -128,9 +129,12 @@ int main(int argc, char** argv) {
                            : producer.addSingleList("data", payload, arguments)).ok(), "initial sample rejected");
     {
       std::unique_lock<std::mutex> lock(mutex);
-      require(changed.wait_for(lock, 5s, [&] {
+      const auto ready = changed.wait_for(lock, 5s, [&] {
         return !failure.empty() || std::all_of(observations.begin(), observations.end(), [](const auto& o) { return o.initial; });
-      }), "initial monitors timed out");
+      });
+      if (!ready) throw std::runtime_error("initial monitors timed out (" + std::to_string(std::count_if(
+          observations.begin(), observations.end(), [](const auto& o) { return o.initial; })) +
+          " of " + std::to_string(count) + " ready)");
       if (!failure.empty()) throw std::runtime_error(failure);
     }
     const auto start = Clock::now();

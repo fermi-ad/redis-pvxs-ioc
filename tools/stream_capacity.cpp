@@ -2,6 +2,7 @@
 // client contexts monitoring one canonical PV from a private Redis stream.
 #include "RedisAdapter.hpp"
 #include <pvxs/client.h>
+#include <pvxs/log.h>
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -30,6 +31,7 @@ uint32_t number(const std::string& value, uint32_t maximum) {
 
 int main(int argc, char** argv) {
   try {
+    pvxs::logger_config_env();
     std::string host = "127.0.0.1", base, pv, address, output;
     uint32_t port = 0, samples = 1000, rate = 100, elements = 1, count = 1;
     for (int i = 1; i < argc; ++i) {
@@ -58,7 +60,6 @@ int main(int argc, char** argv) {
     require(producer.connected(), "private Redis unavailable");
     require(!producer.getStreamSnapshot("data").present(), "stream exists; use an isolated base key");
     pvxs::client::Config config; config.autoAddrList = false; config.addressList = {address};
-    config.udp_port = 0; // independent search listeners for clients sharing one test host
     std::vector<pvxs::client::Context> clients;
     std::mutex mutex;
     std::condition_variable changed;

@@ -1,4 +1,5 @@
 #include "redis_pvxs_ioc/app.h"
+#include "redis_pvxs_ioc/ntndarray.h"
 #include "RedisAdapter.hpp"
 #include <cassert>
 #include <chrono>
@@ -53,6 +54,7 @@ int main() {
     if (changed) output << "    transform: {scale: 2, offset: 0}\n";
     output << "  - name: " << (changed ? "added" : "removed")
            << "\n    type: float64\n    shape: scalar\n    read: {key: other}\n";
+    output << "  - name: image\n    aliases: [TEST:imageAlias]\n    kind: ntndarray\n    read: {key: image}\n";
     assert(output.good());
   };
   writePolicy(true); writeConfig(false);
@@ -61,6 +63,12 @@ int main() {
   RedisAdapter producer("transaction", options);
   assert(producer.addSingleDouble("read", 4.).ok());
   assert(producer.addSingleDouble("other", 9.).ok());
+  const auto sendImage = [&](int id) {
+    RedisAdapter::Attrs fields{{"schema", kNTNDArrayRedisSchema}, {"data_type", "1"}, {"shape", "[4]"},
+                              {"color_mode", "mono"}, {"unique_id", std::to_string(id)}, {"_", std::string(4, char(id))}};
+    assert(producer.addSingleValue("image", fields).ok());
+  };
+  sendImage(1);
   Application app(configFile.string());
   std::string error;
   assert(app.start(error));
@@ -79,7 +87,7 @@ int main() {
   auto status = report();
   assert(status["kind"].as<std::string>() == "startup" && status["committed"].as<bool>());
   assert(status["attempt"].as<uint64_t>() == 1 && status["schemaVersion"].as<uint64_t>() == 1);
-  assert(status["added"].as<uint64_t>() == 2 && status["retained"].as<uint64_t>() == 0);
+  assert(status["added"].as<uint64_t>() == 3 && status["retained"].as<uint64_t>() == 0);
   assert(status["durationMs"].as<double>() >= 0);
   assert(onlyBackend(status, "action") == "created" && onlyBackend(status, "preconnect") == "connected");
   assert(onlyBackend(status, "cutover") == "active");
@@ -87,7 +95,7 @@ int main() {
     app.pump();
     return get("SYS:transaction:alarms:status")["state"].as<std::string>() == "ready";
   });
-  assert(get("SYS:transaction:alarms:status")["active"].as<uint64_t>() == 2);
+  assert(get("SYS:transaction:alarms:status")["active"].as<uint64_t>() == 3);
   const auto fingerprint = get("SYS:transaction:access:policyFingerprint")["value"].as<std::string>();
   std::mutex mutex;
   std::condition_variable changed;
@@ -103,6 +111,19 @@ int main() {
     }
   };
   observe(4.);
+  auto imageMonitor = client.monitor("TEST:image").maskConnected(true).maskDisconnected(false)
+      .event([&](pvxs::client::Subscription&) { changed.notify_all(); }).exec();
+  const auto observeImage = [&](int id) {
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    for (;;) {
+      if (const auto value = imageMonitor->pop(); value && value["uniqueId"].as<int32_t>() == id) {
+        assert(value["value"].as<pvxs::shared_array<const uint8_t>>()[0] == id); return;
+      }
+      assert(std::chrono::steady_clock::now() < deadline);
+      std::unique_lock<std::mutex> lock(mutex); changed.wait_for(lock, 5ms);
+    }
+  };
+  observeImage(1);
   bool completed = false;
   std::string putError;
   auto pending = client.put("TEST:old").set("value", 100.).result([&](pvxs::client::Result&& result) {
@@ -121,7 +142,7 @@ int main() {
   assert(status["activeGeneration"].as<uint64_t>() == 1 && status["candidateGeneration"].as<uint64_t>() == 2);
   assert(status["diffKnown"].as<bool>() && !status["error"].as<std::string>().empty());
   assert(status["added"].as<uint64_t>() == 1 && status["removed"].as<uint64_t>() == 1);
-  assert(status["recreated"].as<uint64_t>() == 0 && status["retained"].as<uint64_t>() == 1);
+  assert(status["recreated"].as<uint64_t>() == 0 && status["retained"].as<uint64_t>() == 2);
   assert(status["metadataChanged"].as<uint64_t>() == 1 && status["aliasesChanged"].as<uint64_t>() == 1);
   assert(onlyBackend(status, "action") == "retained" && onlyBackend(status, "cutover") == "previous-preserved");
   assert(get("SYS:transaction:access:policyFingerprint")["value"].as<std::string>() == fingerprint);
@@ -129,6 +150,8 @@ int main() {
   assert(get("TEST:old")["value"].as<double>() == 4.);
   assert(get("TEST:removed")["value"].as<double>() == 9.);
   assert(get("SYS:transaction:discovery:status")["desiredGeneration"].as<uint64_t>() == 1);
+  assert(get("TEST:imageAlias")["uniqueId"].as<int32_t>() == 1);
+  sendImage(2); observeImage(2);
   {
     std::lock_guard<std::mutex> guard(mutex); assert(!completed);
   }
@@ -153,6 +176,7 @@ int main() {
   assert(get("TEST:added")["value"].as<double>() == 9.);
   assert(get("TEST:keep")["display.description"].as<std::string>() == "new");
   assert(producer.addSingleDouble("read", 6.).ok()); observe(12.);
+  sendImage(3); observeImage(3);
   {
     std::ofstream output(configFile); output << "server: [ invalid\n";
   }
@@ -170,8 +194,9 @@ int main() {
   status = report();
   assert(status["attempt"].as<uint64_t>() == 5 && status["activeGeneration"].as<uint64_t>() == 3);
   assert(status["state"].as<std::string>() == "committed" && status["error"].as<std::string>().empty());
-  assert(status["added"].as<uint64_t>() == 0 && status["retained"].as<uint64_t>() == 2);
+  assert(status["added"].as<uint64_t>() == 0 && status["retained"].as<uint64_t>() == 3);
   assert(status["recreated"].as<uint64_t>() == 0 && status["metadataChanged"].as<uint64_t>() == 0);
-  monitor.reset(); client.close(); app.stop();
+  assert(get("TEST:imageAlias")["uniqueId"].as<int32_t>() == 3);
+  imageMonitor.reset(); monitor.reset(); client.close(); app.stop();
   std::filesystem::remove(configFile); std::filesystem::remove(policyFile); std::filesystem::remove(directory);
 }

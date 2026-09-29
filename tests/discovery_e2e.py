@@ -120,11 +120,12 @@ def main():
     config = dict(server=dict(instance="discovery-test", namespace="DISC", interfaces=["127.0.0.1"],
                               tcp_port=0, udp_port=pva_port, auto_beacon=False),
                   discovery=dict(bind_address="127.0.0.1", udp_port=udp_port, timeout_ms=1500, max_holdoff_ms=0,
-                                 max_records=32),
+                                 max_records=48),
                   redis=dict(base_key="discovery-test", host="127.0.0.1", port=redis_port),
                   pvs=[dict(name="value", aliases=["ALIAS:old"], type="float64", shape="scalar",
                             read=dict(key="value"), initial=7, metadata=dict(description="Value")),
-                       dict(name="removed", type="float64", shape="scalar", read=dict(key="removed"))])
+                       dict(name="removed", type="float64", shape="scalar", read=dict(key="removed")),
+                       dict(name="image", aliases=["ALIAS:image"], kind="ntndarray", read=dict(key="image"))])
     receiver = Receiver(udp_port)
     with tempfile.TemporaryDirectory(prefix="redis-pvxs-discovery-") as directory:
         path = Path(directory) / "config.json"
@@ -150,6 +151,10 @@ def main():
                 records, identity = receiver.catalog(first)
                 assert records["DISC:value"]["aliases"] == ["ALIAS:old"]
                 assert records["DISC:value"]["type"] == "epics:nt/NTScalar:1.0"
+                assert records["DISC:image"]["type"] == "epics:nt/NTNDArray:1.0"
+                assert records["DISC:image"]["properties"]["type"] == "ntndarray"
+                assert records["DISC:image"]["aliases"] == ["ALIAS:image"]
+                assert "epics:nt/NTNDArray:1.0" in get("ALIAS:image")
                 assert identity["IOCNAME"] == "discovery-test"
                 assert 0 < int(identity["PVAS_SERVER_PORT"]) <= 65535
                 assert identity["PVXS_PROTOCOL"] == "pva" and "RSRV_SERVER_PORT" not in identity

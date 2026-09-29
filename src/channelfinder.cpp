@@ -91,7 +91,7 @@ std::vector<ChannelFinderChannel> buildChannelFinderChannels(const AppConfig& co
     channel.properties["pvStatus"] = "Active";
     channel.properties["time"] = syncTime;
     channel.properties["pvaPort"] = std::to_string(pvaPort);
-    channel.properties["type"] = toString(pv.type);
+    channel.properties["type"] = pv.kind == PVKind::NTNDArray ? "ntndarray" : toString(pv.type);
     channel.properties["shape"] = toString(pv.shape);
     channel.properties["description"] = pv.metadata.description;
     channel.properties["units"] = pv.metadata.units;

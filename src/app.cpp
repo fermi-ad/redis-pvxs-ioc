@@ -114,6 +114,8 @@ public:
         lastStatus_(pvxs::server::SharedPV::buildReadonly()),
         lastError_(pvxs::server::SharedPV::buildReadonly()),
         pvCount_(pvxs::server::SharedPV::buildReadonly()),
+        ndarrayInvalidFrames_(pvxs::server::SharedPV::buildReadonly()),
+        ndarraySkippedFrames_(pvxs::server::SharedPV::buildReadonly()),
         backendHealth_(pvxs::server::SharedPV::buildReadonly()),
         accessEnabled_(pvxs::server::SharedPV::buildReadonly()),
         accessGeneration_(pvxs::server::SharedPV::buildReadonly()),
@@ -134,6 +136,8 @@ public:
         lastStatusName_(adminPVName(serverConfig, "config:lastStatus")),
         lastErrorName_(adminPVName(serverConfig, "config:lastError")),
         pvCountName_(adminPVName(serverConfig, "stats:pvCount")),
+        ndarrayInvalidFramesName_(adminPVName(serverConfig, "stats:ndarrayInvalidFrames")),
+        ndarraySkippedFramesName_(adminPVName(serverConfig, "stats:ndarraySkippedFrames")),
         backendHealthName_(adminPVName(serverConfig, "backend:health")) {
     lastDiffName_ = adminPVName(serverConfig, "config:lastDiff");
     openStringPV(lastDiff_, "{}", "Last parsed reload differences; credential values omitted");
@@ -272,6 +276,13 @@ public:
     auto countValue = makeAdminValue(pvxs::TypeCode::Int64, "Configured PV count");
     countValue["value"] = static_cast<int64_t>(0);
     pvCount_.open(countValue);
+
+    auto invalidFramesValue = makeAdminValue(pvxs::TypeCode::UInt64, "Invalid NTNDArray frames since startup");
+    invalidFramesValue["value"] = static_cast<uint64_t>(0);
+    ndarrayInvalidFrames_.open(invalidFramesValue);
+    auto skippedFramesValue = makeAdminValue(pvxs::TypeCode::UInt64, "Skipped NTNDArray frame IDs since startup");
+    skippedFramesValue["value"] = static_cast<uint64_t>(0);
+    ndarraySkippedFrames_.open(skippedFramesValue);
 
     auto backendValue = makeAdminValue(pvxs::TypeCode::String, "Redis backend health");
     backendValue["value"] = std::string("unknown");
@@ -427,6 +438,8 @@ public:
     add(lastStatusName_, lastStatus_, defaults.adminRead);
     add(lastErrorName_, lastError_, defaults.adminRead);
     add(pvCountName_, pvCount_, defaults.adminRead);
+    add(ndarrayInvalidFramesName_, ndarrayInvalidFrames_, defaults.adminRead);
+    add(ndarraySkippedFramesName_, ndarraySkippedFrames_, defaults.adminRead);
     add(backendHealthName_, backendHealth_, defaults.adminRead);
     add(accessReloadName_, accessReloadCommand_, defaults.adminWrite);
     add(accessEnabledName_, accessEnabled_, defaults.adminRead);
@@ -471,6 +484,11 @@ public:
 
   void setPvCount(const size_t count) {
     setAdminScalar(pvCount_, static_cast<int64_t>(count));
+  }
+
+  void setRuntimeStats(const RuntimeStats& stats) {
+    setAdminScalar(ndarrayInvalidFrames_, stats.ndarrayInvalidFrames.load());
+    setAdminScalar(ndarraySkippedFrames_, stats.ndarraySkippedFrames.load());
   }
 
   void setBackendHealth(const std::string& health) {
@@ -524,6 +542,8 @@ private:
   pvxs::server::SharedPV lastStatus_;
   pvxs::server::SharedPV lastError_;
   pvxs::server::SharedPV pvCount_;
+  pvxs::server::SharedPV ndarrayInvalidFrames_;
+  pvxs::server::SharedPV ndarraySkippedFrames_;
   pvxs::server::SharedPV backendHealth_;
   pvxs::server::SharedPV accessEnabled_;
   pvxs::server::SharedPV accessGeneration_;
@@ -544,6 +564,8 @@ private:
   std::string lastStatusName_;
   std::string lastErrorName_;
   std::string pvCountName_;
+  std::string ndarrayInvalidFramesName_;
+  std::string ndarraySkippedFramesName_;
   std::string backendHealthName_;
   std::string accessReloadName_;
   std::string accessEnabledName_;
@@ -764,10 +786,11 @@ std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
   for (const auto& pv : config.pvs) {
     DiscoveryRecord record;
     record.name = fullPVName(config.server, pv);
-    record.type = pv.shape == Shape::Array ? "epics:nt/NTScalarArray:1.0" : "epics:nt/NTScalar:1.0";
+    record.type = pv.kind == PVKind::NTNDArray ? "epics:nt/NTNDArray:1.0"
+        : pv.shape == Shape::Array ? "epics:nt/NTScalarArray:1.0" : "epics:nt/NTScalar:1.0";
     record.aliases = pv.aliases;
     record.properties = {{"protocol", "pva"}, {"DESC", pv.metadata.description}, {"units", pv.metadata.units},
-                         {"type", toString(pv.type)}, {"shape", toString(pv.shape)}};
+                         {"type", pv.kind == PVKind::NTNDArray ? "ntndarray" : toString(pv.type)}, {"shape", toString(pv.shape)}};
     records.push_back(std::move(record));
   }
   for (const auto& name : adminPVNames(config.server))
@@ -798,6 +821,7 @@ struct Application::Impl {
   uint64_t generation = 0;
   RedisBackendRegistry redisBackends;
   std::shared_ptr<AlarmPublisher> alarmPublisher;
+  std::shared_ptr<RuntimeStats> runtimeStats = std::make_shared<RuntimeStats>();
   RuntimeMap runtimes;
   RpcMap rpcPVs;
   AssignmentMap rpcAssignments;
@@ -992,6 +1016,7 @@ void Application::pump() {
       impl_->admin->setAlarmStatus(impl_->alarmPublisher->status());
       impl_->admin->setDiscoveryStatus(impl_->discovery ? impl_->discovery->status() : DiscoveryStatus{});
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
+      impl_->admin->setRuntimeStats(*impl_->runtimeStats);
     }
   }
 }
@@ -1185,7 +1210,7 @@ bool Application::applyGeneration(const AppConfig& config,
         nextRuntimes.emplace(name, existing->second);
       } else {
         auto runtime = makeRuntime(config.server, pv, nextBackends, nextAlarm, generation,
-                                   impl_->operations, config.limits);
+                                   impl_->operations, config.limits, impl_->runtimeStats);
         added.push_back(runtime);
         nextRuntimes.emplace(name, std::move(runtime));
       }

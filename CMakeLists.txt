@@ -181,6 +181,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/util.cpp
   src/alarm_publisher.cpp
   src/alarm_worker.cpp
+  src/ntndarray.cpp
   src/runtime.cpp
   src/operation_queue.cpp
   src/app.cpp
@@ -376,6 +377,24 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME model_tests COMMAND model_tests)
 
+  add_executable(ntndarray_tests tests/ntndarray_tests.cpp)
+  target_link_libraries(ntndarray_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME ntndarray_tests COMMAND ntndarray_tests)
+  add_executable(ntndarray_runtime_tests tests/ntndarray_runtime_tests.cpp)
+  target_link_libraries(ntndarray_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(ntndarray_runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME ntndarray_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:ntndarray_runtime_tests>)
+  set_tests_properties(ntndarray_runtime_tests PROPERTIES TIMEOUT 45)
+  add_executable(ndarray_transfer tests/ndarray_transfer.cpp)
+  target_link_libraries(ndarray_transfer PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME ndarray_transfer_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/ndarray_transfer_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:ndarray_transfer>)
+  set_tests_properties(ndarray_transfer_e2e PROPERTIES TIMEOUT 30)
+
   add_executable(alarm_publisher_tests tests/alarm_publisher_tests.cpp)
   target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME alarm_publisher_tests COMMAND alarm_publisher_tests)
@@ -409,6 +428,7 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
       access_control_tests
       access_runtime_tests
       model_tests
+      ntndarray_tests
       alarm_publisher_tests)
     target_compile_options(${_test_target} PRIVATE -UNDEBUG)
     set_tests_properties(${_test_target} PROPERTIES TIMEOUT 60)

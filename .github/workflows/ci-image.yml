@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -65,6 +65,18 @@ jobs:
           docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
           docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
             'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/NOTICE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
+          docker run --rm --entrypoint /bin/sh "${IMAGE}" -ec '
+            cd /usr/share/doc/redis-pvxs-ioc
+            test -s builder-packages.tsv && test -s runtime-packages.tsv
+            for file in epics-base/LICENSE pvxs/LICENSE pvxs/COPYRIGHT \
+                pvxs/bundle/libevent/LICENSE redis-adapter/LICENSE \
+                redis-adapter/hiredis/COPYING redis-adapter/redis-plus-plus/LICENSE \
+                yaml-cpp/LICENSE; do
+              test -s "third-party/third_party/$file"
+            done
+            test -s /usr/share/doc/libgrpc++1.51t64/copyright
+            test -s /usr/share/doc/libprotobuf32t64/copyright
+          '
 
       - name: Validate runtime identity and secret mounts
         env:

@@ -50,7 +50,7 @@ class ReleaseTests(unittest.TestCase):
         record, workflow = self.evidence()
         release.verify_record(record, workflow, "0.9.0", SHA, "candidate")
         for key, value in {"revision": "c" * 40, "version": "0.9.0-rc.1",
-                           "run_attempt": 1, "checks": ["image"], "image": "other@" + DIGEST}.items():
+                           "run_attempt": 1, "platform": "linux/arm64", "checks": ["image"], "image": "other@" + DIGEST}.items():
             with self.subTest(record=key), self.assertRaises(ValueError):
                 release.verify_record(dict(record, **{key: value}), workflow, "0.9.0", SHA, "candidate")
         for key, value in {"head_sha": "c" * 40, "conclusion": "failure", "event": "pull_request",
@@ -129,6 +129,24 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "qualification"):
                     release.release("v0.9.0", "123", "")
                 promote.assert_not_called()
+
+    def test_existing_draft_is_published_with_final_stable_classification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "VERSION").write_text("0.8.2\n")
+            (root / "CHANGELOG.md").write_text("## v0.8.2\n\nCorrectness fixes.\n")
+            record = dict(self.evidence()[0], version="0.8.2")
+            with patch.object(release, "ROOT", root), patch.object(release, "run", return_value=SHA), \
+                    patch.object(release, "load_record", return_value=record), \
+                    patch.object(release, "validate_image"), \
+                    patch.object(release, "promote_digest", return_value=(release.IMAGE_REPOSITORY + ":v0.8.2", True)), \
+                    patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as calls:
+                release.release("v0.8.2", "123", "")
+            edits = [call.args[0] for call in calls.call_args_list if call.args[0][:3] == ["gh", "release", "edit"]]
+            self.assertEqual(len(edits), 1)
+            self.assertIn("--draft=false", edits[0])
+            self.assertIn("--prerelease=false", edits[0])
+            self.assertIn("--latest=true", edits[0])
 
 
 class SmokeTests(unittest.TestCase):

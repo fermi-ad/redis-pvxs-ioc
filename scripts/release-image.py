@@ -92,6 +92,8 @@ def verify_record(record, run_info, version, revision, kind):
             or record.get("run_attempt") != run_info["run_attempt"]):
         raise ValueError("candidate identity/run attempt does not match the release")
     immutable_image(record["image"])
+    if record.get("platform") != "linux/amd64":
+        raise ValueError("release evidence must qualify linux/amd64")
     expected = CANDIDATE_CHECKS if kind == "candidate" else QUALIFICATION_CHECKS
     if not expected.issubset(record.get("checks", [])):
         raise ValueError("required validation evidence is missing")
@@ -195,8 +197,10 @@ def release(tag, candidate_run, qualification_run):
                    "--repo", REPOSITORY, "--title", tag, "--notes-file", str(notes)]
         if not exists:
             command += ["--verify-tag"]
-        if prerelease:
-            command += ["--prerelease"]
+        # A retried publication may already have a draft release. Explicitly
+        # publish it and set its final classification instead of preserving
+        # stale draft/prerelease flags from a previous attempt.
+        command += ["--draft=false", "--prerelease=true" if prerelease else "--prerelease=false"]
         command += ["--latest=true" if updated_latest else "--latest=false"]
         subprocess.run(command, check=True)
         subprocess.run(["gh", "release", "upload", tag, str(directory / "candidate/candidate.json"),

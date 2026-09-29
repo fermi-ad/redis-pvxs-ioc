@@ -2,6 +2,7 @@
 
 ## v0.8.2 - unreleased
 
+- fix native macOS PVA startup by avoiding a second libevent threading state
 - use individually owned upstream redis-adapter subscriptions so replacing or
   rejecting a staged runtime cannot remove another runtime's reader
 - resume live reads from the exact snapshot stream ID, preserving updates
@@ -18,6 +19,11 @@
   staged runtimes until activation
 - run Redis/PVA regression tests with an isolated, automatically cleaned-up
   Redis fixture as part of the normal CTest and image build
+
+## v0.8.1 - 2026-08-03
+
+- serialize access-policy reconfiguration and watcher reloads
+- clear recovered ACF watcher errors while retaining the last good policy
 
 ## v0.8.0 - 2026-08-03
 

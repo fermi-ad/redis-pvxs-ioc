@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Validate immutable images and promote evidence from trusted candidate runs."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 import tempfile
 
 REPOSITORY = "fermi-ad/redis-pvxs-ioc"
@@ -17,7 +19,8 @@ SEMVER = re.compile(
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
     r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
 )
-CANDIDATE_CHECKS = {"image", "smoke", "access"}
+CANDIDATE_CHECKS = {"image", "smoke", "access", "sbom", "provenance", "source-inputs"}
+CANDIDATE_EVIDENCE = {"source-inputs.json", "sbom.json", "provenance.json", "registry-manifest.json"}
 QUALIFICATION_CHECKS = {
     "native-macos", "full-feature", "minimal", "sanitizers", "redis-pva",
     "discovery-catalog", "rpc-http", "imaging-600-frames", "capacity", "rollback",
@@ -81,6 +84,49 @@ def registry_digest(image):
     return digest
 
 
+def source_inputs(output):
+    # Reject changed/missing gitlinks and dirty source, including nested trees.
+    # This supplements the scanner, which cannot identify every static C++ library.
+    if run("git", "status", "--porcelain", "--untracked-files=all"):
+        raise ValueError("candidate source must be a clean checkout")
+    lines = subprocess.check_output(["git", "submodule", "status", "--recursive"], text=True).splitlines()
+    if not lines or any(not line.startswith(" ") for line in lines):
+        raise ValueError("candidate submodules must be initialized at their pinned revisions")
+    modules = [dict(revision=line[1:].split()[0], path=line[1:].split()[1]) for line in lines]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(dict(repository=SOURCE, revision=run("git", "rev-parse", "HEAD"),
+        submodules=modules, dockerfile_sha256=hashlib.sha256((ROOT / "Dockerfile").read_bytes()).hexdigest()), indent=2) + "\n")
+
+
+def capture_attestations(image, revision, directory):
+    immutable_image(image)
+    values = {}
+    for name, field in (("sbom.json", "SBOM"), ("provenance.json", "Provenance"),
+                        ("registry-manifest.json", "Manifest")):
+        value = json.loads(run("docker", "buildx", "imagetools", "inspect", image,
+                               "--format", "{{json ." + field + "}}"))
+        if not isinstance(value, dict):
+            raise ValueError("missing image attestation: " + name)
+        values[name] = value
+        (directory / name).write_text(json.dumps(value, indent=2) + "\n")
+    if values["registry-manifest.json"].get("digest") != image.split("@", 1)[1]:
+        raise ValueError("attestation index differs from the candidate digest")
+    sbom = values["sbom.json"].get("linux/amd64", values["sbom.json"]).get("SPDX", {})
+    provenance = values["provenance.json"].get("linux/amd64", values["provenance.json"]).get("SLSA", {})
+    if not sbom.get("spdxVersion") or not sbom.get("packages"):
+        raise ValueError("candidate is missing a populated SPDX SBOM")
+    if not provenance.get("buildConfig") or not provenance.get("materials"):
+        raise ValueError("candidate is missing full build provenance")
+    arguments = provenance.get("invocation", {}).get("parameters", {}).get("args", {})
+    if arguments.get("build-arg:REDIS_PVXS_IOC_REVISION") != revision:
+        raise ValueError("provenance source revision differs from the candidate")
+    source = json.loads((directory / "source-inputs.json").read_text())
+    if source.get("revision") != revision or source.get("repository") != SOURCE or not source.get("submodules"):
+        raise ValueError("candidate source inventory is missing or mismatched")
+    return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+            for name in sorted(CANDIDATE_EVIDENCE)}
+
+
 def verify_record(record, run_info, version, revision, kind):
     workflow = "candidate-image.yml" if kind == "candidate" else "qualify-image.yml"
     if (run_info["conclusion"] != "success" or run_info["head_sha"] != revision
@@ -97,6 +143,11 @@ def verify_record(record, run_info, version, revision, kind):
     expected = CANDIDATE_CHECKS if kind == "candidate" else QUALIFICATION_CHECKS
     if not expected.issubset(record.get("checks", [])):
         raise ValueError("required validation evidence is missing")
+    if kind == "candidate":
+        evidence = record.get("evidence", {})
+        if not CANDIDATE_EVIDENCE.issubset(evidence) or any(
+                not re.fullmatch(r"[0-9a-f]{64}", evidence[name]) for name in CANDIDATE_EVIDENCE):
+            raise ValueError("candidate attestation/source evidence is missing")
     if kind == "qualification":
         if record.get("soak_seconds", 0) < 86400 or record.get("rollback_version") != "0.8.2":
             raise ValueError("qualification requires 24-hour amd64 soak and 0.8.2 rollback")
@@ -116,7 +167,12 @@ def load_record(run_id, version, revision, kind, directory):
     run("gh", "run", "download", str(run_id), "--repo", REPOSITORY, "--name",
         f"release-{kind}-{run_id}-{info['run_attempt']}", "--dir", str(destination))
     record = json.loads((destination / (kind + ".json")).read_text())
-    return verify_record(record, info, version, revision, kind)
+    verify_record(record, info, version, revision, kind)
+    if kind == "candidate":
+        for name in CANDIDATE_EVIDENCE:
+            if hashlib.sha256((destination / name).read_bytes()).hexdigest() != record["evidence"][name]:
+                raise ValueError("candidate evidence checksum differs: " + name)
+    return record
 
 
 def promote_digest(image, version):
@@ -189,6 +245,7 @@ def release(tag, candidate_run, qualification_run):
             f"- Candidate evidence: {SOURCE}/actions/runs/{candidate_run}\n"
             + (f"- Qualification evidence: {SOURCE}/actions/runs/{qualification_run}\n" if qualification_run else "")
             + "- Promoted the validated Linux amd64 digest without rebuilding.\n"
+            + "- SBOM, full build provenance, source inventory and validation logs are retained in release-evidence.tar.gz.\n"
             + "- Rechecked labels, binary identity, default configuration, notices, and isolated Redis/PVA smoke behavior.\n"
             + ("- `latest` now points to the same digest.\n" if updated_latest else "- `latest` was preserved.\n"))
         exists = subprocess.run(["gh", "release", "view", tag, "--repo", REPOSITORY],
@@ -208,6 +265,14 @@ def release(tag, candidate_run, qualification_run):
         if qualification_run:
             subprocess.run(["gh", "release", "upload", tag, str(directory / "qualification/qualification.json"),
                             "--repo", REPOSITORY, "--clobber"], check=True)
+        # Workflow artifacts expire. Keep the complete downloaded evidence with
+        # the release as well as the attestations attached to the image index.
+        archive = directory / "release-evidence.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            bundle.add(directory / "candidate", arcname="candidate")
+            if qualification_run:
+                bundle.add(directory / "qualification", arcname="qualification")
+        subprocess.run(["gh", "release", "upload", tag, str(archive), "--repo", REPOSITORY, "--clobber"], check=True)
 
 
 def main():
@@ -220,12 +285,16 @@ def main():
     record = commands.add_parser("record")
     record.add_argument("image")
     record.add_argument("output", type=Path)
+    inputs = commands.add_parser("source-inputs")
+    inputs.add_argument("output", type=Path)
     publish = commands.add_parser("promote")
     publish.add_argument("--tag", required=True)
     publish.add_argument("--candidate-run", required=True)
     publish.add_argument("--qualification-run", default="")
     args = parser.parse_args()
-    if args.command == "validate":
+    if args.command == "source-inputs":
+        source_inputs(args.output)
+    elif args.command == "validate":
         validate_image(args.image, args.version, args.revision)
     elif args.command == "record":
         digest = registry_digest(args.image)
@@ -236,8 +305,10 @@ def main():
         run("docker", "pull", image)
         validate_image(image, version, revision)
         args.output.parent.mkdir(parents=True, exist_ok=True)
+        evidence = capture_attestations(image, revision, args.output.parent)
         args.output.write_text(json.dumps(dict(image=image, version=version, revision=revision,
             platform="linux/amd64", checks=sorted(CANDIDATE_CHECKS),
+            evidence=evidence,
             run_id=int(os.environ["GITHUB_RUN_ID"]), run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"])), indent=2) + "\n")
     else:
         release(args.tag, args.candidate_run, args.qualification_run)

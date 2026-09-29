@@ -41,7 +41,8 @@ class ReleaseTests(unittest.TestCase):
 
     def evidence(self):
         record = dict(version="0.9.0", revision=SHA, image=IMAGE, run_id=123,
-                      run_attempt=2, platform="linux/amd64", checks=["image", "smoke", "access"])
+                      run_attempt=2, platform="linux/amd64", checks=list(release.CANDIDATE_CHECKS),
+                      evidence={name: "d" * 64 for name in release.CANDIDATE_EVIDENCE})
         workflow = dict(conclusion="success", head_sha=SHA, event="workflow_dispatch",
                         path=".github/workflows/candidate-image.yml", id=123, run_attempt=2)
         return record, workflow
@@ -50,7 +51,8 @@ class ReleaseTests(unittest.TestCase):
         record, workflow = self.evidence()
         release.verify_record(record, workflow, "0.9.0", SHA, "candidate")
         for key, value in {"revision": "c" * 40, "version": "0.9.0-rc.1",
-                           "run_attempt": 1, "platform": "linux/arm64", "checks": ["image"], "image": "other@" + DIGEST}.items():
+                           "run_attempt": 1, "platform": "linux/arm64", "checks": ["image"],
+                           "evidence": {}, "image": "other@" + DIGEST}.items():
             with self.subTest(record=key), self.assertRaises(ValueError):
                 release.verify_record(dict(record, **{key: value}), workflow, "0.9.0", SHA, "candidate")
         for key, value in {"head_sha": "c" * 40, "conclusion": "failure", "event": "pull_request",
@@ -81,6 +83,44 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.validate_image(IMAGE, "0.8.2", SHA)
                 self.assertEqual(run.call_count, 1)
+
+    def test_attestations_require_sbom_full_provenance_and_matching_revision(self):
+        values = {
+            "SBOM": {"linux/amd64": {"SPDX": {"spdxVersion": "SPDX-2.3", "packages": [{"name": "test"}]}}},
+            "Provenance": {"linux/amd64": {"SLSA": {"buildConfig": {"llbDefinition": [1]},
+                "materials": [{"uri": "test"}], "invocation": {"parameters": {
+                    "args": {"build-arg:REDIS_PVXS_IOC_REVISION": SHA}}}}}},
+            "Manifest": {"digest": DIGEST},
+        }
+        def command(*args):
+            return json.dumps(values[args[-1].removeprefix("{{json .").removesuffix("}}")])
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "source-inputs.json").write_text(json.dumps({
+                "repository": release.SOURCE, "revision": SHA, "submodules": [{"path": "test", "revision": SHA}]}))
+            with patch.object(release, "run", side_effect=command):
+                hashes = release.capture_attestations(IMAGE, SHA, directory)
+                self.assertEqual(set(hashes), release.CANDIDATE_EVIDENCE)
+                with self.assertRaisesRegex(ValueError, "revision"):
+                    release.capture_attestations(IMAGE, "c" * 40, directory)
+                values["Provenance"]["linux/amd64"]["SLSA"].pop("buildConfig")
+                with self.assertRaisesRegex(ValueError, "full build provenance"):
+                    release.capture_attestations(IMAGE, SHA, directory)
+                values["SBOM"] = None
+                with self.assertRaisesRegex(ValueError, "missing image attestation"):
+                    release.capture_attestations(IMAGE, SHA, directory)
+
+    def test_source_inventory_rejects_uninitialized_or_changed_submodules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "source-inputs.json"
+            for prefix in ("-", "+", "U"):
+                with self.subTest(prefix=prefix), patch.object(release, "run", return_value=""), \
+                        patch.object(release.subprocess, "check_output", return_value=prefix + SHA + " third_party/test\n"):
+                    with self.assertRaisesRegex(ValueError, "pinned revisions"):
+                        release.source_inputs(output)
+            with patch.object(release, "run", return_value=" M Dockerfile"):
+                with self.assertRaisesRegex(ValueError, "clean checkout"):
+                    release.source_inputs(output)
 
     def test_prerelease_promotion_preserves_digest_and_never_touches_latest(self):
         manifests = {}
@@ -136,8 +176,14 @@ class ReleaseTests(unittest.TestCase):
             (root / "VERSION").write_text("0.8.2\n")
             (root / "CHANGELOG.md").write_text("## v0.8.2\n\nCorrectness fixes.\n")
             record = dict(self.evidence()[0], version="0.8.2")
+            def candidate_record(*args):
+                candidate = args[-1] / "candidate"
+                candidate.mkdir()
+                (candidate / "candidate.json").write_text(json.dumps(record))
+                (candidate / "smoke.log").write_text("passed\n")
+                return record
             with patch.object(release, "ROOT", root), patch.object(release, "run", return_value=SHA), \
-                    patch.object(release, "load_record", return_value=record), \
+                    patch.object(release, "load_record", side_effect=candidate_record), \
                     patch.object(release, "validate_image"), \
                     patch.object(release, "promote_digest", return_value=(release.IMAGE_REPOSITORY + ":v0.8.2", True)), \
                     patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as calls:
@@ -147,6 +193,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn("--draft=false", edits[0])
             self.assertIn("--prerelease=false", edits[0])
             self.assertIn("--latest=true", edits[0])
+            uploads = [call.args[0] for call in calls.call_args_list if call.args[0][:3] == ["gh", "release", "upload"]]
+            self.assertTrue(any(any(arg.endswith("release-evidence.tar.gz") for arg in call) for call in uploads))
 
 
 class SmokeTests(unittest.TestCase):

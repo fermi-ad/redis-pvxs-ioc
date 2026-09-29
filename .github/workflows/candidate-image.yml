@@ -17,6 +17,8 @@ jobs:
     env:
       IMAGE_REPO: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc
       REDIS_IMAGE: redis:7.4.2@sha256:fbdbaea47b9ae4ecc2082ecdb4e1cea81e32176ffb1dcf643d422ad07427e5d9
+      BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+      SBOM_SCANNER: docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
     steps:
       - name: Isolate registry credentials
         run: |
@@ -26,28 +28,6 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-      - name: Build candidate
-        id: build
-        shell: bash
-        run: |
-          VERSION="$(tr -d '\n' < VERSION)"
-          REVISION="$(git rev-parse HEAD)"
-          IMAGE="${IMAGE_REPO}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REVISION:0:12}"
-          mkdir -p build/candidate
-          docker build --platform linux/amd64 \
-            --build-arg REDIS_PVXS_IOC_VERSION="$VERSION" \
-            --build-arg REDIS_PVXS_IOC_REVISION="$REVISION" \
-            --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
-            -t "$IMAGE" . 2>&1 | tee build/candidate/build.log
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          python3 scripts/release-image.py validate "$IMAGE" "$VERSION" "$REVISION"
-      - name: Validate Redis/PVA and access behavior before publishing
-        env:
-          REDIS_PVXS_IOC_IMAGE: ${{ steps.build.outputs.image }}
-          REDIS_PVXS_IOC_PULL_POLICY: never
-        run: |
-          ./scripts/smoke-test.sh 2>&1 | tee build/candidate/smoke.log
-          ./scripts/access-e2e-test.sh 2>&1 | tee build/candidate/access.log
       - name: Registry login
         env:
           REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
@@ -55,11 +35,47 @@ jobs:
         run: |
           printf '%s' "$REGISTRY_SECRET" | docker login adregistry.fnal.gov \
             --username "$REGISTRY_USERNAME" --password-stdin
-      - name: Publish candidate and record immutable validation identity
+      - name: Create isolated attestation builder
+        run: |
+          BUILDER="redis-pvxs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "BUILDER=$BUILDER" >> "$GITHUB_ENV"
+          docker buildx create --name "$BUILDER" --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE"
+      - name: Build and push an unqualified candidate with attestations
+        id: build
+        run: |
+          VERSION="$(tr -d '\n' < VERSION)"
+          REVISION="$(git rev-parse HEAD)"
+          IMAGE="${IMAGE_REPO}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REVISION:0:12}"
+          mkdir -p build/candidate
+          python3 scripts/release-image.py source-inputs build/candidate/source-inputs.json
+          docker version > build/candidate/docker-version.txt
+          docker buildx version > build/candidate/buildx-version.txt
+          docker buildx build --builder "$BUILDER" --platform linux/amd64 \
+            --provenance=mode=max,version=v0.2 \
+            --attest "type=sbom,generator=$SBOM_SCANNER" \
+            --metadata-file build/candidate/build-metadata.json --push \
+            --build-arg REDIS_PVXS_IOC_VERSION="$VERSION" \
+            --build-arg REDIS_PVXS_IOC_REVISION="$REVISION" \
+            --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
+            -t "$IMAGE" . 2>&1 | tee build/candidate/build.log
+          DIGEST="$(python3 -c 'import json; print(json.load(open("build/candidate/build-metadata.json"))["containerimage.digest"])')"
+          IMAGE="${IMAGE_REPO}@${DIGEST}"
+          docker pull "$IMAGE"
+          python3 scripts/release-image.py validate "$IMAGE" "$VERSION" "$REVISION" \
+            2>&1 | tee build/candidate/image.log
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Validate Redis/PVA and access behavior by immutable digest
+        env:
+          REDIS_PVXS_IOC_IMAGE: ${{ steps.build.outputs.image }}
+          REDIS_PVXS_IOC_PULL_POLICY: never
+        run: |
+          ./scripts/smoke-test.sh 2>&1 | tee build/candidate/smoke.log
+          ./scripts/access-e2e-test.sh 2>&1 | tee build/candidate/access.log
+      - name: Record successful candidate and attestation evidence
         env:
           IMAGE: ${{ steps.build.outputs.image }}
         run: |
-          docker push "$IMAGE"
           python3 scripts/release-image.py record "$IMAGE" build/candidate/candidate.json
           cat build/candidate/candidate.json >> "$GITHUB_STEP_SUMMARY"
       - name: Retain candidate evidence
@@ -70,6 +86,9 @@ jobs:
           path: build/candidate/
           retention-days: 90
           if-no-files-found: error
+      - name: Remove this run's builder
+        if: always() && env.BUILDER != ''
+        run: docker buildx rm --force "$BUILDER"
       - name: Docker logout
         if: always() && env.DOCKER_CONFIG != ''
         run: docker logout adregistry.fnal.gov

@@ -1,154 +1,92 @@
 # Releasing `redis-pvxs-ioc`
 
-## Version source of truth
+## Identity and platforms
 
-- `VERSION` is authoritative.
-- `CMakeLists.txt` reads `VERSION` and sets the CMake project version from it.
-- `redis-pvxs-ioc --version` must match `VERSION`.
-- Git tags, GitHub Release names, and release image tags use `v${VERSION}`.
+`VERSION` is authoritative. It accepts full SemVer, including prerelease and
+build identifiers. CMake uses the numeric core; the binary and OCI label preserve
+the complete version. Git and GitHub Release tags are `v${VERSION}`. Docker tags
+replace the SemVer `+` separator with `_`, because Docker tags cannot contain `+`.
+For example, `v0.9.0-rc.1+build.2` uses image tag `v0.9.0-rc.1_build.2`.
 
-## Semver rules
+0.9.0 publishes Linux amd64 images. Native macOS development checks remain part
+of qualification; existing Linux arm64 checks are informational. ARM image
+publication and soak qualification may be reconsidered for 1.0.0 when a real
+deployment needs them. Fleet deployment is a separate task.
 
-- Bump `MAJOR` for incompatible config or runtime contract changes.
-- Bump `MINOR` for backward-compatible feature additions.
-- Bump `PATCH` for fixes, documentation-only release adjustments, or packaging changes that do not change the public contract.
+## Prepare, validate, then promote
 
-## Release checklist
+1. Review and merge release preparation into `main`, including `VERSION`, the
+   matching `CHANGELOG.md` entry, compatibility documentation, license and
+   dependency notices, and regression evidence. Keep branch protections and
+   independent Instrumentation code-owner approval.
+2. Dispatch **Publish redis-pvxs-ioc candidate image** from that exact merged
+   revision. It builds on adlinux3, validates Linux amd64 identity and default
+   configuration, and runs isolated Redis/PVA and access-control tests before
+   pushing a unique `candidate-<run>-<attempt>-<commit>` tag. It then pulls and
+   rechecks the immutable digest and retains `candidate.json` and validation logs
+   in the `release-candidate-<run>-<attempt>` workflow artifact.
+3. For stable 0.9.0 and later, complete the separate qualification workflow on
+   the same commit and digest: integration/sanitizer/native checks, 600 exact
+   1080p Mono8 frames, capacity evidence, a 24-hour amd64 soak, and rollback to
+   the saved 0.8.2 image/configuration. The promotion tool requires the successful
+   `.github/workflows/qualify-image.yml` run and its
+   `release-qualification-<run>-<attempt>/qualification.json` artifact. Until that
+   qualification workflow and all evidence exist, stable promotion fails closed.
+4. Tag that exact merged commit with `v${VERSION}` and push the tag. Tag pushes
+   do not build or publish an image.
+5. Dispatch **Publish redis-pvxs-ioc release image** from `main`, supplying the
+   tag, candidate workflow run ID, and applicable qualification workflow run ID.
+   It verifies tag ancestry before executing the release code; validates successful
+   workflow identity, source, attempt, version and digest; and rechecks the pulled
+   image and smoke behavior before any release tag is written.
+6. Promotion copies the already validated registry manifest. No rebuild occurs.
+   Existing release tags cannot be replaced by a different digest. Prereleases
+   never change `latest`, and publishing an older stable version cannot move
+   `latest` backward. The GitHub Release includes its changelog, source, immutable
+   image, validation links, and evidence JSON.
+7. Open and merge a post-release pin-sync PR updating every checked-in main-runtime
+   image example to `image:v${VERSION}@sha256:<digest>`. Keep the independently
+   versioned historical sidecar image unchanged.
 
-1. Update `VERSION`.
-2. Add or update the matching entry in `CHANGELOG.md`.
-3. Confirm the project license and every vendored source tree are cleared for
-   public redistribution and inventoried in `THIRD_PARTY_NOTICES.md`.
-4. Run local verification:
+A final release candidate must already contain its final version: qualify
+`VERSION=0.9.0` before publishing v0.9.0. A `0.9.0-rc.1` binary cannot be relabeled
+as `0.9.0`. Any runtime/dependency change creates a new candidate and invalidates
+qualification of the prior digest.
 
-```sh
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
-./build/redis-pvxs-ioc --version
-./scripts/smoke-test.sh
-```
+## Image pull and smoke isolation
 
-5. Commit the release prep and push the branch.
-6. Let public CI and downstream candidate-image testing pass on the PR branch.
-7. Merge the release prep to `main`.
-8. Tag the merged `main` release commit with `v$(cat VERSION)`.
-9. Let the release workflow build and push the production image from that tag.
-10. Record the runtime digest from the workflow summary and GitHub Release.
-11. Confirm the GitHub Release includes:
-   - the semver tag
-   - the immutable runtime image digest
-   - the validation commands used
-12. Open a post-release pin-sync PR that replaces every checked-in main-runtime
-    image example with `image:v${VERSION}@sha256:<digest>`.
-13. Validate and merge that PR. Do not change the legacy-sidecar tag unless a
-    separate sidecar release was intentionally built and validated.
-
-## Automated workflows
-
-The primary runtime image release process is split into three workflows:
-
-- `Validate redis-pvxs-ioc image` runs pull requests on a GitHub-hosted runner
-  without Fermilab credentials. Pushes to `main` and manual dispatches run on
-  `adlinux3`, matching release infrastructure. It builds the image with
-  `REDIS_PVXS_IOC_VERSION=$(cat VERSION)` and
-  `REDIS_PVXS_IOC_REVISION=<source revision>`, validates image labels, checks
-  `redis-pvxs-ioc --version`, and validates the default runtime config with
-  `--check-config`. It does not push registry tags.
-- `Publish redis-pvxs-ioc candidate image` is manual-only. Use it for
-  integration testing before merge. It pushes only a non-production candidate
-  tag such as `candidate-<ref>-<sha>` and never updates `latest` or `vX.Y.Z`.
-- `Publish redis-pvxs-ioc release image` runs on `v*` tag pushes or manual
-  dispatch with an existing tag. It verifies `vX.Y.Z` matches `VERSION`,
-  verifies the tag commit is contained in `origin/main`, builds and pushes
-  `vX.Y.Z` plus `latest`, captures the digest, validates the pushed image, and
-  creates or updates the GitHub Release.
-
-The legacy sidecar has its own version and immutable digest. It is published
-only as a separate, intentional sidecar release. Standardizing it into an
-automated workflow is a separate scoped change.
-
-## Image reference policy
-
-- Development and local experiments may use `:latest` or branch/test tags.
-- Integration may use candidate tags while validating a PR or release branch.
-- Production compose files must use `:v${VERSION}@sha256:<digest>`.
-
-Tags describe releases. Digests define deployments. The tag keeps the human-readable release intent visible; the digest guarantees the exact artifact that runs.
-
-## Manual build and publish fallback
-
-Prefer the release workflow for normal runtime image releases. Use this fallback
-only when the workflow is unavailable, and keep the same release identity checks.
+Remote mutable tags are always pulled. Immutable digests are pulled when absent.
+For a locally built image, explicitly select the local-only policy:
 
 ```sh
-VERSION="$(cat VERSION)"
-REVISION="$(git rev-parse --short=12 HEAD)"
-IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}"
-
-git tag "v${VERSION}"
-git push origin HEAD
-git push origin "v${VERSION}"
-
-docker build \
-  --platform linux/amd64 \
-  --build-arg REDIS_PVXS_IOC_VERSION="${VERSION}" \
-  --build-arg REDIS_PVXS_IOC_REVISION="${REVISION}" \
-  --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
-  -t "${IMAGE}" \
-  -t adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest \
-  .
-
-docker push "${IMAGE}"
-docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:latest
-
-LEGACY_IMAGE="${LEGACY_IOC_IMAGE:?set the independently versioned legacy sidecar image}"
-
-LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
-  docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.legacy-sidecar.yml \
-    -f docker-compose.legacy-sidecar.build.yml \
-    --profile legacy \
-    build legacy-ioc
-
-LEGACY_IOC_IMAGE="${LEGACY_IMAGE}" \
-  docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.legacy-sidecar.yml \
-    -f docker-compose.legacy-sidecar.build.yml \
-    --profile legacy \
-    push legacy-ioc
-
-docker tag "${LEGACY_IMAGE}" adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:latest
-docker push adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:latest
+REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local \
+  REDIS_PVXS_IOC_PULL_POLICY=never ./scripts/smoke-test.sh
 ```
 
-Capture the immutable digest after push:
+`auto` is the default; `always` forces a pull; `never` requires the image to
+already exist and cannot silently fetch a remote replacement. The same policies
+are available for the fixture Redis image through `REDIS_IMAGE_PULL_POLICY`.
+
+Smoke tests use a generated Compose project, their own Compose file and temporary
+configuration, and no published host ports. Production/demo project and container
+name overrides do not change their ownership. Logs remain under `build/smoke-run.*`;
+cleanup removes only the test's own services and temporary configuration.
+
+## Recovery and manual operation
+
+If validation fails, preserve its logs, fix the linked issue, and qualify a new
+candidate. Do not overwrite a published release tag or bypass promotion with a
+manual build/push. The same checked-in promotion tool may be run by a maintainer
+with `GH_TOKEN`, registry authentication, and a checkout of the reviewed tag:
 
 ```sh
-docker image inspect "${IMAGE}" --format '{{join .RepoDigests "\n"}}'
-docker image inspect "${LEGACY_IMAGE}" --format '{{join .RepoDigests "\n"}}'
+python3 scripts/release-image.py promote --tag v0.8.2 --candidate-run RUN_ID
 ```
 
-When updating deployment compose files, keep the tag and digest together:
+Stable 0.9.0 additionally requires `--qualification-run RUN_ID`. The promotion
+mechanism uses Docker's [manifest-copy behavior](https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/)
+with `--prefer-index=false` and verifies the destination digest after each tag.
 
-```sh
-image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v${VERSION}@sha256:<digest>
-image: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc-legacy-sidecar:<sidecar-version>@sha256:<digest>
-```
-
-## Manual GitHub release
-
-```sh
-VERSION="$(cat VERSION)"
-gh release create "v${VERSION}" \
-  --repo fermi-ad/redis-pvxs-ioc \
-  --title "v${VERSION}" \
-  --notes-file CHANGELOG.md
-```
-
-After the release is created, edit the release notes to add the final image digests and the tested validation commands.
-
-Then open the post-release pin-sync PR. A tag identifies the intended release;
-only the published digest can identify the exact artifact in checked-in examples.
+Production references include both tag and digest. Rollback restores the previous
+immutable image and its saved compatible configuration, including the ACF files;
+it does not run the previous image against a newer incompatible configuration.

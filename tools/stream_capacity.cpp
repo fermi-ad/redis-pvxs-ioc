@@ -77,6 +77,14 @@ int main(int argc, char** argv) {
       decltype(monitors)& subscriptions;
       ~CancelAll() { for (auto& subscription : subscriptions) subscription->cancel(); }
     } cleanup{monitors}; // joins callbacks before their captured state is destroyed
+    RA_ArgsAdd arguments; arguments.trim = 16; arguments.approximateTrim = false;
+    std::vector<uint32_t> payload(elements);
+    // An explicit zero sample readies both scalar and array monitors. It is
+    // excluded from sample/latency accounting and has the same validated shape.
+    for (uint32_t i = 0; i < elements; ++i) payload[i] = i;
+    require((elements == 1 ? producer.addSingleValue<uint32_t>("data", 0, arguments)
+                           : producer.addSingleList("data", payload, arguments)).ok(), "initial sample rejected");
+    const auto connectionStart = Clock::now();
     for (uint32_t index = 0; index < count; ++index) {
       observations[index].latency.reserve(samples);
       clients.push_back(config.build());
@@ -119,25 +127,15 @@ int main(int argc, char** argv) {
           std::lock_guard<std::mutex> guard(mutex); failure = error.what(); changed.notify_all();
         }
       }).exec());
-    }
-    for (auto& client : clients) client.hurryUp();
-    RA_ArgsAdd arguments; arguments.trim = 16; arguments.approximateTrim = false;
-    std::vector<uint32_t> payload(elements);
-    // An explicit zero sample readies both scalar and array monitors. It is
-    // excluded from sample/latency accounting and has the same validated shape.
-    for (uint32_t i = 0; i < elements; ++i) payload[i] = i;
-    require((elements == 1 ? producer.addSingleValue<uint32_t>("data", 0, arguments)
-                           : producer.addSingleList("data", payload, arguments)).ok(), "initial sample rejected");
-    {
+      // Measure steady-state fan-out, not simultaneous TCP connection bursts.
+      // Every client must be ready before the timed producer starts.
+      clients.back().hurryUp();
       std::unique_lock<std::mutex> lock(mutex);
-      const auto ready = changed.wait_for(lock, 5s, [&] {
-        return !failure.empty() || std::all_of(observations.begin(), observations.end(), [](const auto& o) { return o.initial; });
-      });
-      if (!ready) throw std::runtime_error("initial monitors timed out (" + std::to_string(std::count_if(
-          observations.begin(), observations.end(), [](const auto& o) { return o.initial; })) +
-          " of " + std::to_string(count) + " ready)");
+      require(changed.wait_for(lock, 5s, [&] { return observations[index].initial || !failure.empty(); }),
+              "initial monitor timed out before the timed workload");
       if (!failure.empty()) throw std::runtime_error(failure);
     }
+    const auto connectionSeconds = std::chrono::duration<double>(Clock::now() - connectionStart).count();
     const auto start = Clock::now();
     const auto period = std::chrono::nanoseconds(1000000000 / rate);
     const auto deadline = start + period * samples + 10s;
@@ -184,7 +182,7 @@ int main(int argc, char** argv) {
     std::ofstream report(output);
     report << "{\"samples\":" << samples << ",\"clients\":" << count << ",\"elements\":" << elements
            << ",\"payload_bytes\":" << size_t(elements) * 4 << ",\"rate_target_hz\":" << rate
-           << ",\"produced_hz\":" << samples / producedSeconds << ",\"elapsed_seconds\":" << seconds
+           << ",\"connection_setup_seconds\":" << connectionSeconds << ",\"produced_hz\":" << samples / producedSeconds << ",\"elapsed_seconds\":" << seconds
            << ",\"received\":" << received << ",\"missed_updates\":" << uint64_t(samples) * count - received
            << ",\"duplicate_updates\":" << duplicates << ",\"final_values_converged\":true"
            << ",\"latency_p50_ms\":" << quantile(.5) << ",\"latency_p95_ms\":" << quantile(.95)

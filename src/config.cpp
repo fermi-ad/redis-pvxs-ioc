@@ -665,7 +665,7 @@ OperationLimitsConfig parseOperationLimits(const YAML::Node& node) {
   OperationLimitsConfig result;
   if (!node) return result;
   requireMap(node, "root.limits");
-  rejectUnknownKeys(node, "root.limits", {"write_workers", "queued_writes_per_pv", "queued_write_bytes", "max_payload_bytes", "operation_timeout_ms"});
+  rejectUnknownKeys(node, "root.limits", {"write_workers", "queued_writes_per_pv", "queued_write_bytes", "max_payload_bytes", "operation_timeout_ms", "alarm_queue_entries", "alarm_state_bytes"});
   const auto bounded = [&](const char* key, uint64_t initial, uint64_t low, uint64_t high) {
     const auto value = node[key] ? parseNumeric<uint64_t>(node[key], "root.limits." + std::string(key)) : initial;
     if (value < low || value > high) fail("root.limits." + std::string(key), "outside supported range");
@@ -675,6 +675,10 @@ OperationLimitsConfig parseOperationLimits(const YAML::Node& node) {
   result.queuedWritesPerPV = bounded("queued_writes_per_pv", result.queuedWritesPerPV, 1, 4096);
   result.queuedWriteBytes = bounded("queued_write_bytes", result.queuedWriteBytes, 1024, 1024ull * 1024u * 1024u);
   result.maxPayloadBytes = bounded("max_payload_bytes", result.maxPayloadBytes, 1, 1024ull * 1024u * 1024u);
+  result.alarmQueueEntries = bounded("alarm_queue_entries", result.alarmQueueEntries, 1, 1000000);
+  result.alarmStateBytes = bounded("alarm_state_bytes", result.alarmStateBytes, 1024, 1024ull * 1024u * 1024u);
+  if (result.alarmQueueEntries > result.alarmStateBytes / kAlarmQueueEntryBytes)
+    fail("root.limits.alarm_state_bytes", "must cover the reserved alarm queue");
   if (node["operation_timeout_ms"])
     result.operationTimeoutMs = bounded("operation_timeout_ms", 0, 1, 300000);
   return result;
@@ -824,6 +828,14 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
 
   if (config.pvs.empty() && config.rpcServices.empty()) {
     fail("root", "must define at least one of 'pvs' or 'rpc_services'");
+  }
+
+  auto alarmBytes = config.limits.alarmStateBytes - config.limits.alarmQueueEntries * kAlarmQueueEntryBytes;
+  for (const auto& pv : config.pvs) {
+    const auto nameBytes = fullPVName(config.server, pv).size();
+    if (alarmBytes < 1024 || nameBytes > (alarmBytes - 1024) / 2)
+      fail("root.limits.alarm_state_bytes", "must cover the reserved alarm queue and current PV states");
+    alarmBytes -= 1024 + 2 * nameBytes;
   }
 
   return config;
@@ -1026,7 +1038,8 @@ bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig
 bool sameOperationLimits(const OperationLimitsConfig& a, const OperationLimitsConfig& b) {
   return a.writeWorkers == b.writeWorkers && a.queuedWritesPerPV == b.queuedWritesPerPV &&
          a.queuedWriteBytes == b.queuedWriteBytes && a.maxPayloadBytes == b.maxPayloadBytes &&
-         a.operationTimeoutMs == b.operationTimeoutMs;
+         a.operationTimeoutMs == b.operationTimeoutMs && a.alarmQueueEntries == b.alarmQueueEntries &&
+         a.alarmStateBytes == b.alarmStateBytes;
 }
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
@@ -1069,6 +1082,7 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "config:lastDiff"),
     adminPVName(server, "stats:pvCount"),
     adminPVName(server, "stats:operations"),
+    adminPVName(server, "alarms:status"),
     adminPVName(server, "backend:health"),
     adminPVName(server, "access:reload"),
     adminPVName(server, "access:enabled"),

@@ -78,7 +78,8 @@ public:
       sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : "No source data; using initial fallback";
     }
     auto initial = createInitialValue(config_);
-    populateValue(initial);
+    const auto initialAlarm = populateValue(initial);
+    if (alarmPublisher_) alarmRegistration_ = alarmPublisher_->prepare(fullName_, initialAlarm);
     pv_.open(initial);
     auto weak = this->weak_from_this();
     if (config_.write) {
@@ -106,11 +107,10 @@ public:
   const std::string& fullName() const override { return fullName_; }
   pvxs::server::SharedPV& sharedPV() override { return pv_; }
   bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
-  void activate() noexcept override { committed_ = true; }
-
-  void setAlarmPublisher(std::shared_ptr<AlarmPublisher> publisher) noexcept override {
+  void activate() noexcept override {
     std::lock_guard<std::mutex> lock(mutex_);
-    alarmPublisher_ = std::move(publisher);
+    committed_ = true;
+    if (alarmRegistration_) alarmRegistration_->activate();
   }
 
   class Update final : public PVRuntimeUpdate {
@@ -119,6 +119,8 @@ public:
     PVConfig config;
     uint64_t generation = 0;
     std::shared_ptr<const std::string> cancellation;
+    std::shared_ptr<AlarmPublisher> publisher;
+    std::shared_ptr<AlarmPublisher::Registration> alarm;
     void commit() noexcept override {
       std::lock_guard<std::mutex> lock(runtime->mutex_);
       const auto& old = runtime->config_.transform;
@@ -129,13 +131,21 @@ public:
         runtime->failPendingLocked(cancellation);
       }
       static_assert(std::is_nothrow_swappable_v<PVConfig>);
+      if (alarm != runtime->alarmRegistration_) {
+        if (runtime->alarmRegistration_) runtime->alarmRegistration_->retire();
+        runtime->alarmPublisher_.swap(publisher);
+        runtime->alarmRegistration_.swap(alarm);
+        // The new registration stays inactive until refresh/read processing
+        // supplies the latest state; preparation-time samples are not emitted.
+      }
       std::swap(runtime->config_, config);
       runtime->generation_ = generation;
     }
     void refresh() override { runtime->refreshMetadata(); }
   };
 
-  std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation) override {
+  std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation,
+      const std::shared_ptr<AlarmPublisher>& publisher = {}) override {
     auto result = std::make_unique<Update>();
     result->runtime = this->shared_from_this();
     result->config = config;
@@ -146,7 +156,10 @@ public:
     // Validate metadata/value construction now, but do not post a stale sample
     // at commit: readback can advance while the remaining generation is staged.
     auto preview = pv_.fetch();
-    populateValue(preview, config);
+    const auto state = populateValue(preview, config);
+    result->publisher = publisher ? publisher : alarmPublisher_;
+    result->alarm = result->publisher == alarmPublisher_ ? alarmRegistration_
+        : result->publisher->prepare(fullName_, state);
     return result;
   }
 
@@ -158,16 +171,14 @@ public:
 
   void refreshMetadata() {
     AlarmState state;
-    bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!alive_) return;
       auto value = pv_.fetch();
       state = populateValue(value);
-      transition = recordAlarmLocked(state);
       pv_.post(value);
+      recordAlarmLocked(state);
     }
-    publishAlarm(state, transition);
   }
 
   void deactivate(const std::string& reason) override {
@@ -175,6 +186,7 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++commandEpoch_;
+      if (alarmRegistration_) alarmRegistration_->retire();
       failPendingLocked(std::make_shared<const std::string>(reason));
     }
     readReader_.reset();
@@ -220,20 +232,11 @@ private:
 
   AlarmState populateValue(pvxs::Value& value) { return populateValue(value, config_); }
 
-  bool recordAlarmLocked(const AlarmState& state) {
-    const bool changed = state.status != lastPublishedStatus_ || state.severity != lastPublishedSeverity_;
-    lastPublishedStatus_ = state.status;
-    lastPublishedSeverity_ = state.severity;
-    return changed;
-  }
-
-  void publishAlarm(const AlarmState& state, bool changed) {
-    std::shared_ptr<AlarmPublisher> publisher;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (changed && alive_.load() && committed_.load()) publisher = alarmPublisher_;
+  void recordAlarmLocked(const AlarmState& state) {
+    if (alarmRegistration_) {
+      alarmRegistration_->update(state);
+      if (alive_ && committed_) alarmRegistration_->activate();
     }
-    if (publisher) publisher->publishTransition(fullName_, state);
   }
 
   void handleRead(const RedisAdapter::StreamBatch& data, bool updateValue, bool canConfirm) {
@@ -253,7 +256,6 @@ private:
 
   void markInvalid(const std::string& error) {
     AlarmState state;
-    bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!alive_) return;
@@ -261,16 +263,14 @@ private:
       sourceError_ = error;
       auto value = pv_.fetch();
       state = populateValue(value);
-      transition = recordAlarmLocked(state);
       pv_.post(value);
+      recordAlarmLocked(state);
     }
-    publishAlarm(state, transition);
   }
 
   void handleRawUpdate(const ValueType& raw, uint64_t timestamp, bool updateValue,
                        bool canConfirm = false, const std::string& streamId = {}) {
     AlarmState state;
-    bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!alive_) return;
@@ -291,11 +291,10 @@ private:
       sourceError_.clear();
       auto value = pv_.fetch();
       state = populateValue(value);
-      transition = recordAlarmLocked(state);
-      // Serialize posts with config changes and deactivation, not just fetches.
+      // Serialize value and alarm-state updates with commit and retirement.
       pv_.post(value);
+      recordAlarmLocked(state);
     }
-    publishAlarm(state, transition);
   }
 
   void failPendingLocked(const std::shared_ptr<const std::string>& reason) {
@@ -429,6 +428,7 @@ private:
   PVConfig config_;
   std::shared_ptr<RedisAdapter> readRedis_, writeRedis_, confirmRedis_;
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
+  std::shared_ptr<AlarmPublisher::Registration> alarmRegistration_;
   std::string fullName_;
   uint64_t generation_ = 0;
   std::atomic<uint64_t> commandEpoch_{0};
@@ -444,8 +444,6 @@ private:
   uint64_t lastTimestampNs_ = 0;
   bool sourceValid_ = false;
   std::string sourceError_;
-  int lastPublishedStatus_ = epicsAlarmNone;
-  int lastPublishedSeverity_ = epicsSevNone;
   uint64_t nextPendingId_ = 0;
   std::unordered_map<uint64_t, std::shared_ptr<PendingPut>> pendingPuts_;
 };

@@ -180,6 +180,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/discovery.cpp
   src/util.cpp
   src/alarm_publisher.cpp
+  src/alarm_worker.cpp
   src/runtime.cpp
   src/operation_queue.cpp
   src/app.cpp
@@ -355,6 +356,20 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_executable(alarm_publisher_tests tests/alarm_publisher_tests.cpp)
   target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME alarm_publisher_tests COMMAND alarm_publisher_tests)
+
+  add_executable(alarm_delivery_tests tests/alarm_delivery_tests.cpp)
+  target_link_libraries(alarm_delivery_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(alarm_delivery_tests PRIVATE -UNDEBUG)
+  add_test(NAME alarm_delivery_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:alarm_delivery_tests>)
+  set_tests_properties(alarm_delivery_tests PROPERTIES TIMEOUT 30)
+  add_test(NAME alarm_recovery_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/alarm_recovery_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(alarm_recovery_e2e PROPERTIES TIMEOUT 30)
 
   if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
     add_executable(channelfinder_tests tests/channelfinder_tests.cpp)

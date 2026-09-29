@@ -19,6 +19,7 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:config:reloadStatus` | structure/read | Attempt, phase, duration, change counts and per-backend outcomes |
 | `SYS:<instance>:stats:pvCount` | int64/read | Configured Redis-backed and RPC PV count |
 | `SYS:<instance>:stats:operations` | structure/read | Write queue counts, reservations, peaks and configured limits |
+| `SYS:<instance>:rpc:status` | structure/read | RPC discovery/retry state, per-service call outcomes and RPC queue reservations |
 | `SYS:<instance>:alarms:status` | structure/read | Alarm delivery state, outcomes, reconciliation and reservations |
 | `SYS:<instance>:backend:health` | string/read | `<connected>/<total> connected`, with disconnected aliases when applicable |
 | `SYS:<instance>:access:reload` | int64/write | Request an ACF-only reload |
@@ -47,7 +48,8 @@ generation, and only then applies it. A successful reload increments
 `config:generation`, reports `generation <n> active`, and clears
 `config:lastError`.
 
-`config:reloadStatus` describes the latest startup or whole-file reload attempt.
+`config:reloadStatus` describes the latest startup, whole-file reload or optional
+RPC recovery publication (`kind=rpc-recovery`) attempt.
 Its monotonically increasing `attempt` is separate from `activeGeneration` and
 `candidateGeneration`: rejected attempts do not advance the active generation.
 It reports the schema version, elapsed `durationMs` at each published phase, and
@@ -98,7 +100,10 @@ runtime does not globally defer the existing readers.
 Unchanged RPC service definitions retain their reflected methods, bridge and PVs,
 including when that backend is temporarily unavailable. Access assignments still
 follow the new configuration. Changing endpoint, service, suffix or defaults
-rebuilds that service; restarting the IOC refreshes all reflected schemas.
+rebuilds that service; restarting the IOC refreshes all reflected schemas. Optional
+service recovery publishes a new configuration/catalog generation using the
+current policy, without rereading the ACF. RPC retry and call diagnostics are
+documented in [RPC forwarding](rpc-forwarding.md).
 
 Namespace and bind settings cannot change through hot reload. Restart the process
 to change `server.instance`, `server.namespace`, interfaces, ports, or beacon

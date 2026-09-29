@@ -284,6 +284,28 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
       --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
       --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
     set_tests_properties(endpoint_rpc_e2e PROPERTIES TIMEOUT 75)
+    add_executable(rpc_argument_tests tests/rpc_argument_tests.cpp)
+    target_compile_options(rpc_argument_tests PRIVATE -UNDEBUG)
+    target_link_libraries(rpc_argument_tests PRIVATE redis-pvxs-ioc-core)
+    add_executable(rpc_runtime_tests tests/rpc_runtime_tests.cpp)
+    target_compile_options(rpc_runtime_tests PRIVATE -UNDEBUG)
+    target_link_libraries(rpc_runtime_tests PRIVATE redis-pvxs-ioc-core)
+    add_test(NAME rpc_hardening_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+      ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/rpc_hardening_e2e.py
+      --ioc $<TARGET_FILE:redis-pvxs-ioc> --fixture $<TARGET_FILE:rpc_fixture>
+      --arguments-fixture $<TARGET_FILE:rpc_argument_tests>
+      --runtime-fixture $<TARGET_FILE:rpc_runtime_tests>
+      --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+      --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
+    set_tests_properties(rpc_hardening_e2e PROPERTIES TIMEOUT 75)
+    add_test(NAME rpc_recovery_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+      ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/rpc_recovery_e2e.py
+      --ioc $<TARGET_FILE:redis-pvxs-ioc> --fixture $<TARGET_FILE:rpc_fixture>
+      --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+      --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
+    set_tests_properties(rpc_recovery_e2e PROPERTIES TIMEOUT 60)
   endif()
   add_test(NAME config_cli_tests COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/tests/config_cli_tests.py $<TARGET_FILE:redis-pvxs-ioc>)

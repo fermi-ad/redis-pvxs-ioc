@@ -243,8 +243,37 @@ install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
+
+  add_executable(endpoint_tests tests/endpoint_tests.cpp)
+  target_link_libraries(endpoint_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(endpoint_tests PRIVATE -UNDEBUG)
+  add_test(NAME endpoint_tests COMMAND endpoint_tests)
+  set_tests_properties(endpoint_tests PROPERTIES TIMEOUT 15)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  if(REDIS_PVXS_IOC_ENABLE_GRPC)
+    set(RPC_FIXTURE_PROTO "${CMAKE_SOURCE_DIR}/tests/rpc_fixture.proto")
+    set(RPC_FIXTURE_DIR "${CMAKE_BINARY_DIR}/rpc-fixture")
+    file(MAKE_DIRECTORY "${RPC_FIXTURE_DIR}")
+    add_custom_command(
+      OUTPUT "${RPC_FIXTURE_DIR}/rpc_fixture.pb.cc" "${RPC_FIXTURE_DIR}/rpc_fixture.pb.h"
+             "${RPC_FIXTURE_DIR}/rpc_fixture.grpc.pb.cc" "${RPC_FIXTURE_DIR}/rpc_fixture.grpc.pb.h"
+      COMMAND ${Protobuf_PROTOC_EXECUTABLE} --proto_path=${CMAKE_SOURCE_DIR}/tests
+              --cpp_out=${RPC_FIXTURE_DIR} --grpc_out=${RPC_FIXTURE_DIR}
+              --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin> ${RPC_FIXTURE_PROTO}
+      DEPENDS "${RPC_FIXTURE_PROTO}")
+    add_executable(rpc_fixture tests/rpc_fixture.cpp
+      "${RPC_FIXTURE_DIR}/rpc_fixture.pb.cc" "${RPC_FIXTURE_DIR}/rpc_fixture.grpc.pb.cc")
+    target_include_directories(rpc_fixture PRIVATE "${RPC_FIXTURE_DIR}")
+    target_link_libraries(rpc_fixture PRIVATE protobuf::libprotobuf gRPC::grpc++ gRPC::grpc++_reflection)
+    add_test(NAME endpoint_rpc_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+      ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/endpoint_rpc_e2e.py
+      --ioc $<TARGET_FILE:redis-pvxs-ioc> --fixture $<TARGET_FILE:rpc_fixture>
+      --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+      --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
+    set_tests_properties(endpoint_rpc_e2e PROPERTIES TIMEOUT 75)
+  endif()
   add_test(NAME config_cli_tests COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/tests/config_cli_tests.py $<TARGET_FILE:redis-pvxs-ioc>)
   set_tests_properties(config_cli_tests PROPERTIES TIMEOUT 60)

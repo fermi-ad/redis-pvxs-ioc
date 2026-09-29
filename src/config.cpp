@@ -1,4 +1,5 @@
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/endpoints.h"
 
 #include <algorithm>
 #include <cmath>
@@ -743,7 +744,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
   // Redis-backed PVs.
   const auto pvsNode = root["pvs"] ? requireSequence(root["pvs"], "root.pvs") : YAML::Node();
 
-  std::set<std::string> servedNames;
+  EndpointRegistry endpoints;
+  endpoints.addDiagnostics(config.server);
   std::set<std::pair<std::string, std::string>> subscribedKeys;
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
@@ -771,24 +773,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
                           config.redisBackends,
                           hasLegacyRedis);
     }
-    const auto reservedNames = adminPVNames(config.server);
-    const auto names = fullPVNames(config.server, pv);
-    for (size_t nameIndex = 0; nameIndex < names.size(); ++nameIndex) {
-      const auto path = nameIndex == 0u
-          ? "root.pvs[" + std::to_string(index) + "].name"
-          : "root.pvs[" + std::to_string(index) + "].aliases[" +
-                std::to_string(nameIndex - 1u) + "]";
-      const auto& name = names[nameIndex];
-      if (name.find('\0') != std::string::npos) fail(path, "PV names must not contain NUL");
-      if (!servedNames.insert(name).second) {
-        fail(path, "duplicate served PV name '" + name + "'");
-      }
-      for (const auto& reservedName : reservedNames) {
-        if (name == reservedName) {
-          fail(path, "PV name conflicts with reserved metadata PV '" + reservedName + "'");
-        }
-      }
-    }
+    endpoints.addPV(config.server, pv, "root.pvs[" + std::to_string(index) + "]");
     if (!subscribedKeys.insert({pv.read.backend, pv.read.key}).second) {
       fail("root.pvs[" + std::to_string(index) + "].read.key",
            "duplicate subscribed key '" + pv.read.backend + ":" + pv.read.key + "'");

@@ -11,6 +11,18 @@ import sys
 import tempfile
 
 
+def check_fixture_report(evidence, samples, clients):
+    expected = samples * clients
+    if evidence.get("samples") != samples or evidence.get("clients") != clients:
+        raise ValueError("capacity fixture report identifies a different workload")
+    if evidence.get("received") != expected or evidence.get("missed_updates") != 0:
+        raise ValueError(f"capacity fixture requires all {expected} updates without loss: {evidence}")
+    if evidence.get("duplicate_updates") != 0 or evidence.get("final_values_converged") is not True:
+        raise ValueError("capacity fixture must converge without duplicate updates")
+    if not evidence["latency_p99_ms"] >= evidence["latency_p50_ms"] >= 0:
+        raise ValueError("capacity fixture latency quantiles are invalid")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ioc", required=True)
@@ -40,14 +52,13 @@ def main():
                                "--clients", str(clients), "--output", str(report)]
                     subprocess.run(command, check=True, timeout=10)
                     evidence = json.loads(report.read_text())
-                    assert ioc.poll() is None
-                    assert evidence["final_values_converged"]
-                    assert evidence["received"] + evidence["missed_updates"] == 64 * clients
-                    assert evidence["duplicate_updates"] == 0
-                    assert evidence["latency_p99_ms"] >= evidence["latency_p50_ms"] >= 0
+                    if ioc.poll() is not None:
+                        raise RuntimeError("IOC exited during the capacity fixture")
+                    check_fixture_report(evidence, 64, clients)
                     # A repeated workload cannot silently overwrite its report.
-                    assert subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                          timeout=5).returncode != 0
+                    if subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      timeout=5).returncode == 0:
+                        raise RuntimeError("capacity client overwrote an existing report")
                     print(case, json.dumps(evidence))
                 except Exception:
                     print((folder / "ioc.log").read_text(), file=sys.stderr)

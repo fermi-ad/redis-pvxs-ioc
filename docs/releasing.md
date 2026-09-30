@@ -22,13 +22,16 @@ deployment needs them. Fleet deployment is a separate task.
 2. Dispatch **Publish redis-pvxs-ioc candidate image** from that exact merged
    revision. An isolated, digest-pinned BuildKit builder on adlinux3 builds and
    pushes only a unique `candidate-<run>-<attempt>-<commit>` tag, including an
-   SPDX SBOM and full build provenance. This tag is unqualified until the run
-   passes. It then pulls the immutable digest, validates Linux amd64 identity
+    SPDX SBOM and full build provenance. `candidate-*` tags are run outputs for
+    validation and diagnosis; do not deploy them directly. A failed run may
+    leave its unique tag in the registry, and the tag alone proves no
+    qualification. Promotion requires the successful run's evidence for the
+    exact immutable digest. The workflow pulls that digest, validates Linux amd64 identity
    and default configuration, and runs isolated Redis/PVA and access-control
    tests against that digest. A successful run retains `candidate.json`,
    attestations, source revisions and validation logs in the
    `release-candidate-<run>-<attempt>` workflow artifact. Candidate publication
-   never changes a stable release tag or `latest`.
+    never changes a stable release tag or `latest`.
 3. For stable 0.9.0 and later, complete the separate qualification workflow on
    the same commit and digest: integration/sanitizer/native checks, 600 exact
    1080p Mono8 frames, capacity evidence, a 24-hour amd64 soak, and rollback to
@@ -50,6 +53,12 @@ deployment needs them. Fleet deployment is a separate task.
    image, validation links, evidence JSON, and `release-evidence.tar.gz` containing
    the candidate and qualification artifacts. The complete image index, including
    its attestations, retains the validated digest during promotion.
+   A new GitHub Release remains a draft until every required evidence asset is
+   uploaded and its downloaded bytes match the validated files. Publication and
+   the final prerelease/latest classification happen last. Failed uploads leave
+   the new release unpublished. Retries verify existing published assets without
+   replacing them, add only missing files, and never withdraw a published release.
+   The evidence archive is reproducible across local extraction timestamps.
 7. Open and merge a post-release pin-sync PR updating every checked-in main-runtime
    image example to `image:v${VERSION}@sha256:<digest>`. Keep the independently
    versioned historical sidecar image unchanged.

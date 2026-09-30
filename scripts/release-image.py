@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate immutable images and promote evidence from trusted candidate runs."""
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -212,6 +213,79 @@ def changelog_entry(version):
     return text[match.end():match.end() + end.start() if end else len(text)].strip()
 
 
+def existing_release(tag):
+    result = subprocess.run(
+        ["gh", "release", "view", tag, "--repo", REPOSITORY, "--json", "isDraft,assets"],
+        text=True, capture_output=True)
+    if result.returncode:
+        if "release not found" in result.stderr.lower():
+            return None
+        raise RuntimeError("cannot inspect existing release: " + result.stderr)
+    info = json.loads(result.stdout)
+    if not isinstance(info.get("isDraft"), bool):
+        raise ValueError("existing release has no valid draft state")
+    return info
+
+
+def verify_release_assets(tag, assets):
+    # Verify the uploaded bytes, rather than relying on upload success or asset
+    # names. This also validates assets repaired during a retried publication.
+    with tempfile.TemporaryDirectory(prefix="redis-pvxs-release-assets-") as temp:
+        destination = Path(temp)
+        for asset in assets:
+            run("gh", "release", "download", tag, "--repo", REPOSITORY,
+                "--pattern", asset.name, "--dir", str(destination))
+            downloaded = destination / asset.name
+            if hashlib.sha256(downloaded.read_bytes()).digest() != hashlib.sha256(asset.read_bytes()).digest():
+                raise ValueError("uploaded release evidence differs: " + asset.name)
+
+
+def publish_release(tag, notes, assets, prerelease, updated_latest):
+    info = existing_release(tag)
+    metadata = ["--repo", REPOSITORY, "--title", tag, "--notes-file", str(notes)]
+    if info is None:
+        subprocess.run(["gh", "release", "create", tag, *metadata,
+                        "--verify-tag", "--draft"], check=True)
+    elif info["isDraft"]:
+        subprocess.run(["gh", "release", "edit", tag, *metadata,
+                        "--draft=true", "--latest=false"], check=True)
+    # Published assets are immutable: verify existing bytes and add only missing
+    # files. --clobber would briefly remove evidence from a visible release.
+    upload = assets
+    clobber = ["--clobber"]
+    if info is not None and not info["isDraft"]:
+        names = {asset["name"] for asset in info.get("assets", [])}
+        existing = [asset for asset in assets if asset.name in names]
+        if existing:
+            verify_release_assets(tag, existing)
+        upload = [asset for asset in assets if asset.name not in names]
+        clobber = []
+    if upload:
+        subprocess.run(["gh", "release", "upload", tag, *(str(asset) for asset in upload),
+                        "--repo", REPOSITORY, *clobber], check=True)
+    verify_release_assets(tag, assets)
+    subprocess.run(["gh", "release", "edit", tag, *metadata, "--draft=false",
+                    "--prerelease=true" if prerelease else "--prerelease=false",
+                    "--latest=true" if updated_latest else "--latest=false"], check=True)
+
+
+def evidence_archive(directory, qualification_run):
+    # A retry on the same evidence must reproduce the same bytes. Artifact
+    # extraction times and local usernames must not alter the published archive.
+    archive = directory / "release-evidence.tar.gz"
+    def canonical(info):
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        info.mtime = 0
+        return info
+    with archive.open("wb") as output, gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as bundle:
+            bundle.add(directory / "candidate", arcname="candidate", filter=canonical)
+            if qualification_run:
+                bundle.add(directory / "qualification", arcname="qualification", filter=canonical)
+    return archive
+
+
 def release(tag, candidate_run, qualification_run):
     version = (ROOT / "VERSION").read_text().strip()
     core, prerelease = version_parts(version)
@@ -248,31 +322,13 @@ def release(tag, candidate_run, qualification_run):
             + "- SBOM, full build provenance, source inventory and validation logs are retained in release-evidence.tar.gz.\n"
             + "- Rechecked labels, binary identity, default configuration, notices, and isolated Redis/PVA smoke behavior.\n"
             + ("- `latest` now points to the same digest.\n" if updated_latest else "- `latest` was preserved.\n"))
-        exists = subprocess.run(["gh", "release", "view", tag, "--repo", REPOSITORY],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        command = ["gh", "release", "edit" if exists else "create", tag,
-                   "--repo", REPOSITORY, "--title", tag, "--notes-file", str(notes)]
-        if not exists:
-            command += ["--verify-tag"]
-        # A retried publication may already have a draft release. Explicitly
-        # publish it and set its final classification instead of preserving
-        # stale draft/prerelease flags from a previous attempt.
-        command += ["--draft=false", "--prerelease=true" if prerelease else "--prerelease=false"]
-        command += ["--latest=true" if updated_latest else "--latest=false"]
-        subprocess.run(command, check=True)
-        subprocess.run(["gh", "release", "upload", tag, str(directory / "candidate/candidate.json"),
-                        "--repo", REPOSITORY, "--clobber"], check=True)
+        assets = [directory / "candidate/candidate.json"]
         if qualification_run:
-            subprocess.run(["gh", "release", "upload", tag, str(directory / "qualification/qualification.json"),
-                            "--repo", REPOSITORY, "--clobber"], check=True)
+            assets.append(directory / "qualification/qualification.json")
         # Workflow artifacts expire. Keep the complete downloaded evidence with
         # the release as well as the attestations attached to the image index.
-        archive = directory / "release-evidence.tar.gz"
-        with tarfile.open(archive, "w:gz") as bundle:
-            bundle.add(directory / "candidate", arcname="candidate")
-            if qualification_run:
-                bundle.add(directory / "qualification", arcname="qualification")
-        subprocess.run(["gh", "release", "upload", tag, str(archive), "--repo", REPOSITORY, "--clobber"], check=True)
+        assets.append(evidence_archive(directory, qualification_run))
+        publish_release(tag, notes, assets, prerelease, updated_latest)
 
 
 def main():

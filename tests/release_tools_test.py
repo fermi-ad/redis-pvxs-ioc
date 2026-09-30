@@ -185,16 +185,118 @@ class ReleaseTests(unittest.TestCase):
             with patch.object(release, "ROOT", root), patch.object(release, "run", return_value=SHA), \
                     patch.object(release, "load_record", side_effect=candidate_record), \
                     patch.object(release, "validate_image"), \
+                    patch.object(release, "existing_release", return_value={"isDraft": True}), \
+                    patch.object(release, "verify_release_assets") as verify, \
                     patch.object(release, "promote_digest", return_value=(release.IMAGE_REPOSITORY + ":v0.8.2", True)), \
                     patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as calls:
                 release.release("v0.8.2", "123", "")
-            edits = [call.args[0] for call in calls.call_args_list if call.args[0][:3] == ["gh", "release", "edit"]]
+            edits = [call.args[0] for call in calls.call_args_list
+                     if call.args[0][:3] == ["gh", "release", "edit"] and "--draft=false" in call.args[0]]
             self.assertEqual(len(edits), 1)
             self.assertIn("--draft=false", edits[0])
             self.assertIn("--prerelease=false", edits[0])
             self.assertIn("--latest=true", edits[0])
             uploads = [call.args[0] for call in calls.call_args_list if call.args[0][:3] == ["gh", "release", "upload"]]
             self.assertTrue(any(any(arg.endswith("release-evidence.tar.gz") for arg in call) for call in uploads))
+            verify.assert_called_once()
+
+    def test_assets_are_uploaded_and_verified_before_new_draft_or_retry_is_published(self):
+        for existing in (None, {"isDraft": True}, {"isDraft": False}):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                notes = root / "notes.md"
+                assets = [root / name for name in ("candidate.json", "qualification.json", "release-evidence.tar.gz")]
+                events = []
+                def command(args, **kwargs):
+                    events.append(args)
+                    return subprocess.CompletedProcess(args, 0)
+                def verified(tag, uploaded):
+                    self.assertEqual(uploaded, assets)
+                    events.append(["verified"])
+                with patch.object(release, "existing_release", return_value=existing), \
+                        patch.object(release.subprocess, "run", side_effect=command), \
+                        patch.object(release, "verify_release_assets", side_effect=verified):
+                    release.publish_release("v0.9.0", notes, assets, False, True)
+                upload = next(i for i, event in enumerate(events) if event[:3] == ["gh", "release", "upload"])
+                verification = events.index(["verified"])
+                publication = next(i for i, event in enumerate(events) if "--draft=false" in event)
+                self.assertLess(upload, verification)
+                self.assertLess(verification, publication)
+                self.assertIn("--latest=true", events[publication])
+                if existing is None:
+                    self.assertIn("--draft", events[0])
+                elif not existing["isDraft"]:
+                    self.assertFalse(any("--draft=true" in event for event in events))
+
+    def test_upload_or_verification_failure_leaves_a_new_release_unpublished(self):
+        for failure in ("upload", "verify"):
+            with self.subTest(failure=failure):
+                events = []
+                def command(args, **kwargs):
+                    events.append(args)
+                    if failure == "upload" and args[:3] == ["gh", "release", "upload"]:
+                        raise subprocess.CalledProcessError(1, args)
+                    return subprocess.CompletedProcess(args, 0)
+                def verified(*args):
+                    if failure == "verify":
+                        raise ValueError("uploaded release evidence differs")
+                with patch.object(release, "existing_release", return_value=None), \
+                        patch.object(release.subprocess, "run", side_effect=command), \
+                        patch.object(release, "verify_release_assets", side_effect=verified):
+                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                        release.publish_release("v0.9.0", Path("notes"), [Path("candidate.json")], False, True)
+                self.assertFalse(any("--draft=false" in event or "--latest=true" in event for event in events))
+
+    def test_downloaded_asset_bytes_must_match_the_validated_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "candidate.json"
+            asset.write_bytes(b"validated evidence")
+            for altered in (False, True):
+                def download(*args):
+                    directory = Path(args[args.index("--dir") + 1])
+                    (directory / asset.name).write_bytes(b"different bytes" if altered else asset.read_bytes())
+                    return ""
+                with self.subTest(altered=altered), patch.object(release, "run", side_effect=download):
+                    if altered:
+                        with self.assertRaisesRegex(ValueError, "evidence differs"):
+                            release.verify_release_assets("v0.9.0", [asset])
+                    else:
+                        release.verify_release_assets("v0.9.0", [asset])
+
+    def test_published_assets_are_verified_without_clobbering_or_withdrawing_them(self):
+        asset = Path("candidate.json")
+        info = {"isDraft": False, "assets": [{"name": asset.name}]}
+        with patch.object(release, "existing_release", return_value=info), \
+                patch.object(release, "verify_release_assets", side_effect=ValueError("mismatched bytes")), \
+                patch.object(release.subprocess, "run") as commands:
+            with self.assertRaisesRegex(ValueError, "mismatched bytes"):
+                release.publish_release("v0.9.0", Path("notes"), [asset], False, True)
+            commands.assert_not_called()
+        with patch.object(release, "existing_release", return_value=info), \
+                patch.object(release, "verify_release_assets"), \
+                patch.object(release.subprocess, "run") as commands:
+            release.publish_release("v0.9.0", Path("notes"), [asset], False, True)
+            self.assertFalse(any("upload" in c.args[0] or "--draft=true" in c.args[0] for c in commands.call_args_list))
+
+    def test_evidence_archive_is_reproducible_across_extraction_timestamps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "candidate").mkdir()
+            asset = root / "candidate/candidate.json"
+            asset.write_text("same validated bytes")
+            before = release.evidence_archive(root, "").read_bytes()
+            os.utime(asset, (123456789, 123456789))
+            os.utime(root / "candidate", (987654321, 987654321))
+            self.assertEqual(release.evidence_archive(root, "").read_bytes(), before)
+
+    def test_release_lookup_failure_is_not_treated_as_an_absent_release(self):
+        failure = subprocess.CompletedProcess([], 1, "", "authentication failed (HTTP 401)")
+        with patch.object(release.subprocess, "run", return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, "cannot inspect"):
+                release.existing_release("v0.9.0")
+        missing = subprocess.CompletedProcess([], 1, "", "release not found")
+        with patch.object(release.subprocess, "run", return_value=missing):
+            self.assertIsNone(release.existing_release("v0.9.0"))
 
 
 class SmokeTests(unittest.TestCase):

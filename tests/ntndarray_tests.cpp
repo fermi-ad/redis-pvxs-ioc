@@ -52,8 +52,16 @@ int main() {
   assert(skippedNDArrayFrames(100, 0) == 0);  // producer reset
   assert(skippedNDArrayFrames(maximumId, minimumId) == 0);  // rollover
   assert(skippedNDArrayFrames(maximumId, maximumId) == 0);
-  assert(skippedNDArrayFrames(minimumId, maximumId) == 4294967294ULL);
-  assert(skippedNDArrayFrames(minimumId, 0) == 2147483647ULL);
+  assert(skippedNDArrayFrames(minimumId, maximumId) == 0);
+  assert(skippedNDArrayFrames(minimumId, 0) == 0);
+  assert(skippedNDArrayFrames(maximumId - 1, minimumId + 2) == 3);
+  assert(assessNDArrayFrameGap(minimumId, 0).discontinuity);
+  assert(assessNDArrayFrameGap(-2000000000, 1).discontinuity);
+  assert(skippedNDArrayFrames(-2000000000, 1) == 0);
+  assert(assessNDArrayFrameGap(1, 5, 2).discontinuity);
+  assert(skippedNDArrayFrames(1, 4, 2) == 2);
+  assert(!assessNDArrayFrameGap(1, 2, 0).discontinuity);
+  assert(assessNDArrayFrameGap(1, 3, 0).discontinuity);
   assert(skippedNDArrayFrames(maximumId - 1, maximumId) == 0);
   const std::vector<std::pair<std::string, size_t>> types{
       {"0", 1}, {"1", 1}, {"2", 2}, {"3", 2}, {"4", 4},

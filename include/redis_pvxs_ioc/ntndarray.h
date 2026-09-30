@@ -50,9 +50,16 @@ struct NDArrayFrame {
 using NDArrayAttrs = std::unordered_map<std::string, std::string>;
 
 size_t elementSize(PrimitiveType type);
-// Only forward gaps are countable. Repeated IDs and backward reset/rollover
-// establish a new baseline without inventing a missing-frame count.
-uint64_t skippedNDArrayFrames(int32_t previous, int32_t current) noexcept;
+struct NDArrayFrameGap {
+  uint64_t skipped = 0;
+  bool discontinuity = false;
+};
+// Serial arithmetic handles int32 rollover. Ambiguous/backward changes and
+// forward gaps above the configured ceiling establish a discontinuity.
+NDArrayFrameGap assessNDArrayFrameGap(int32_t previous, int32_t current,
+                                    uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap) noexcept;
+uint64_t skippedNDArrayFrames(int32_t previous, int32_t current,
+                             uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap) noexcept;
 NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs,
                                int64_t streamTimestampNs,
                                uint64_t maxFrameBytes);

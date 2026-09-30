@@ -193,9 +193,17 @@ size_t elementSize(const PrimitiveType type) {
   throw std::runtime_error("non-numeric NTNDArray element type");
 }
 
-uint64_t skippedNDArrayFrames(const int32_t previous, const int32_t current) noexcept {
-  const auto difference = static_cast<int64_t>(current) - static_cast<int64_t>(previous);
-  return difference > 1 ? static_cast<uint64_t>(difference - 1) : 0u;
+NDArrayFrameGap assessNDArrayFrameGap(const int32_t previous, const int32_t current,
+                                    const uint32_t maxFrameGap) noexcept {
+  const uint32_t step = static_cast<uint32_t>(current) - static_cast<uint32_t>(previous);
+  if (step <= 1u) return {};
+  if (step >= 0x80000000u || step - 1u > maxFrameGap) return {0u, true};
+  return {step - 1u, false};
+}
+
+uint64_t skippedNDArrayFrames(const int32_t previous, const int32_t current,
+                             const uint32_t maxFrameGap) noexcept {
+  return assessNDArrayFrameGap(previous, current, maxFrameGap).skipped;
 }
 
 NDArrayFrame parseNDArrayFrame(const NDArrayAttrs& attrs,

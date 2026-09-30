@@ -11,6 +11,7 @@ namespace redis_pvxs_ioc {
 
 inline constexpr const char kDefaultRedisBackendAlias[] = "default";
 inline constexpr uint64_t kAlarmQueueEntryBytes = 1024;
+inline constexpr uint32_t kDefaultNDArrayMaxFrameGap = 10000;
 
 enum class PrimitiveType {
   Boolean,
@@ -171,6 +172,7 @@ struct PVConfig {
   TypedValue initialValue;
   std::optional<AccessAssignment> access;
   uint64_t maxFrameBytes = 32u * 1024u * 1024u;
+  uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap;
 };
 
 struct ServerConfig {

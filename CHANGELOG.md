@@ -2,6 +2,8 @@
 
 ## v0.8.2 - unreleased
 
+- count NTNDArray rollover gaps with serial arithmetic and bound ambiguous ID
+  jumps with `max_frame_gap`; expose a separate discontinuity diagnostic
 - fix native macOS PVA startup by avoiding a second libevent threading state
 - use individually owned upstream redis-adapter subscriptions so replacing or
   rejecting a staged runtime cannot remove another runtime's reader

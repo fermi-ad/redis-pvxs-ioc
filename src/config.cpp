@@ -586,7 +586,7 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
 }
 
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access"});
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -618,7 +618,7 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   }
 
   if (pv.kind == PVKind::NTNDArray) {
-    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "access"});
+    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "max_frame_gap", "access"});
     pv.type = PrimitiveType::UInt8;
     pv.shape = Shape::Array;
     if (node["max_frame_bytes"]) {
@@ -627,8 +627,13 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
     if (pv.maxFrameBytes == 0u || pv.maxFrameBytes > 1024ull * 1024u * 1024u) {
       fail(path + ".max_frame_bytes", "must be 1..1073741824");
     }
+    if (node["max_frame_gap"]) {
+      pv.maxFrameGap = parseNumeric<uint32_t>(node["max_frame_gap"], path + ".max_frame_gap");
+    }
+    if (pv.maxFrameGap > 2147483646u) fail(path + ".max_frame_gap", "must be 0..2147483646");
   } else {
     if (node["max_frame_bytes"]) fail(path + ".max_frame_bytes", "requires kind: ntndarray");
+    if (node["max_frame_gap"]) fail(path + ".max_frame_gap", "requires kind: ntndarray");
     pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
     pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
   }
@@ -925,7 +930,8 @@ std::string summarizeConfig(const AppConfig& config) {
     stream << "\n- " << fullPVName(config.server, pv)
            << " [";
     if (pv.kind == PVKind::NTNDArray) {
-      stream << toString(pv.kind) << " max_frame_bytes=" << pv.maxFrameBytes;
+      stream << toString(pv.kind) << " max_frame_bytes=" << pv.maxFrameBytes
+             << " max_frame_gap=" << pv.maxFrameGap;
     } else {
       stream << toString(pv.shape) << " " << toString(pv.type);
     }
@@ -1148,6 +1154,7 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "stats:pvCount"),
     adminPVName(server, "stats:ndarrayInvalidFrames"),
     adminPVName(server, "stats:ndarraySkippedFrames"),
+    adminPVName(server, "stats:ndarrayDiscontinuities"),
     adminPVName(server, "stats:operations"),
     adminPVName(server, "rpc:status"),
     adminPVName(server, "alarms:status"),

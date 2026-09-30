@@ -87,10 +87,19 @@ increments `SYS:<instance>:stats:ndarrayInvalidFrames`. The next valid entry
 clears the alarm. Gaps in increasing frame IDs increment
 `SYS:<instance>:stats:ndarraySkippedFrames`.
 
-Frame-gap accounting uses the full signed 32-bit identifier range without
-overflow. Only forward gaps increment the skipped-frame count. Repeated IDs and
-backward changes, including producer resets and rollover, establish a new
-baseline without inventing a missing-frame count.
+Frame-gap accounting compares IDs as wrapping 32-bit serial numbers. A small
+forward gap across `INT32_MAX` to `INT32_MIN` counts its skipped IDs. Repeated
+IDs and adjacent rollover count no gap. A backward/half-range-ambiguous change,
+or a forward gap above the PV's `max_frame_gap` ceiling, establishes a new
+baseline and increments `SYS:<instance>:stats:ndarrayDiscontinuities` instead
+of adding an unbounded skipped-frame estimate. The ceiling defaults to 10,000
+skipped IDs and accepts 0..2147483646; zero treats every non-adjacent jump as a
+discontinuity. Set it to the largest plausible gap for the producer and workload.
+Reloading this policy retains the PV and its current frame.
+
+IDs alone cannot distinguish a producer restart from a plausible forward gap
+within that ceiling. The discontinuity counter describes this accounting policy,
+not proof of a restart; the skipped counter is not proof of transport loss.
 
 Counters are unsigned 64-bit observations across active image runtimes; two
 canonical PVs reading the same stream each count their observations, while aliases

@@ -117,13 +117,49 @@ int main() {
   send(frame(maximum - 1, 9));
   eventually([&] { return ready(two, maximum - 1, 9) && ready(replacement, maximum - 1, 9); });
   const auto baseline = stats->ndarraySkippedFrames.load();
+  const auto discontinuities = stats->ndarrayDiscontinuities.load();
   for (const auto id : {maximum, minimum, minimum + 1}) {
     send(frame(id, 10));
     eventually([&] { return ready(two, id, 10) && ready(replacement, id, 10); });
   }
   assert(stats->ndarraySkippedFrames == baseline);
+  assert(stats->ndarrayDiscontinuities == discontinuities);
   send(frame(maximum, 11));
   eventually([&] { return ready(two, maximum, 11) && ready(replacement, maximum, 11); });
-  assert(stats->ndarraySkippedFrames == baseline + 2 * skippedNDArrayFrames(minimum + 1, maximum));
+  assert(stats->ndarraySkippedFrames == baseline);
+  assert(stats->ndarrayDiscontinuities == discontinuities + 2);
+  send(frame(maximum - 1, 12));
+  eventually([&] { return ready(two, maximum - 1, 12) && ready(replacement, maximum - 1, 12); });
+  send(frame(minimum + 2, 13));
+  eventually([&] { return ready(two, minimum + 2, 13) && ready(replacement, minimum + 2, 13); });
+  assert(stats->ndarraySkippedFrames == baseline + 6);  // three missed IDs per canonical runtime
+  send(frame(-2000000000, 14));
+  eventually([&] { return ready(two, -2000000000, 14) && ready(replacement, -2000000000, 14); });
+  const auto beforeRestart = stats->ndarrayDiscontinuities.load();
+  send(frame(1, 15));
+  eventually([&] { return ready(two, 1, 15) && ready(replacement, 1, 15); });
+  assert(stats->ndarraySkippedFrames == baseline + 6);
+  assert(stats->ndarrayDiscontinuities == beforeRestart + 2);
+
+  // A policy reload retains the runtime and applies the new bound only to it.
+  auto stricter = two->config(); stricter.maxFrameGap = 2;
+  two->reconfigure(stricter, 2);
+  assert(ready(two, 1, 15));
+  const auto policySkipped = stats->ndarraySkippedFrames.load();
+  const auto policyDiscontinuities = stats->ndarrayDiscontinuities.load();
+  send(frame(5, 16));
+  eventually([&] { return ready(two, 5, 16) && ready(replacement, 5, 16); });
+  assert(stats->ndarraySkippedFrames == policySkipped + 3);  // only the unchanged policy counts the gap
+  assert(stats->ndarrayDiscontinuities == policyDiscontinuities + 1);
+  image.name = "discarded-discontinuity";
+  const auto beforeStaging = stats->ndarrayDiscontinuities.load();
+  {
+    auto staged = make(image);
+    send(frame(-2000000000, 17));
+    eventually([&] { return ready(two, -2000000000, 17) && ready(replacement, -2000000000, 17)
+                           && ready(staged, -2000000000, 17); });
+    assert(stats->ndarrayDiscontinuities == beforeStaging + 2);
+  }
+  assert(stats->ndarrayDiscontinuities == beforeStaging + 2);  // discarded staging stays uncounted
   client.close(); server.stop(); two->deactivate("done"); replacement->deactivate("done");
 }

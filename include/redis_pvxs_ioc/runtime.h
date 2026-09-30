@@ -21,6 +21,7 @@ using RedisBackendRegistry = std::map<std::string, std::shared_ptr<RedisAdapter>
 struct RuntimeStats {
   std::atomic<uint64_t> ndarrayInvalidFrames{0};
   std::atomic<uint64_t> ndarraySkippedFrames{0};
+  std::atomic<uint64_t> ndarrayDiscontinuities{0};
 };
 
 class PVRuntimeUpdate {

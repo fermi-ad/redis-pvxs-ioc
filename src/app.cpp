@@ -116,6 +116,7 @@ public:
         pvCount_(pvxs::server::SharedPV::buildReadonly()),
         ndarrayInvalidFrames_(pvxs::server::SharedPV::buildReadonly()),
         ndarraySkippedFrames_(pvxs::server::SharedPV::buildReadonly()),
+        ndarrayDiscontinuities_(pvxs::server::SharedPV::buildReadonly()),
         backendHealth_(pvxs::server::SharedPV::buildReadonly()),
         accessEnabled_(pvxs::server::SharedPV::buildReadonly()),
         accessGeneration_(pvxs::server::SharedPV::buildReadonly()),
@@ -138,6 +139,7 @@ public:
         pvCountName_(adminPVName(serverConfig, "stats:pvCount")),
         ndarrayInvalidFramesName_(adminPVName(serverConfig, "stats:ndarrayInvalidFrames")),
         ndarraySkippedFramesName_(adminPVName(serverConfig, "stats:ndarraySkippedFrames")),
+        ndarrayDiscontinuitiesName_(adminPVName(serverConfig, "stats:ndarrayDiscontinuities")),
         backendHealthName_(adminPVName(serverConfig, "backend:health")) {
     lastDiffName_ = adminPVName(serverConfig, "config:lastDiff");
     openStringPV(lastDiff_, "{}", "Last parsed reload differences; credential values omitted");
@@ -283,6 +285,9 @@ public:
     auto skippedFramesValue = makeAdminValue(pvxs::TypeCode::UInt64, "Skipped NTNDArray frame IDs since startup");
     skippedFramesValue["value"] = static_cast<uint64_t>(0);
     ndarraySkippedFrames_.open(skippedFramesValue);
+    auto discontinuitiesValue = makeAdminValue(pvxs::TypeCode::UInt64, "NTNDArray ID discontinuities since startup");
+    discontinuitiesValue["value"] = static_cast<uint64_t>(0);
+    ndarrayDiscontinuities_.open(discontinuitiesValue);
 
     auto backendValue = makeAdminValue(pvxs::TypeCode::String, "Redis backend health");
     backendValue["value"] = std::string("unknown");
@@ -440,6 +445,7 @@ public:
     add(pvCountName_, pvCount_, defaults.adminRead);
     add(ndarrayInvalidFramesName_, ndarrayInvalidFrames_, defaults.adminRead);
     add(ndarraySkippedFramesName_, ndarraySkippedFrames_, defaults.adminRead);
+    add(ndarrayDiscontinuitiesName_, ndarrayDiscontinuities_, defaults.adminRead);
     add(backendHealthName_, backendHealth_, defaults.adminRead);
     add(accessReloadName_, accessReloadCommand_, defaults.adminWrite);
     add(accessEnabledName_, accessEnabled_, defaults.adminRead);
@@ -489,6 +495,7 @@ public:
   void setRuntimeStats(const RuntimeStats& stats) {
     setAdminScalar(ndarrayInvalidFrames_, stats.ndarrayInvalidFrames.load());
     setAdminScalar(ndarraySkippedFrames_, stats.ndarraySkippedFrames.load());
+    setAdminScalar(ndarrayDiscontinuities_, stats.ndarrayDiscontinuities.load());
   }
 
   void setBackendHealth(const std::string& health) {
@@ -544,6 +551,7 @@ private:
   pvxs::server::SharedPV pvCount_;
   pvxs::server::SharedPV ndarrayInvalidFrames_;
   pvxs::server::SharedPV ndarraySkippedFrames_;
+  pvxs::server::SharedPV ndarrayDiscontinuities_;
   pvxs::server::SharedPV backendHealth_;
   pvxs::server::SharedPV accessEnabled_;
   pvxs::server::SharedPV accessGeneration_;
@@ -566,6 +574,7 @@ private:
   std::string pvCountName_;
   std::string ndarrayInvalidFramesName_;
   std::string ndarraySkippedFramesName_;
+  std::string ndarrayDiscontinuitiesName_;
   std::string backendHealthName_;
   std::string accessReloadName_;
   std::string accessEnabledName_;

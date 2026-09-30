@@ -129,7 +129,8 @@ public:
     if (committed_ || !alive_) return;
     committed_ = true;
     stats_->ndarrayInvalidFrames += pendingInvalid_; stats_->ndarraySkippedFrames += pendingSkipped_;
-    pendingInvalid_ = pendingSkipped_ = 0;
+    stats_->ndarrayDiscontinuities += pendingDiscontinuities_;
+    pendingInvalid_ = pendingSkipped_ = pendingDiscontinuities_ = 0;
     if (alarmRegistration_) alarmRegistration_->activate();
   }
   void deactivate(const std::string&) override {
@@ -158,8 +159,15 @@ private:
         auto value = buildNTNDArrayValue(frame, prototype_);
         std::lock_guard<std::mutex> guard(mutex_);
         if (!alive_) return;
-        const auto skipped = haveGoodFrame_ ? skippedNDArrayFrames(lastUniqueId_, frame.uniqueId) : 0;
-        if (committed_) stats_->ndarraySkippedFrames += skipped; else pendingSkipped_ += skipped;
+        const auto gap = haveGoodFrame_ ? assessNDArrayFrameGap(lastUniqueId_, frame.uniqueId, config_.maxFrameGap)
+                                       : NDArrayFrameGap{};
+        if (committed_) {
+          stats_->ndarraySkippedFrames += gap.skipped;
+          stats_->ndarrayDiscontinuities += gap.discontinuity ? 1u : 0u;
+        } else {
+          pendingSkipped_ += gap.skipped;
+          pendingDiscontinuities_ += gap.discontinuity ? 1u : 0u;
+        }
         lastUniqueId_ = frame.uniqueId; haveGoodFrame_ = true;
         currentAlarm_ = {epicsSevNone, epicsAlarmNone, ""};
         pv_.post(value);
@@ -191,7 +199,7 @@ private:
   RedisAdapter::ReaderHandle reader_;
   bool alive_ = true, committed_ = false, haveGoodFrame_ = false;
   int32_t lastUniqueId_ = 0;
-  uint64_t pendingInvalid_ = 0, pendingSkipped_ = 0;
+  uint64_t pendingInvalid_ = 0, pendingSkipped_ = 0, pendingDiscontinuities_ = 0;
   AlarmState currentAlarm_{epicsSevInvalid, epicsAlarmUDF, "no valid frame"};
 };
 

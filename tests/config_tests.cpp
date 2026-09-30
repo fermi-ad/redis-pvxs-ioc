@@ -617,8 +617,18 @@ pvs:
   assert(ndarray.pvs.size() == 1u);
   assert(ndarray.pvs[0].kind == PVKind::NTNDArray);
   assert(ndarray.pvs[0].maxFrameBytes == 33554432u);
+  assert(ndarray.pvs[0].maxFrameGap == kDefaultNDArrayMaxFrameGap);
   assert(ndarray.pvs[0].write == std::nullopt);
   assert(summarizeConfig(ndarray).find("ntndarray max_frame_bytes=33554432") != std::string::npos);
+  const std::string gapConfig = "server: {instance: gap}\nredis: {base_key: gap, host: localhost, port: 6385}\npvs:\n"
+      "  - name: Image\n    kind: ntndarray\n    read: {key: image}\n    max_frame_gap: ";
+  assert(loadConfigString(gapConfig + "0\n").pvs[0].maxFrameGap == 0u);
+  assert(loadConfigString(gapConfig + "2147483646\n").pvs[0].maxFrameGap == 2147483646u);
+  for (const auto* invalidGap : {"-1", "2147483647", "true"}) {
+    assert(throwsConfig((gapConfig + invalidGap + "\n").c_str()));
+  }
+  assert(throwsConfig("server: {instance: gap}\nredis: {base_key: gap, host: localhost, port: 6385}\npvs:\n"
+      "  - name: scalar\n    type: uint32\n    shape: scalar\n    read: {key: value}\n    max_frame_gap: 1\n"));
   assert(throwsConfig(R"YAML(
 server: {instance: spike}
 redis: {base_key: spike, host: localhost, port: 6385}

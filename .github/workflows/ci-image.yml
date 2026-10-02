@@ -99,3 +99,14 @@ jobs:
         run: |
           ./scripts/smoke-test.sh
           ./scripts/access-e2e-test.sh
+
+      - name: Retain isolated image test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/smoke-run.*/
+            build/access-e2e-run.*/
+          retention-days: 14
+          if-no-files-found: warn

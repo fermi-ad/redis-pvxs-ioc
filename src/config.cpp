@@ -1123,6 +1123,7 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "access:deniedReads"),
     adminPVName(server, "access:deniedWrites"),
     adminPVName(server, "access:rightsChanges"),
+    adminPVName(server, "access:operations"),
     adminPVName(server, "discovery:status"),
   };
 }

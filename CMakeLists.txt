@@ -374,7 +374,8 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
 
   add_executable(access_runtime_tests tests/access_runtime_tests.cpp)
   target_link_libraries(access_runtime_tests PRIVATE redis-pvxs-ioc-core)
-  add_test(NAME access_runtime_tests COMMAND access_runtime_tests)
+  add_test(NAME access_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/access_audit_logs.py $<TARGET_FILE:access_runtime_tests>)
 
   add_executable(model_tests tests/model_tests.cpp)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)

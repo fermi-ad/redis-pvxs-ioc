@@ -212,6 +212,12 @@ public:
     accessDeniedReadsName_ = adminPVName(serverConfig, "access:deniedReads");
     accessDeniedWritesName_ = adminPVName(serverConfig, "access:deniedWrites");
     accessRightsChangesName_ = adminPVName(serverConfig, "access:rightsChanges");
+    accessOperationsName_ = adminPVName(serverConfig, "access:operations");
+    accessOperations_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:access-operations:1.0", {
+      Member(TypeCode::UInt64, "authorized"), Member(TypeCode::UInt64, "inFlight"),
+      Member(TypeCode::UInt64, "succeeded"), Member(TypeCode::UInt64, "failed"),
+      Member(TypeCode::UInt64, "cancelled"), Member(TypeCode::UInt64, "abandoned"),
+      Member(TypeCode::UInt64, "denialLogsSuppressed"), Member(TypeCode::UInt64, "rateLimitChannels")}).create());
     auto reloadValue = makeAdminValue(pvxs::TypeCode::Int64, "Write any value to request a config reload");
     reloadValue["value"] = static_cast<int64_t>(0);
     reloadCommand_.onPut([this](pvxs::server::SharedPV& pv,
@@ -433,6 +439,7 @@ public:
     add(accessDeniedReadsName_, accessDeniedReads_, defaults.adminRead);
     add(accessDeniedWritesName_, accessDeniedWrites_, defaults.adminRead);
     add(accessRightsChangesName_, accessRightsChanges_, defaults.adminRead);
+    add(accessOperationsName_, accessOperations_, defaults.adminRead);
     const auto reserved = adminPVNames(serverConfig_);
     if (bindings.size() != reserved.size())
       throw std::logic_error("installed diagnostics do not match the reserved namespace");
@@ -481,6 +488,13 @@ public:
     setAdminScalar(accessDeniedReads_, static_cast<int64_t>(status.deniedReads));
     setAdminScalar(accessDeniedWrites_, static_cast<int64_t>(status.deniedWrites));
     setAdminScalar(accessRightsChanges_, static_cast<int64_t>(status.rightsChanges));
+    auto value = accessOperations_.fetch();
+    value["authorized"] = status.authorizedOperations; value["inFlight"] = status.operationsInFlight;
+    value["succeeded"] = status.operationsSucceeded; value["failed"] = status.operationsFailed;
+    value["cancelled"] = status.operationsCancelled; value["abandoned"] = status.operationsAbandoned;
+    value["denialLogsSuppressed"] = status.denialLogsSuppressed;
+    value["rateLimitChannels"] = status.activeClients;
+    accessOperations_.post(value);
   }
 
 private:
@@ -542,6 +556,8 @@ private:
   std::string accessDeniedReadsName_;
   std::string accessDeniedWritesName_;
   std::string accessRightsChangesName_;
+  std::string accessOperationsName_;
+  pvxs::server::SharedPV accessOperations_ = pvxs::server::SharedPV::buildReadonly();
 };
 
 std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {

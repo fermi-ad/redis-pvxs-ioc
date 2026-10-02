@@ -63,10 +63,32 @@ do not evaluate policy. When EPICS reports a rights change, cached rights are
 cleared immediately and the channel is closed after recomputation. This stops
 active monitors and makes long-lived clients reconnect under the new policy.
 
-Permitted `TRAPWRITE` operations and all denied writes are audited with the PV,
-account, peer, authentication method, result, and a bounded value preview.
-Ordinary permitted writes do not format their value. Denial logs are
-rate-limited per operation, PV, and client while counters remain exact.
+Permitted `TRAPWRITE` operations emit an authorization record and a separate
+completion record with the same process-local `id`. `phase=authorization` and
+`result=allowed` record the policy decision. `phase=completion` reports `success`,
+`error`, `cancelled` or `abandoned` (handler released the operation without a
+reply), exactly once. Completion describes the PVA operation; cancellation or an
+error does not prove that a backend command was never accepted. A backend may
+already have acted before a timeout, so these events must not trigger command replay.
+
+All denied writes retain an authorization audit with `id=0` and no completion
+record. Records include operation kind, PV, account, peer, authentication method
+and policy assignment. Text fields are bounded to 256 bytes plus a truncation
+marker and control characters are replaced. PUT previews remain bounded; RPC
+payloads and backend error strings are omitted. Ordinary permitted writes do not
+format payloads. The separate denial diagnostic is limited to once per five
+seconds per operation kind and live channel, while denial counters remain exact.
+Its two timestamps expire with the channel; no historical peer/PV map is retained.
+Expired weak client references are pruned when a new client joins an access member,
+so repeated short-lived connections do not accumulate until the next policy reload.
+
+`SYS:<instance>:access:operations` counts all access-controlled authorized PUT/RPC
+operations and their in-flight, success, error, cancellation and abandoned states,
+independently of `TRAPWRITE`. It also reports suppressed denial diagnostics and
+the live channels holding rate-limit state. These process-lifetime counters
+survive policy reloads. Authorization denials remain in `access:deniedReads` and
+`access:deniedWrites`; queue and backend-specific observations remain in the
+operation/RPC diagnostics.
 
 ## Reload and file watching
 

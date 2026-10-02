@@ -1,5 +1,6 @@
 #include "redis_pvxs_ioc/runtime.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -20,6 +21,7 @@
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/queued_exec.h"
+#include "redis_pvxs_ioc/ntndarray.h"
 #include "redis_pvxs_ioc/util.h"
 
 namespace redis_pvxs_ioc {
@@ -42,6 +44,173 @@ std::shared_ptr<RedisAdapter> resolveBackend(const RedisBackendRegistry& redisBa
     throw std::runtime_error("unknown redis backend '" + alias + "' for " + fullName + " " + routeName);
   }
   return it->second;
+}
+
+class NDArrayRuntime final : public PVRuntimeBase, public std::enable_shared_from_this<NDArrayRuntime> {
+public:
+  NDArrayRuntime(const ServerConfig& serverConfig, PVConfig config,
+                 std::shared_ptr<RedisAdapter> redis, std::shared_ptr<AlarmPublisher> publisher,
+                 std::shared_ptr<RuntimeStats> stats, uint64_t generation, uint64_t payloadLimit)
+      : config_(std::move(config)), redis_(std::move(redis)), alarmPublisher_(std::move(publisher)),
+        stats_(std::move(stats)), maxFrameBytes_(std::min(config_.maxFrameBytes, payloadLimit)),
+        fullName_(fullPVName(serverConfig, config_)), generation_(generation),
+        pv_(pvxs::server::SharedPV::buildReadonly()) {}
+
+  ~NDArrayRuntime() override { deactivate("runtime destroyed"); }
+
+  void initialize() {
+    auto initial = createEmptyNTNDArray();
+    const auto snapshot = redis_->getStreamSnapshot(config_.read.key);
+    if (snapshot.present()) {
+      try {
+        const auto frame = parseNDArrayFrame(snapshot.fields, RA_Time(snapshot.id).value, maxFrameBytes_);
+        initial = buildNTNDArrayValue(frame);
+        lastUniqueId_ = frame.uniqueId; haveGoodFrame_ = true;
+        currentAlarm_ = {epicsSevNone, epicsAlarmNone, ""};
+      } catch (const std::exception& error) {
+        ++pendingInvalid_;
+        currentAlarm_ = {epicsSevInvalid, epicsAlarmUDF, std::string(error.what()).substr(0, 512)};
+        setNTNDArrayInvalidAlarm(initial, currentAlarm_.message);
+      }
+    }
+    prototype_ = initial.cloneEmpty();
+    pv_.open(initial);
+    if (alarmPublisher_) alarmRegistration_ = alarmPublisher_->prepare(fullName_, currentAlarm_);
+    auto weak = weak_from_this();
+    reader_ = redis_->subscribeStream(config_.read.key,
+        [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data) {
+          if (const auto self = weak.lock()) self->handleRead(data);
+        }, snapshot.id);
+  }
+
+  const PVConfig& config() const override { return config_; }
+  const std::string& fullName() const override { return fullName_; }
+  pvxs::server::SharedPV& sharedPV() override { return pv_; }
+  bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
+
+  class Update final : public PVRuntimeUpdate {
+  public:
+    std::shared_ptr<NDArrayRuntime> runtime;
+    PVConfig config;
+    uint64_t generation;
+    std::shared_ptr<AlarmPublisher> publisher;
+    std::shared_ptr<AlarmPublisher::Registration> registration;
+    void commit() noexcept override {
+      std::lock_guard<std::mutex> guard(runtime->mutex_);
+      std::swap(runtime->config_, config); runtime->generation_ = generation;
+      if (registration != runtime->alarmRegistration_) {
+        if (runtime->alarmRegistration_) runtime->alarmRegistration_->retire();
+        runtime->alarmPublisher_.swap(publisher);
+        runtime->alarmRegistration_.swap(registration);
+      }
+    }
+    void refresh() override {
+      std::lock_guard<std::mutex> guard(runtime->mutex_);
+      if (runtime->alive_) runtime->publishAlarmLocked();
+    }
+  };
+
+  std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation,
+      const std::shared_ptr<AlarmPublisher>& publisher = {}) override {
+    auto update = std::make_unique<Update>();
+    update->runtime = shared_from_this(); update->config = config; update->generation = generation;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!alive_ || !sameReaderTopology(config_, config)) throw std::runtime_error("NTNDArray runtime changed during preparation");
+    update->publisher = publisher ? publisher : alarmPublisher_;
+    update->registration = update->publisher == alarmPublisher_ ? alarmRegistration_
+        : update->publisher->prepare(fullName_, currentAlarm_);
+    return update;
+  }
+  void reconfigure(const PVConfig& config, uint64_t generation) override {
+    auto update = prepareReconfigure(config, generation); update->commit(); update->refresh();
+  }
+  void activate() noexcept override {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (committed_ || !alive_) return;
+    committed_ = true;
+    stats_->ndarrayInvalidFrames += pendingInvalid_; stats_->ndarraySkippedFrames += pendingSkipped_;
+    stats_->ndarrayDiscontinuities += pendingDiscontinuities_;
+    pendingInvalid_ = pendingSkipped_ = pendingDiscontinuities_ = 0;
+    if (alarmRegistration_) alarmRegistration_->activate();
+  }
+  void deactivate(const std::string&) override {
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      if (!alive_) return;
+      alive_ = false; committed_ = false;
+      if (alarmRegistration_) alarmRegistration_->retire();
+    }
+    reader_.reset(); // Retire only this subscription, including when another PV reads the same key.
+    if (pv_.isOpen()) pv_.close();
+  }
+
+private:
+  void publishAlarmLocked() {
+    if (alarmRegistration_) {
+      alarmRegistration_->update(currentAlarm_);
+      if (alive_ && committed_) alarmRegistration_->activate();
+    }
+  }
+  void handleRead(const RedisAdapter::StreamBatch& data) {
+    for (const auto& item : data) {
+      try {
+        const auto frame = parseNDArrayFrame(item.second, RA_Time(item.first).value, maxFrameBytes_);
+        // Owned PVXS arrays use the exact Type opened by this runtime.
+        auto value = buildNTNDArrayValue(frame, prototype_);
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!alive_) return;
+        const auto gap = haveGoodFrame_ ? assessNDArrayFrameGap(lastUniqueId_, frame.uniqueId, config_.maxFrameGap)
+                                       : NDArrayFrameGap{};
+        if (committed_) {
+          stats_->ndarraySkippedFrames += gap.skipped;
+          stats_->ndarrayDiscontinuities += gap.discontinuity ? 1u : 0u;
+        } else {
+          pendingSkipped_ += gap.skipped;
+          pendingDiscontinuities_ += gap.discontinuity ? 1u : 0u;
+        }
+        lastUniqueId_ = frame.uniqueId; haveGoodFrame_ = true;
+        currentAlarm_ = {epicsSevNone, epicsAlarmNone, ""};
+        pv_.post(value);
+        publishAlarmLocked();
+      } catch (const std::exception& error) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!alive_) return;
+        if (committed_) ++stats_->ndarrayInvalidFrames; else ++pendingInvalid_;
+        currentAlarm_ = {epicsSevInvalid, epicsAlarmUDF, std::string(error.what()).substr(0, 512)};
+        auto value = pv_.fetch(); // Keep pixels, dimensions, ID and acquisition timestamp from the last good frame.
+        setNTNDArrayInvalidAlarm(value, currentAlarm_.message);
+        pv_.post(value);
+        publishAlarmLocked();
+      }
+    }
+  }
+
+  mutable std::mutex mutex_;
+  PVConfig config_;
+  std::shared_ptr<RedisAdapter> redis_;
+  std::shared_ptr<AlarmPublisher> alarmPublisher_;
+  std::shared_ptr<AlarmPublisher::Registration> alarmRegistration_;
+  std::shared_ptr<RuntimeStats> stats_;
+  const uint64_t maxFrameBytes_;
+  std::string fullName_;
+  uint64_t generation_;
+  pvxs::server::SharedPV pv_;
+  pvxs::Value prototype_;
+  RedisAdapter::ReaderHandle reader_;
+  bool alive_ = true, committed_ = false, haveGoodFrame_ = false;
+  int32_t lastUniqueId_ = 0;
+  uint64_t pendingInvalid_ = 0, pendingSkipped_ = 0, pendingDiscontinuities_ = 0;
+  AlarmState currentAlarm_{epicsSevInvalid, epicsAlarmUDF, "no valid frame"};
+};
+
+std::shared_ptr<PVRuntimeBase> makeNDArrayRuntime(const ServerConfig& serverConfig, const PVConfig& config,
+    const RedisBackendRegistry& backends, const std::shared_ptr<AlarmPublisher>& publisher,
+    const std::shared_ptr<RuntimeStats>& stats, uint64_t generation, uint64_t payloadLimit) {
+  auto runtime = std::make_shared<NDArrayRuntime>(serverConfig, config,
+      resolveBackend(backends, config.read.backend, fullPVName(serverConfig, config), "read route"),
+      publisher, stats, generation, payloadLimit);
+  runtime->initialize();
+  return runtime;
 }
 
 template <typename T, bool Array>
@@ -483,7 +652,11 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
                                            const uint64_t generation,
                                                 std::shared_ptr<OperationQueue> operations,
-                                                OperationLimitsConfig limits) {
+                                                OperationLimitsConfig limits,
+                                                std::shared_ptr<RuntimeStats> stats) {
+  if (config.kind == PVKind::NTNDArray)
+    return makeNDArrayRuntime(serverConfig, config, redisBackends, alarmPublisher,
+                              stats ? stats : std::make_shared<RuntimeStats>(), generation, limits.maxPayloadBytes);
   if (!operations) {
     static auto defaultOperations = std::make_shared<OperationQueue>();
     operations = defaultOperations;

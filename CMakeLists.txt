@@ -206,10 +206,21 @@ target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-ioc-core 
 add_executable(redis-pvxs-access-benchmark tools/access_benchmark.cpp)
 target_link_libraries(redis-pvxs-access-benchmark PRIVATE redis-pvxs-ioc-core)
 
+# Qualification helpers stay in the builder, not the published runtime image.
+add_executable(qualification_probe tools/qualification_probe.cpp)
+target_link_libraries(qualification_probe PRIVATE redis-pvxs-ioc-core)
+
 install(TARGETS redis-pvxs-ioc redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(qualification_probe_fixture tests/qualification_probe_fixture.cpp)
+  target_link_libraries(qualification_probe_fixture PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME qualification_probe_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/qualification_probe_e2e.py
+    --fixture $<TARGET_FILE:qualification_probe_fixture> --probe $<TARGET_FILE:qualification_probe>)
+  set_tests_properties(qualification_probe_e2e PROPERTIES TIMEOUT 25)
 
   add_executable(config_tests tests/config_tests.cpp)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)

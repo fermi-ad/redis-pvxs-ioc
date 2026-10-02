@@ -39,6 +39,9 @@ deployment needs them. Fleet deployment is a separate task.
    `.github/workflows/qualify-image.yml` run and its
    `release-qualification-<run>-<attempt>/qualification.json` artifact. Until that
    qualification workflow and all evidence exist, stable promotion fails closed.
+   [The qualification procedure](qualification.md) defines the measured proof
+   bundle, fixture coverage and review choices. Its initial policy supports
+   exact final 0.9.0 only; later stable releases require a reviewed policy update.
 4. Tag that exact merged commit with `v${VERSION}` and push the tag. Tag pushes
    do not build or publish an image.
 5. Dispatch **Publish redis-pvxs-ioc release image** from `main`, supplying the

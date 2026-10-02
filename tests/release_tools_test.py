@@ -64,6 +64,11 @@ class ReleaseTests(unittest.TestCase):
         record, workflow = self.evidence()
         workflow["path"] = ".github/workflows/qualify-image.yml"
         record.update(checks=list(release.QUALIFICATION_CHECKS), soak_seconds=86400, rollback_version="0.8.2")
+        # Operator-written summary assertions cannot stand in for the actual
+        # collector/CI/report/config bundle (validated by qualification tests).
+        with self.assertRaisesRegex(ValueError, "proof bundle"):
+            release.verify_record(record, workflow, "0.9.0", SHA, "qualification")
+        record.update(schema=1, evidence={"proof.json": "d" * 64, "policy.json": "e" * 64})
         release.verify_record(record, workflow, "0.9.0", SHA, "qualification")
         for updates in ({"soak_seconds": 86399}, {"rollback_version": "0.8.1"}, {"checks": []}):
             with self.subTest(updates=updates), self.assertRaises(ValueError):

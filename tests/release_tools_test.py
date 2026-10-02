@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -64,6 +66,11 @@ class ReleaseTests(unittest.TestCase):
         record, workflow = self.evidence()
         workflow["path"] = ".github/workflows/qualify-image.yml"
         record.update(checks=list(release.QUALIFICATION_CHECKS), soak_seconds=86400, rollback_version="0.8.2")
+        # Operator-written summary assertions cannot stand in for the actual
+        # collector/CI/report/config bundle (validated by qualification tests).
+        with self.assertRaisesRegex(ValueError, "proof bundle"):
+            release.verify_record(record, workflow, "0.9.0", SHA, "qualification")
+        record.update(schema=1, evidence={"proof.json": "d" * 64, "policy.json": "e" * 64})
         release.verify_record(record, workflow, "0.9.0", SHA, "qualification")
         for updates in ({"soak_seconds": 86399}, {"rollback_version": "0.8.1"}, {"checks": []}):
             with self.subTest(updates=updates), self.assertRaises(ValueError):
@@ -366,6 +373,99 @@ if sys.argv[1] == "compose" and "up" in sys.argv:
                 self.assertEqual(command[1:5], ["--project-name", project, "--file", str(ROOT / "tests/smoke.compose.yml")])
                 self.assertNotIn("production", command)
         self.assertNotEqual(*projects)
+
+
+class AccessFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.repository = self.directory / "repository"
+        (self.repository / "scripts").mkdir(parents=True)
+        shutil.copy2(ROOT / "scripts/access-e2e-test.sh", self.repository / "scripts/access-e2e-test.sh")
+        shutil.copytree(ROOT / "tests/fixtures/access-e2e", self.repository / "tests/fixtures/access-e2e")
+        self.log = self.directory / "commands.jsonl"
+        self.mount = self.directory / "mount.txt"
+        docker = self.directory / "docker"
+        docker.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ["TEST_DOCKER_LOG"], "a") as output:
+    output.write(json.dumps(args) + "\\n")
+phase = os.environ.get("TEST_FAIL_PHASE", "stopped")
+if args[:2] == ["image", "inspect"]:
+    sys.exit(23 if phase == "preflight" else 0)
+if args[:2] == ["network", "create"]:
+    print("owned-network-id")
+elif args[0] == "create":
+    if "--mount" in args:
+        mount = dict(item.split("=", 1) for item in args[args.index("--mount") + 1].split(","))
+        folder = Path(mount["source"])
+        Path(os.environ["TEST_MOUNT_PATH"]).write_text(str(folder))
+        assert mount["target"] == "/config"
+        assert folder.stat().st_mode & 0o777 == 0o755
+        assert folder.parent.stat().st_mode & 0o777 == 0o700
+        for name in ("config.yaml", "access.acf"):
+            assert (folder / name).stat().st_mode & 0o777 == 0o644
+        print("owned-ioc-id")
+    else:
+        print("owned-redis-id")
+elif args[0] == "start" and args[1] == "owned-ioc-id" and phase == "start":
+    sys.exit(43)
+elif args[0] == "exec":
+    assert args[-2:] == ["redis-cli", "ping"]
+    print("PONG")
+elif args[0] == "inspect":
+    print("false" if args[2] == "{{.State.Running}}" else '{"Running":false,"ExitCode":17,"OOMKilled":false}')
+elif args[0] == "logs":
+    print("injected IOC startup failure" if args[1] == "owned-ioc-id" else "private Redis ready")
+''')
+        docker.chmod(0o755)
+        self.env = dict(os.environ, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
+                        TEST_DOCKER_LOG=str(self.log), TEST_MOUNT_PATH=str(self.mount),
+                        REDIS_PVXS_IOC_IMAGE="local:fixture", REDIS_IMAGE="local:redis",
+                        IOC_CONTAINER="production-ioc", REDIS_CONTAINER="production-redis", NETWORK="production")
+
+    def run_fixture(self, phase):
+        self.env["TEST_FAIL_PHASE"] = phase
+        return subprocess.run(["bash", "-c", 'umask 077; exec bash "$1"', "test",
+                               str(self.repository / "scripts/access-e2e-test.sh")],
+                              env=self.env, text=True, capture_output=True, timeout=10)
+
+    def commands(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def test_private_access_fixture_mount_is_readable_and_exit_logs_survive(self):
+        result = self.run_fixture("stopped")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("IOC exited before SYS:e2e:backend:health", result.stderr)
+        self.assertIn("injected IOC startup failure", result.stderr)
+        folder = Path(self.mount.read_text())
+        self.assertIn("ACF evidence: " + str(folder.parent), result.stdout)
+        self.assertEqual(stat.S_IMODE(folder.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((folder.parent / "ioc.log").stat().st_mode), 0o600)
+        state = json.loads((folder.parent / "ioc-state.json").read_text())
+        self.assertEqual(state["ExitCode"], 17)
+        commands = self.commands()
+        self.assertEqual([c for c in commands if c[0] == "rm"],
+                         [["rm", "-f", "owned-ioc-id"], ["rm", "-f", "owned-redis-id"]])
+        self.assertIn(["network", "rm", "owned-network-id"], commands)
+        for command in commands:
+            self.assertFalse(any(item in command for item in ("production", "production-ioc", "production-redis", "-p", "--publish")))
+
+    def test_container_start_failure_keeps_original_exit_status_and_cleans_created_ids(self):
+        result = self.run_fixture("start")
+        self.assertEqual(result.returncode, 43, result.stderr)
+        self.assertIn("injected IOC startup failure", result.stderr)
+        self.assertIn(["rm", "-f", "owned-ioc-id"], self.commands())
+        self.assertIn(["rm", "-f", "owned-redis-id"], self.commands())
+        self.assertIn(["network", "rm", "owned-network-id"], self.commands())
+
+    def test_image_preflight_failure_does_not_remove_uncreated_resources(self):
+        result = self.run_fixture("preflight")
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertEqual(self.commands(), [["image", "inspect", "local:fixture"]])
 
 
 if __name__ == "__main__":

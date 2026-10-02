@@ -73,6 +73,23 @@ jobs:
           docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
           docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
             'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/NOTICE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
+          docker run --rm --entrypoint /bin/sh "${IMAGE}" -ec '
+            cd /usr/share/doc/redis-pvxs-ioc
+            test -s builder-packages.tsv && test -s runtime-packages.tsv
+            for file in epics-base/LICENSE pvxs/LICENSE pvxs/COPYRIGHT \
+                pvxs/bundle/libevent/LICENSE redis-adapter/LICENSE \
+                redis-adapter/hiredis/COPYING redis-adapter/redis-plus-plus/LICENSE \
+                yaml-cpp/LICENSE; do
+              test -s "third-party/third_party/$file"
+            done
+            test -s /usr/share/doc/libgrpc++1.51t64/copyright
+            test -s /usr/share/doc/libprotobuf32t64/copyright
+          '
+
+      - name: Validate runtime identity and secret mounts
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: python3 tests/container_runtime.py "$IMAGE"
 
       - name: Validate isolated Redis/PVA and access behavior
         env:
@@ -82,3 +99,14 @@ jobs:
         run: |
           ./scripts/smoke-test.sh
           ./scripts/access-e2e-test.sh
+
+      - name: Retain isolated image test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/smoke-run.*/
+            build/access-e2e-run.*/
+          retention-days: 14
+          if-no-files-found: warn

@@ -245,6 +245,10 @@ target_link_libraries(redis-pvxs-access-benchmark PRIVATE redis-pvxs-ioc-core)
 add_executable(stream_capacity tools/stream_capacity.cpp)
 target_link_libraries(stream_capacity PRIVATE redis-pvxs-ioc-core)
 
+# Qualification helpers stay in the builder, not the published runtime image.
+add_executable(qualification_probe tools/qualification_probe.cpp)
+target_link_libraries(qualification_probe PRIVATE redis-pvxs-ioc-core)
+
 install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
@@ -264,6 +268,12 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_test(NAME endpoint_tests COMMAND endpoint_tests)
   set_tests_properties(endpoint_tests PROPERTIES TIMEOUT 15)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(qualification_probe_fixture tests/qualification_probe_fixture.cpp)
+  target_link_libraries(qualification_probe_fixture PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME qualification_probe_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/qualification_probe_e2e.py
+    --fixture $<TARGET_FILE:qualification_probe_fixture> --probe $<TARGET_FILE:qualification_probe>)
+  set_tests_properties(qualification_probe_e2e PROPERTIES TIMEOUT 25)
   find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
   if(REDIS_PVXS_IOC_ENABLE_GRPC)
     set(RPC_FIXTURE_PROTO "${CMAKE_SOURCE_DIR}/tests/rpc_fixture.proto")

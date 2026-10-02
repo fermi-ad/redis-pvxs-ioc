@@ -120,6 +120,17 @@ public:
       Member(TypeCode::UInt64, "peakBytes"), Member(TypeCode::UInt64, "byteLimit"),
       Member(TypeCode::UInt64, "payloadLimit"), Member(TypeCode::UInt32, "workers"),
       Member(TypeCode::UInt32, "queuedPerPV")}).create());
+    alarmName_ = adminPVName(serverConfig, "alarms:status");
+    alarms_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:alarms:1.0", {
+      Member(TypeCode::String, "state"), Member(TypeCode::String, "lastError"),
+      Member(TypeCode::UInt64, "sent"), Member(TypeCode::UInt64, "transportFailures"),
+      Member(TypeCode::UInt64, "rejected"), Member(TypeCode::UInt64, "reconciled"),
+      Member(TypeCode::UInt64, "coalescedUpdates"), Member(TypeCode::UInt64, "discardedTransitions"),
+      Member(TypeCode::UInt64, "messagesTruncated"), Member(TypeCode::UInt64, "registrations"),
+      Member(TypeCode::UInt64, "active"), Member(TypeCode::UInt64, "pending"),
+      Member(TypeCode::UInt64, "queued"), Member(TypeCode::UInt64, "reservedBytes"),
+      Member(TypeCode::UInt64, "peakBytes"), Member(TypeCode::UInt64, "byteLimit"),
+      Member(TypeCode::UInt64, "queueLimit")}).create());
     auto discoveryValue = pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:discovery:1.0", {
       Member(TypeCode::String, "state"), Member(TypeCode::String, "peer"), Member(TypeCode::String, "lastError"),
       Member(TypeCode::UInt64, "desiredGeneration"), Member(TypeCode::UInt64, "synchronizedGeneration"),
@@ -247,6 +258,19 @@ public:
     discovery_.post(value);
   }
 
+  void setAlarmStatus(const AlarmPublisherStatus& status) {
+    auto value = alarms_.fetch();
+    value["state"] = status.state; value["lastError"] = status.lastError;
+    value["sent"] = status.sent; value["transportFailures"] = status.transportFailures;
+    value["rejected"] = status.rejected; value["reconciled"] = status.reconciled;
+    value["coalescedUpdates"] = status.coalescedUpdates; value["discardedTransitions"] = status.discardedTransitions;
+    value["messagesTruncated"] = status.messagesTruncated; value["registrations"] = status.registrations;
+    value["active"] = status.active; value["pending"] = status.pending; value["queued"] = status.queued;
+    value["reservedBytes"] = status.reservedBytes; value["peakBytes"] = status.peakBytes;
+    value["byteLimit"] = status.byteLimit; value["queueLimit"] = status.queueLimit;
+    alarms_.post(value);
+  }
+
   PVBindings bindings(const AccessDefaultsConfig& defaults) {
     PVBindings bindings;
     EndpointRegistry endpoints;
@@ -257,6 +281,7 @@ public:
     };
     add(lastDiffName_, lastDiff_, defaults.adminRead);
     add(operationsName_, operations_, defaults.adminRead);
+    add(alarmName_, alarms_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
     add(reloadName_, reloadCommand_, defaults.adminWrite);
     add(versionName_, version_, defaults.adminRead);
@@ -338,6 +363,8 @@ private:
   std::string lastDiffName_;
   pvxs::server::SharedPV operations_ = pvxs::server::SharedPV::buildReadonly();
   std::string operationsName_;
+  pvxs::server::SharedPV alarms_ = pvxs::server::SharedPV::buildReadonly();
+  std::string alarmName_;
   pvxs::server::SharedPV discovery_ = pvxs::server::SharedPV::buildReadonly();
   std::string discoveryName_;
   pvxs::server::SharedPV reloadCommand_;
@@ -427,7 +454,10 @@ bool sameBackendBindings(const PVConfig& pv, const RedisBackendRegistry& before,
 
 std::shared_ptr<AlarmPublisher> buildAlarmPublisher(const AppConfig& config) {
   const auto backend = config.redisBackends.at(config.alarms.backend);
-  return std::make_shared<AlarmPublisher>(backend.host, backend.port, config.alarms.stream, backend.user, backend.password);
+  AlarmPublisherOptions options;
+  options.queueEntries = config.limits.alarmQueueEntries;
+  options.stateBytes = config.limits.alarmStateBytes;
+  return std::make_shared<AlarmPublisher>(backend.host, backend.port, config.alarms.stream, backend.user, backend.password, options);
 }
 
 std::string backendHealthSummary(const RedisBackendRegistry& backends) {
@@ -724,6 +754,7 @@ void Application::pump() {
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
       impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
+      impl_->admin->setAlarmStatus(impl_->alarmPublisher->status());
       impl_->admin->setDiscoveryStatus(impl_->discovery ? impl_->discovery->status() : DiscoveryStatus{});
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     }
@@ -800,7 +831,7 @@ bool Application::applyGeneration(const AppConfig& config,
       const auto existing = impl_->runtimes.find(name);
       if (existing != impl_->runtimes.end() && existing->second->structurallyCompatible(pv) &&
           sameBackendBindings(pv, impl_->redisBackends, nextBackends)) {
-        updates.emplace_back(existing->second->prepareReconfigure(pv, generation));
+        updates.emplace_back(existing->second->prepareReconfigure(pv, generation, nextAlarm));
         nextRuntimes.emplace(name, existing->second);
       } else {
         auto runtime = makeRuntime(config.server, pv, nextBackends, nextAlarm, generation,
@@ -847,7 +878,6 @@ bool Application::applyGeneration(const AppConfig& config,
     // a rejected policy leaves the live values, members and channels untouched.
     const auto commit = [&](std::string& failure) {
       if (policy && !impl_->access->activateConfiguration(policy, failure)) return false;
-      for (const auto& runtime : nextRuntimes) runtime.second->setAlarmPublisher(nextAlarm);
       for (const auto& update : updates) update->commit();
       for (const auto& runtime : added) runtime->activate();
       return true;
@@ -874,7 +904,9 @@ bool Application::applyGeneration(const AppConfig& config,
       if (secured) impl_->access->finishBindings(secured);
       else impl_->registry->finish(plain);
       for (const auto& runtime : retired) runtime->deactivate("generation retired");
+      if (!reuseAlarm && nextAlarm) nextAlarm->stop();
       for (const auto& update : updates) update->refresh();
+      impl_->alarmPublisher->activate();
       if (policy) impl_->access->finishConfiguration();
       if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
       impl_->admin->setGeneration(generation);
@@ -882,6 +914,7 @@ bool Application::applyGeneration(const AppConfig& config,
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
+      impl_->admin->setAlarmStatus(impl_->alarmPublisher->status());
     } catch (const std::exception& ex) {
       // The active registry is already complete. Preserve its generation and
       // report an operational refresh failure, not a fictitious rollback.

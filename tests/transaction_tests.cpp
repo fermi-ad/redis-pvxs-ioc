@@ -70,6 +70,11 @@ int main() {
   auto client = clientConfig.build();
   const auto get = [&](const std::string& name) { return client.get(name).exec()->wait(2.); };
   assert(get("TEST:old")["value"].as<double>() == 4.);
+  eventually([&] {
+    app.pump();
+    return get("SYS:transaction:alarms:status")["state"].as<std::string>() == "ready";
+  });
+  assert(get("SYS:transaction:alarms:status")["active"].as<uint64_t>() == 2);
   const auto fingerprint = get("SYS:transaction:access:policyFingerprint")["value"].as<std::string>();
   std::mutex mutex;
   std::condition_variable changed;

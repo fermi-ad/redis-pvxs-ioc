@@ -10,6 +10,7 @@
 namespace redis_pvxs_ioc {
 
 inline constexpr const char kDefaultRedisBackendAlias[] = "default";
+inline constexpr uint64_t kAlarmQueueEntryBytes = 1024;
 
 enum class PrimitiveType {
   Boolean,
@@ -211,6 +212,8 @@ struct OperationLimitsConfig {
   uint64_t maxPayloadBytes = 32u * 1024u * 1024u;
   // Omitted: max(5 seconds, configured confirmation wait + 2 seconds).
   std::optional<uint32_t> operationTimeoutMs;
+  uint32_t alarmQueueEntries = 1024;
+  uint64_t alarmStateBytes = 64u * 1024u * 1024u;
 };
 
 struct AppConfig {

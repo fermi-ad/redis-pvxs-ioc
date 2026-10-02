@@ -25,7 +25,7 @@ At minimum, run the checks relevant to the change:
 docker build --platform linux/amd64 -t redis-pvxs-ioc:local .
 cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
-REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local ./scripts/smoke-test.sh
+REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local REDIS_PVXS_IOC_PULL_POLICY=never ./scripts/smoke-test.sh
 ```
 
 Documentation-only changes should still validate Markdown links, command examples,

@@ -1,0 +1,45 @@
+# Isolated discovery acceptance only. Demo credentials belong to this fixture.
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.4@sha256:8425bc28027fd667d9a29cde58bed4050a64a854d973d8d1ad4152ecec52bfdb
+    networks:
+      fixture:
+        aliases: [elasticsearch-cf]
+    mem_limit: 1g
+    cpus: 1
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      node.store.allow_mmap: "false"
+      ES_JAVA_OPTS: -Xms256m -Xmx256m
+    healthcheck:
+      test: [CMD, curl, --max-time, "2", -fsS, http://localhost:9200/_cluster/health]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  channelfinder:
+    image: ghcr.io/channelfinder/channelfinderservice:ChannelFinder-4.7.3@sha256:42a1dbee1a7f534c1c72c27887ea00d8a057aafd96ced2034a6771d21a466979
+    networks: [fixture]
+    mem_limit: 768m
+    cpus: 1
+    ports: ["127.0.0.1::8080"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_NETWORK_HOST: elasticsearch-cf
+      ELASTICSEARCH_QUERY_SIZE: 10000
+      demo_auth.enabled: "true"
+      demo_auth.users: admin
+      demo_auth.pwds: password
+      demo_auth.roles: ADMIN
+      aa.enabled: "false"
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx384m
+    healthcheck:
+      test: [CMD, curl, --max-time, "2", -fsS, http://localhost:8080/ChannelFinder]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+networks:
+  fixture:
+    internal: true

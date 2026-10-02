@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <arpa/inet.h>
+#include <tuple>
 #include <map>
 #include <set>
 #include <sstream>
@@ -576,11 +578,39 @@ void validateTopLevelSchema(const YAML::Node& root) {
   }
 }
 
+DiscoveryConfig parseDiscovery(const YAML::Node& node) {
+  DiscoveryConfig value;
+  if (!node) return value;
+  rejectUnknownKeys(node, "root.discovery", {"enabled", "bind_address", "udp_port", "timeout_ms", "max_holdoff_ms", "max_records", "max_bytes"});
+  std::set<std::string> keys;
+  for (const auto& entry : node) {
+    const auto key = entry.first.as<std::string>();
+    if (!keys.insert(key).second) fail("root.discovery." + key, "duplicate key");
+  }
+  if (node["enabled"]) value.enabled = parseNumeric<bool>(node["enabled"], "root.discovery.enabled");
+  if (node["bind_address"]) value.bindAddress = parseString(node["bind_address"], "root.discovery.bind_address");
+  in_addr address{};
+  if (inet_pton(AF_INET, value.bindAddress.c_str(), &address) != 1)
+    fail("root.discovery.bind_address", "expected an IPv4 address");
+  const auto bounded = [&](const char* key, uint64_t initial, uint64_t low, uint64_t high) {
+    const auto result = node[key] ? parseNumeric<uint64_t>(node[key], "root.discovery." + std::string(key)) : initial;
+    if (result < low || result > high) fail("root.discovery." + std::string(key), "outside supported range");
+    return result;
+  };
+  value.udpPort = bounded("udp_port", value.udpPort, 0, 65535);
+  value.timeoutMs = bounded("timeout_ms", value.timeoutMs, 1, 300000);
+  value.maxHoldoffMs = bounded("max_holdoff_ms", value.maxHoldoffMs, 0, 60000);
+  value.maxRecords = bounded("max_records", value.maxRecords, 1, 1000000);
+  value.maxBytes = bounded("max_bytes", value.maxBytes, 1024, 1024ull * 1024 * 1024);
+  return value;
+}
+
 AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& configDirectory) {
   requireMap(root, "root");
   validateTopLevelSchema(root);
 
   AppConfig config;
+  config.discovery = parseDiscovery(root["discovery"]);
 
   config.access = parseAccessConfig(root["access"], configDirectory, "root.access");
 
@@ -675,29 +705,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
                           config.redisBackends,
                           hasLegacyRedis);
     }
-    const std::vector<std::string> reservedNames{
-      versionPVName(config.server),
-      revisionPVName(config.server),
-      adminPVName(config.server, "version"),
-      adminPVName(config.server, "revision"),
-      adminPVName(config.server, "config:reload"),
-      adminPVName(config.server, "config:generation"),
-      adminPVName(config.server, "config:lastStatus"),
-      adminPVName(config.server, "config:lastError"),
-      adminPVName(config.server, "stats:pvCount"),
-      adminPVName(config.server, "backend:health"),
-      adminPVName(config.server, "access:reload"),
-      adminPVName(config.server, "access:enabled"),
-      adminPVName(config.server, "access:generation"),
-      adminPVName(config.server, "access:lastStatus"),
-      adminPVName(config.server, "access:lastError"),
-      adminPVName(config.server, "access:policyFingerprint"),
-      adminPVName(config.server, "access:watchStatus"),
-      adminPVName(config.server, "access:activeClients"),
-      adminPVName(config.server, "access:deniedReads"),
-      adminPVName(config.server, "access:deniedWrites"),
-      adminPVName(config.server, "access:rightsChanges"),
-    };
+    const auto reservedNames = adminPVNames(config.server);
     const auto names = fullPVNames(config.server, pv);
     for (size_t nameIndex = 0; nameIndex < names.size(); ++nameIndex) {
       const auto path = nameIndex == 0u
@@ -968,6 +976,38 @@ std::string versionPVName(const ServerConfig& server) {
 
 std::string revisionPVName(const ServerConfig& server) {
   return server.instance + ":revision";
+}
+
+std::vector<std::string> adminPVNames(const ServerConfig& server) {
+  return {
+    versionPVName(server),
+    revisionPVName(server),
+    adminPVName(server, "version"),
+    adminPVName(server, "revision"),
+    adminPVName(server, "config:reload"),
+    adminPVName(server, "config:generation"),
+    adminPVName(server, "config:lastStatus"),
+    adminPVName(server, "config:lastError"),
+    adminPVName(server, "stats:pvCount"),
+    adminPVName(server, "backend:health"),
+    adminPVName(server, "access:reload"),
+    adminPVName(server, "access:enabled"),
+    adminPVName(server, "access:generation"),
+    adminPVName(server, "access:lastStatus"),
+    adminPVName(server, "access:lastError"),
+    adminPVName(server, "access:policyFingerprint"),
+    adminPVName(server, "access:watchStatus"),
+    adminPVName(server, "access:activeClients"),
+    adminPVName(server, "access:deniedReads"),
+    adminPVName(server, "access:deniedWrites"),
+    adminPVName(server, "access:rightsChanges"),
+    adminPVName(server, "discovery:status"),
+  };
+}
+
+bool sameDiscoveryConfig(const DiscoveryConfig& lhs, const DiscoveryConfig& rhs) {
+  return std::tie(lhs.enabled, lhs.bindAddress, lhs.udpPort, lhs.timeoutMs, lhs.maxHoldoffMs, lhs.maxRecords, lhs.maxBytes) ==
+         std::tie(rhs.enabled, rhs.bindAddress, rhs.udpPort, rhs.timeoutMs, rhs.maxHoldoffMs, rhs.maxRecords, rhs.maxBytes);
 }
 
 }  // namespace redis_pvxs_ioc

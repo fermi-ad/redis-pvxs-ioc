@@ -4,7 +4,9 @@ The release sequence is **v0.8.2 → v0.9.0 candidates → v0.9.0 → v1.0.0-rc.
 The [v0.9.0 milestone](https://github.com/fermi-ad/redis-pvxs-ioc/milestone/1)
 and [tracking issue #99](https://github.com/fermi-ad/redis-pvxs-ioc/issues/99)
 coordinate the existing backlog. An implementation PR is evidence of progress;
-items below remain open until their code is reviewed, merged and qualified.
+items below remain open until their code is reviewed, merged and qualified. Every
+confirmed bug in supported release behavior must be fixed and regressed before
+publication. Production rollout remains separate.
 
 Valid v0.8 configurations, PV names, aliases and payload contracts remain
 compatible. Unsafe inputs are rejected explicitly and changed failure behavior
@@ -28,6 +30,22 @@ CA and conventional IOC hosting are outside this product.
 7. Integrate the existing NTNDArray PR on the corrected lifecycle.
 8. Complete native architecture, capacity, outage, soak, rollback and provenance
    gates, then promote matching source revisions to v0.9.0.
+
+## September 29 implementation follow-up
+
+- Correctness PR #100 now includes the native libevent startup fix; its fresh
+  full-feature Linux build and seven CTest suites pass. Adapter #108 has a fresh
+  15-test hosted pass and native lifecycle pass. Independent code-owner approval
+  and the merged adapter pin remain required before publishing 0.8.2.
+- [#109](https://github.com/fermi-ad/redis-pvxs-ioc/pull/109) implements validated
+  digest promotion, full SemVer identity, and isolated smoke execution (#67,
+  #106, #107). Real concurrent smoke/access and disposable-registry checks pass.
+- #97 includes the frame-ID overflow fix and direct pixel-array copy (#108);
+  native UBSan coverage passes. Porting its reader ownership remains required
+  before integration on the final runtime lifecycle.
+- #90 is closed because its proposed Base pin removes the required HAG API.
+  #89/#91/#93 and sidecar expansion issues remain open until retirement merges;
+  #92 remains open until the merged adapter pin lands.
 
 ## Review findings and required outcomes
 
@@ -64,7 +82,7 @@ CA and conventional IOC hosting are outside this product.
 | [ ] | CI omits complete integration and ownership/concurrency gates | Unit, Redis/PVA, access E2E, reflection RPC, imaging and sanitizer jobs; hosted untrusted PR execution | #101; qualification below |
 | [ ] | Mutable build inputs and promotion before validation | Pin images/packages/actions, retain SBOM/provenance/logs/digests, validate before stable/latest, full SemVer prereleases | #67; release qualification |
 | [ ] | Stale image references, support policy and feature docs | Synchronize README/config/security/image examples/support/migration material; refresh remote smoke tags; explicit local-image override | #67; release preparation |
-| [ ] | No representative soak or rollback evidence | Both Linux architectures: 24-hour isolated soak with reload/outage injection; previous-stable configuration rollback | qualification below |
+| [ ] | No representative soak or rollback evidence | Linux amd64: 24-hour isolated soak with reload/outage injection; previous-stable configuration rollback | qualification below |
 
 ## Operating contracts
 
@@ -78,18 +96,20 @@ CA and conventional IOC hosting are outside this product.
   every transition is not promised.
 - Discovery requires no manual catalog synchronization. Static catalog replacement
   follows successful activation; rejected staging preserves the previous session.
-- Linux amd64/arm64 images and native macOS arm64 development builds are required.
+- Linux amd64 images and native macOS development builds are required. Existing
+  Linux arm64 CI remains informational; ARM image publication and soak qualification
+  are deferred for reconsideration at 1.0.0 only when justified by a deployment need.
 
 ## v0.9.0 qualification
 
-- [ ] Hosted ubuntu-24.04, ubuntu-24.04-arm and macos-14 unit/integration runs.
+- [ ] Hosted ubuntu-24.04 and macos-14 unit/integration runs; informational ubuntu-24.04-arm checks.
 - [ ] Deterministic 600-frame 1920×1080 Mono8 test at 10 fps, exact pixels and zero unexplained gaps.
 - [ ] Published scalar/array/imaging/fan-out/reload/backend-delay capacity sweep.
-- [ ] 24-hour isolated soak on Linux amd64 and arm64 with bounded resources.
+- [ ] 24-hour isolated soak on Linux amd64 on adlinux3 with bounded resources.
 - [ ] ACF, RPC, Redis reconnect/trim/deletion, imaging overload and recovery tests.
 - [ ] Configuration rollback to the previous stable image in isolated environments.
-- [ ] Trusted amd64 build/promotion on adlinux3 and native hosted arm64 build;
-      assemble the manifest only from matching validated revisions.
+- [ ] Trusted amd64 build on adlinux3; promote only the same qualified digest
+      from the exact merged release commit, without rebuilding.
 - [ ] Pinned base images/package snapshots/actions; dependency inventory, SBOM,
       provenance, logs and image digests retained with the candidate.
 - [ ] Stable/latest tags promoted only after validation; prereleases never update latest.
@@ -98,6 +118,9 @@ CA and conventional IOC hosting are outside this product.
 Production fleet rollout is a separate deployment task.
 
 ## After v0.9.0: v1.0 RC
+
+Linux arm64 release images and qualification are optional future work, requiring
+an identified deployment and demonstrated value before adding release gates.
 
 | Done | Deferred finding/program item | Completion contract |
 | --- | --- | --- |

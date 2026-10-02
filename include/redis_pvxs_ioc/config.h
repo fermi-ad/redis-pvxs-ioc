@@ -205,6 +205,8 @@ struct DiscoveryConfig {
 };
 
 struct AppConfig {
+  uint32_t schemaVersion = 1;
+  bool legacyInput = true;
   ServerConfig server;
   AccessConfig access;
   RedisBackendConfigs redisBackends;

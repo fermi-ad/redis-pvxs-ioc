@@ -3,6 +3,7 @@ build.verify/
 .DS_Store
 *.swp
 *.swo
+__pycache__/
 
 third_party/support/**/O.*
 third_party/support/**/bin/

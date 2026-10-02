@@ -223,12 +223,14 @@ struct AlarmPublisher::Impl {
         }
       }
       if (!selected && live) recovering = false;
-      bool hasActive = false;
-      for (const auto& entry : slots) if (current(entry.second)) { hasActive = true; break; }
-      if (!selected && (!hasActive || Clock::now() < heartbeat)) {
-        if (hasActive) changed.wait_until(lock, heartbeat);
-        else changed.wait(lock);
-        continue;
+      if (!selected) {
+        bool hasActive = false;
+        for (const auto& entry : slots) if (current(entry.second)) { hasActive = true; break; }
+        if (!hasActive || Clock::now() < heartbeat) {
+          if (hasActive) changed.wait_until(lock, heartbeat);
+          else changed.wait(lock);
+          continue;
+        }
       }
       const auto sendingEpoch = epoch;
       lock.unlock();

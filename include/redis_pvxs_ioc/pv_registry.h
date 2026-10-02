@@ -31,6 +31,8 @@ public:
   std::shared_ptr<Prepared> prepare(PVBindings desired, const Wrappers& wrappers = {}) const;
   // beforeCommit is the last fallible action. On false it must leave external
   // state unchanged. After it succeeds, snapshot publication cannot allocate.
+  // Publications are serialized; readers serve the previous immutable snapshot
+  // throughout beforeCommit, even when it waits for external work.
   bool publish(const std::shared_ptr<Prepared>& prepared,
                const std::function<bool(std::string&)>& beforeCommit, std::string& error);
   void finish(const std::shared_ptr<Prepared>& prepared);

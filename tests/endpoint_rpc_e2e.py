@@ -109,8 +109,28 @@ def main():
                 reply = subprocess.check_output([args.pvxcall, "-w", "3", "TEST:VALUE_RPC", "number=5"],
                                                 env=environment, text=True, stderr=subprocess.STDOUT, timeout=5)
                 assert "int32_t number = 5" in reply, reply
+                # Reflection is unavailable during this unrelated edit. Cached
+                # service definitions must avoid the old 30-attempt reload stall.
+                stop(fixture)
+                fixture.stdout.close()
+                changed = copy.deepcopy(config)
+                changed["pvs"][0]["metadata"] = dict(description="unrelated metadata edit")
+                path.write_text(json.dumps(changed))
+                ioc.send_signal(signal.SIGHUP)
+                started = time.monotonic()
+                wait_for("SYS:endpoints:config:generation", "value int64_t = 2")
+                assert time.monotonic() - started < 5, "unchanged RPC service was re-reflected"
+                publish(7.)
+                wait_for("TEST:keep", "value double = 7")
                 stop(ioc)
                 ioc = None
+
+                fixture = subprocess.Popen([args.fixture], stdout=subprocess.PIPE, text=True)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(fixture.stdout, selectors.EVENT_READ)
+                    assert selector.select(10), "reflection fixture did not restart"
+                    grpc_port = int(fixture.stdout.readline().strip())
+                config["rpc_services"][0]["endpoint"] = f"127.0.0.1:{grpc_port}"
 
                 changed = copy.deepcopy(config)
                 changed["server"]["namespace"] = ""

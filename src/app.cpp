@@ -421,18 +421,30 @@ std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {
   return std::make_shared<RedisAdapter>(config.baseKey, options);
 }
 
-RedisBackendRegistry buildRedisBackends(const AppConfig& config) {
+RedisBackendRegistry buildRedisBackends(const AppConfig& config,
+                                       const AppConfig& previous,
+                                       const RedisBackendRegistry& existing) {
   RedisBackendRegistry backends;
   for (const auto& entry : config.redisBackends) {
-    backends.emplace(entry.first, buildRedisAdapter(entry.second));
+    const auto old = previous.redisBackends.find(entry.first);
+    const auto runtime = existing.find(entry.first);
+    if (old != previous.redisBackends.end() && runtime != existing.end() &&
+        sameRedisConfig(entry.second, old->second))
+      backends.emplace(entry.first, runtime->second);
+    else
+      backends.emplace(entry.first, buildRedisAdapter(entry.second));
   }
   return backends;
 }
 
-void setDeferReaders(RedisBackendRegistry& backends, const bool defer) {
-  for (const auto& entry : backends) {
-    entry.second->setDeferReaders(defer);
-  }
+bool sameBackendBindings(const PVConfig& pv, const RedisBackendRegistry& before,
+                         const RedisBackendRegistry& after) {
+  const auto same = [&](const std::string& name) {
+    const auto a = before.find(name), b = after.find(name);
+    return a != before.end() && b != after.end() && a->second == b->second;
+  };
+  return same(pv.read.backend) && (!pv.write || same(pv.write->backend)) &&
+         (!pv.confirm || same(pv.confirm->backend));
 }
 
 std::shared_ptr<AlarmPublisher> buildAlarmPublisher(const AppConfig& config) {
@@ -489,6 +501,12 @@ using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase
 using RpcMap = std::unordered_map<std::string, std::shared_ptr<pvxs::server::SharedPV>>;
 using PVBindingMap = std::map<std::string, std::string>;
 using AssignmentMap = std::unordered_map<std::string, AccessAssignment>;
+struct RpcServiceState {
+  RpcServiceConfig config;
+  RpcMap pvs;
+  std::map<std::string, std::string> owners;
+};
+using RpcServices = std::vector<RpcServiceState>;
 
 PVBindingMap pvBindings(const AppConfig& config) {
   PVBindingMap bindings;
@@ -516,12 +534,29 @@ std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
 // Build RPC-forwarding PVs by reflecting each configured gRPC service and
 // creating one PV per method, named <namespace>:<UPPER_SNAKE(Method)><suffix>.
 // The IOC has no compiled-in knowledge of the methods or message schema.
-RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
+RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments,
+                  const RpcServices& previous, RpcServices& staged) {
   RpcMap rpcPVs;
   auto endpoints = configuredEndpoints(config);
   assignments.clear();
+  staged.clear();
 #if REDIS_PVXS_IOC_ENABLE_GRPC
   for (const auto& svc : config.rpcServices) {
+    const auto prior = std::find_if(previous.begin(), previous.end(), [&](const auto& entry) {
+      return !entry.pvs.empty() && entry.config.endpoint == svc.endpoint &&
+             entry.config.service == svc.service && entry.config.suffix == svc.suffix &&
+             entry.config.defaults == svc.defaults;
+    });
+    if (prior != previous.end()) {
+      for (const auto& item : prior->pvs) {
+        endpoints.reserve(item.first, EndpointKind::RPC, prior->owners.at(item.first), "root.rpc_services");
+        rpcPVs.emplace(item);
+        assignments.emplace(item.first, svc.access.value_or(config.access.defaults.rpc));
+      }
+      staged.push_back(*prior);
+      staged.back().config = svc;
+      continue;
+    }
     auto bridge = std::make_shared<GrpcBridge>(svc.endpoint);
 
     // The backend may not be up yet at IOC startup; retry reflection briefly.
@@ -544,17 +579,23 @@ RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
       continue;
     }
 
+    RpcServiceState serviceState;
+    serviceState.config = svc;
     for (const auto& m : methods) {
       std::string leaf = methodToPvLeaf(m.method) + svc.suffix;
       std::string name =
           config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
       endpoints.reserve(name, EndpointKind::RPC, m.service + "/" + m.method, "root.rpc_services");
       auto runtime = std::make_shared<RpcPV>(bridge, m, svc.defaults);
-      rpcPVs.emplace(name, std::shared_ptr<pvxs::server::SharedPV>(runtime, &runtime->sharedPV()));
+      auto pv = std::shared_ptr<pvxs::server::SharedPV>(runtime, &runtime->sharedPV());
+      rpcPVs.emplace(name, pv);
+      serviceState.pvs.emplace(name, std::move(pv));
+      serviceState.owners.emplace(name, m.service + "/" + m.method);
       assignments.emplace(name, svc.access.value_or(config.access.defaults.rpc));
       std::fprintf(stderr, "[redis-pvxs-ioc] rpc PV %s -> %s/%s\n",
                    name.c_str(), m.service.c_str(), m.method.c_str());
     }
+    staged.push_back(std::move(serviceState));
   }
 #else
   if (!config.rpcServices.empty())
@@ -606,6 +647,7 @@ struct Application::Impl {
   RuntimeMap runtimes;
   RpcMap rpcPVs;
   AssignmentMap rpcAssignments;
+  RpcServices rpcServices;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
 
   void addEndpoint(const std::string& name,
@@ -748,6 +790,7 @@ void Application::stop() {
     impl_->removeEndpoint(item.first);
   }
   impl_->rpcPVs.clear();
+  impl_->rpcServices.clear();
   impl_->redisBackends.clear();
   impl_->alarmPublisher.reset();
 
@@ -797,12 +840,7 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
 
   const auto nextGeneration = impl_->generation + 1;
 
-  const bool redisChanged = !impl_->hasConfig || !sameRedisBackends(impl_->currentConfig.redisBackends, config.redisBackends);
-  const bool alarmChanged = !impl_->hasConfig || !sameAlarmStreamConfig(impl_->currentConfig.alarms, config.alarms);
-
-  const bool applied = initialLoad || redisChanged || alarmChanged
-      ? replaceAll(config, nextGeneration, activatePolicy, error)
-      : applyIncremental(config, nextGeneration, activatePolicy, error);
+  const bool applied = applyIncremental(config, nextGeneration, activatePolicy, error);
   if (!applied && policyActivated) {
     std::string restoreError;
     if (!impl_->access->restorePrevious(restoreError)) {
@@ -814,94 +852,18 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
   return applied;
 }
 
-bool Application::replaceAll(const AppConfig& config,
-                             const uint64_t generation,
-                             const BeforeCommit& beforeCommit,
-                             std::string& error) {
-  try {
-    auto newRedisBackends = buildRedisBackends(config);
-    setDeferReaders(newRedisBackends, true);
-    auto newAlarmPublisher = buildAlarmPublisher(config);
-
-    RuntimeMap staged;
-    try {
-      for (const auto& pv : config.pvs) {
-        const auto name = fullPVName(config.server, pv);
-        staged.emplace(name, makeRuntime(config.server, pv, newRedisBackends, newAlarmPublisher, generation));
-      }
-    } catch (...) {
-      setDeferReaders(newRedisBackends, false);
-      for (auto& item : staged) {
-        item.second->deactivate("staged config failure");
-      }
-      throw;
-    }
-    setDeferReaders(newRedisBackends, false);
-
-    AssignmentMap stagedRpcAssignments;
-    auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments);
-    auto stagedCatalog = buildDiscoveryCatalog(config, stagedRpcPVs, impl_->server.config().tcp_port, generation);
-    if (!beforeCommit(error)) {
-      for (auto& item : staged) item.second->deactivate("staged config rejected");
-      return false;
-    }
-
-    for (const auto& binding : pvBindings(impl_->currentConfig)) {
-      impl_->removeEndpoint(binding.first);
-    }
-    for (auto& item : impl_->runtimes) {
-      item.second->deactivate("config replaced");
-    }
-    impl_->runtimes.clear();
-
-    for (auto& item : staged) {
-      item.second->activate();
-      for (const auto& servedName : fullPVNames(config.server, item.second->config())) {
-        impl_->addEndpoint(servedName,
-                           item.second->sharedPV(),
-                           item.second->config().access.value_or(config.access.defaults.pv));
-      }
-      impl_->runtimes.emplace(item.first, item.second);
-    }
-
-    // Rebuild RPC-forwarding PVs (simple full-replace; they hold no Redis
-    // reader state, so there is no in-flight subscription to preserve).
-    for (auto& item : impl_->rpcPVs) {
-      impl_->removeEndpoint(item.first);
-    }
-    impl_->rpcPVs = std::move(stagedRpcPVs);
-    impl_->rpcAssignments = std::move(stagedRpcAssignments);
-    for (auto& item : impl_->rpcPVs) {
-      impl_->addEndpoint(item.first, *item.second, impl_->rpcAssignments.at(item.first));
-    }
-
-    impl_->redisBackends = std::move(newRedisBackends);
-    impl_->alarmPublisher = std::move(newAlarmPublisher);
-    impl_->currentConfig = config;
-    impl_->hasConfig = true;
-    impl_->generation = generation;
-    impl_->catalog = std::move(stagedCatalog);
-    if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
-
-    if (impl_->admin) {
-      impl_->admin->setGeneration(generation);
-      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
-      impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
-      impl_->admin->setError("");
-      impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
-    }
-    return true;
-  } catch (const std::exception& ex) {
-    error = ex.what();
-    return false;
-  }
-}
-
 bool Application::applyIncremental(const AppConfig& config,
                                    const uint64_t generation,
                                    const BeforeCommit& beforeCommit,
                                    std::string& error) {
   try {
+    auto newRedisBackends = buildRedisBackends(config, impl_->currentConfig, impl_->redisBackends);
+    const auto priorAlarm = impl_->currentConfig.redisBackends.find(config.alarms.backend);
+    const bool reuseAlarm = impl_->hasConfig &&
+        sameAlarmStreamConfig(impl_->currentConfig.alarms, config.alarms) &&
+        priorAlarm != impl_->currentConfig.redisBackends.end() &&
+        sameRedisConfig(priorAlarm->second, config.redisBackends.at(config.alarms.backend));
+    auto newAlarmPublisher = reuseAlarm ? impl_->alarmPublisher : buildAlarmPublisher(config);
     const auto currentBindings = pvBindings(impl_->currentConfig);
     const auto desiredBindings = pvBindings(config);
     std::map<std::string, PVConfig> desired;
@@ -922,7 +884,8 @@ bool Application::applyIncremental(const AppConfig& config,
         continue;
       }
 
-      if (current.second->structurallyCompatible(desiredIt->second)) {
+      if (current.second->structurallyCompatible(desiredIt->second) &&
+          sameBackendBindings(desiredIt->second, impl_->redisBackends, newRedisBackends)) {
         reconfigureNames.emplace_back(current.first, desiredIt->second);
         const auto currentServedNames =
             fullPVNames(impl_->currentConfig.server, current.second->config());
@@ -943,24 +906,12 @@ bool Application::applyIncremental(const AppConfig& config,
     }
 
     RuntimeMap staged;
-    if (!replaceNames.empty() || !addNames.empty()) {
-      setDeferReaders(impl_->redisBackends, true);
-      try {
-        for (const auto& name : replaceNames) {
-          staged.emplace(name, makeRuntime(config.server, desired.at(name), impl_->redisBackends, impl_->alarmPublisher, generation));
-        }
-        for (const auto& item : addNames) {
-          staged.emplace(item.first, makeRuntime(config.server, item.second, impl_->redisBackends, impl_->alarmPublisher, generation));
-        }
-      } catch (...) {
-        setDeferReaders(impl_->redisBackends, false);
-        for (auto& item : staged) {
-          item.second->deactivate("staged config failure");
-        }
-        throw;
-      }
-      setDeferReaders(impl_->redisBackends, false);
-    }
+    // Owned subscriptions let staged runtimes attach independently. Do not
+    // suspend every live reader while constructing an unrelated runtime.
+    for (const auto& name : replaceNames)
+      staged.emplace(name, makeRuntime(config.server, desired.at(name), newRedisBackends, newAlarmPublisher, generation));
+    for (const auto& item : addNames)
+      staged.emplace(item.first, makeRuntime(config.server, item.second, newRedisBackends, newAlarmPublisher, generation));
 
     const std::set<std::string> replaced(replaceNames.begin(), replaceNames.end());
     std::map<std::string, pvxs::Value> reopenValues;
@@ -969,7 +920,8 @@ bool Application::applyIncremental(const AppConfig& config,
     }
 
     AssignmentMap stagedRpcAssignments;
-    auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments);
+    RpcServices stagedRpcServices;
+    auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments, impl_->rpcServices, stagedRpcServices);
     auto stagedCatalog = buildDiscoveryCatalog(config, stagedRpcPVs, impl_->server.config().tcp_port, generation);
     if (!beforeCommit(error)) {
       for (auto& item : staged) item.second->deactivate("staged config rejected");
@@ -997,6 +949,7 @@ bool Application::applyIncremental(const AppConfig& config,
     }
 
     for (const auto& item : reconfigureNames) {
+      impl_->runtimes.at(item.first)->setAlarmPublisher(newAlarmPublisher);
       impl_->runtimes.at(item.first)->reconfigure(item.second, generation);
       for (const auto& servedName : fullPVNames(config.server, item.second)) {
         const auto currentIt = currentBindings.find(servedName);
@@ -1039,17 +992,28 @@ bool Application::applyIncremental(const AppConfig& config,
       }
     }
 
-    // Full-replace the RPC-forwarding PVs.
+    // Preserve unchanged reflected services and their existing client channels.
     for (auto& item : impl_->rpcPVs) {
-      impl_->removeEndpoint(item.first);
+      const auto next = stagedRpcPVs.find(item.first);
+      if (next == stagedRpcPVs.end() || next->second != item.second)
+        impl_->removeEndpoint(item.first);
     }
+    auto priorRpcPVs = std::move(impl_->rpcPVs);
     impl_->rpcPVs = std::move(stagedRpcPVs);
     impl_->rpcAssignments = std::move(stagedRpcAssignments);
+    impl_->rpcServices = std::move(stagedRpcServices);
     for (auto& item : impl_->rpcPVs) {
-      impl_->addEndpoint(item.first, *item.second, impl_->rpcAssignments.at(item.first));
+      const auto previous = priorRpcPVs.find(item.first);
+      if (previous != priorRpcPVs.end() && previous->second == item.second)
+        impl_->setAssignment(item.first, impl_->rpcAssignments.at(item.first));
+      else
+        impl_->addEndpoint(item.first, *item.second, impl_->rpcAssignments.at(item.first));
     }
 
+    impl_->redisBackends = std::move(newRedisBackends);
+    impl_->alarmPublisher = std::move(newAlarmPublisher);
     impl_->currentConfig = config;
+    impl_->hasConfig = true;
     impl_->generation = generation;
     impl_->catalog = std::move(stagedCatalog);
     if (impl_->discovery) impl_->discovery->publish(impl_->catalog);

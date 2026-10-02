@@ -45,7 +45,20 @@ generation, and only then applies it. A successful reload increments
 
 Parsing or schema errors report `reload failed`. A replacement that parses but
 cannot be safely applied reports `reload rejected`. In both cases the generation
-number remains unchanged and the active generation continues serving.
+number remains unchanged. Rejection during staging preserves the active
+generation; complete rollback for failures after endpoint cutover begins remains
+tracked by [#4](https://github.com/fermi-ad/redis-pvxs-ioc/issues/4).
+
+Unchanged Redis backend definitions retain their existing adapters. Only PVs
+whose reader topology or referenced backend changes are replaced. An unrelated
+backend edit or alarm-stream edit therefore preserves cached readback, owned
+subscriptions and pending confirmations on unchanged runtimes. Staging a new
+runtime does not globally defer the existing readers.
+
+Unchanged RPC service definitions retain their reflected methods, bridge and PVs,
+including when that backend is temporarily unavailable. Access assignments still
+follow the new configuration. Changing endpoint, service, suffix or defaults
+rebuilds that service; restarting the IOC refreshes all reflected schemas.
 
 Namespace and bind settings cannot change through hot reload. Restart the process
 to change `server.instance`, `server.namespace`, interfaces, ports, or beacon

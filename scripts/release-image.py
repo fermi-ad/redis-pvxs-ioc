@@ -8,8 +8,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import qualification_contract as qualification
+import qualification_evidence as evidence_api
 
 REPOSITORY = "fermi-ad/redis-pvxs-ioc"
 IMAGE_REPOSITORY = "adregistry.fnal.gov/instrumentation/redis-pvxs-ioc"
@@ -150,8 +155,10 @@ def verify_record(record, run_info, version, revision, kind):
                 not re.fullmatch(r"[0-9a-f]{64}", evidence[name]) for name in CANDIDATE_EVIDENCE):
             raise ValueError("candidate attestation/source evidence is missing")
     if kind == "qualification":
-        if record.get("soak_seconds", 0) < 86400 or record.get("rollback_version") != "0.8.2":
-            raise ValueError("qualification requires 24-hour amd64 soak and 0.8.2 rollback")
+        if (record.get("schema") != 1 or record.get("soak_seconds", 0) < 86400
+                or record.get("rollback_version") != "0.8.2"
+                or not {"proof.json", "policy.json"}.issubset(record.get("evidence", {}))):
+            raise ValueError("qualification requires the complete measured proof bundle")
     return record
 
 
@@ -165,14 +172,18 @@ def load_record(run_id, version, revision, kind, directory):
             or info["event"] != "workflow_dispatch" or info["path"] != ".github/workflows/" + name):
         raise ValueError("invalid evidence workflow or source revision")
     destination = directory / kind
-    run("gh", "run", "download", str(run_id), "--repo", REPOSITORY, "--name",
-        f"release-{kind}-{run_id}-{info['run_attempt']}", "--dir", str(destination))
-    record = json.loads((destination / (kind + ".json")).read_text())
+    # Preflight all archive paths/types/sizes before writing any downloaded
+    # bytes. Qualification has nested raw reports, config/ACF and CI evidence.
+    qualification.validate_run(info, revision, name, dispatch_only=True)
+    evidence_api.artifact(info, kind, destination)
+    record = qualification.read(destination, kind + ".json")
     verify_record(record, info, version, revision, kind)
     if kind == "candidate":
         for name in CANDIDATE_EVIDENCE:
             if hashlib.sha256((destination / name).read_bytes()).hexdigest() != record["evidence"][name]:
                 raise ValueError("candidate evidence checksum differs: " + name)
+    else:
+        qualification.verify_bundle(destination, record, info, evidence_api.api)
     return record
 
 

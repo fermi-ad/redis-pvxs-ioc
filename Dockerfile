@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreadline-dev \
     perl \
     pkg-config \
+    python3 \
     # gRPC + protobuf for the RPC->gRPC forwarding feature (find_package CONFIG)
     libgrpc++-dev \
     libprotobuf-dev \

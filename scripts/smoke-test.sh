@@ -9,25 +9,38 @@ PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.
 DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.1@sha256:73ef6e1ca9e8e6c344e2663f841186050629b49a3f1ebe3c3ffa1e73ce4bfad5"
 USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE+x}"
 SOURCE_VERSION="$(tr -d '\n' < VERSION)"
-SMOKE_RUN_ID="${REDIS_PVXS_IOC_SMOKE_RUN_ID:-$$}"
+mkdir -p "$ROOT_DIR/build"
+RUN_DIR="$(mktemp -d "$ROOT_DIR/build/smoke-run.XXXXXXXX")"
+SMOKE_PROJECT="$(basename "$RUN_DIR" | tr '[:upper:].' '[:lower:]-')"
 
 export REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE:-$DEFAULT_REDIS_PVXS_IOC_IMAGE}"
-export REDIS_CONTAINER_NAME="${REDIS_CONTAINER_NAME:-redis-pvxs-ioc-smoke-${SMOKE_RUN_ID}-redis}"
-export REDIS_PVXS_IOC_CONTAINER_NAME="${REDIS_PVXS_IOC_CONTAINER_NAME:-redis-pvxs-ioc-smoke-${SMOKE_RUN_ID}-ioc}"
+export REDIS_IMAGE="${REDIS_IMAGE:-adregistry.fnal.gov/instrumentation/redis@sha256:365ee40e627b9faf0775c31c7d6eb9e88a2de201e981b28bd5206029375977b6}"
 SOURCE_CONFIG="${REDIS_PVXS_IOC_CONFIG:-$ROOT_DIR/demo/config.yaml}"
-TEMP_CONFIG="$(mktemp)"
+TEMP_CONFIG="$RUN_DIR/config.yaml"
 export REDIS_PVXS_IOC_CONFIG="$TEMP_CONFIG"
-cp "$SOURCE_CONFIG" "$REDIS_PVXS_IOC_CONFIG"
+MONITOR_PID=""
+STARTED=false
+compose() {
+  docker compose --project-name "$SMOKE_PROJECT" --file "$ROOT_DIR/tests/smoke.compose.yml" "$@"
+}
 
 cleanup() {
-  docker compose down -v >/dev/null 2>&1 || true
+  local result=$?
+  trap - EXIT
+  if [ -n "$MONITOR_PID" ]; then
+    kill "$MONITOR_PID" >/dev/null 2>&1 || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+  fi
+  if $STARTED; then
+    compose logs --no-color >"$RUN_DIR/compose.log" 2>&1 || true
+    compose down -v >/dev/null 2>&1 || true
+  fi
+  rm -f "$TEMP_CONFIG"
+  echo "Smoke evidence: $RUN_DIR"
+  exit "$result"
 }
-
-restore_config() {
-  rm -f "${REDIS_PVXS_IOC_CONFIG:-}"
-}
-
-trap 'restore_config; cleanup' EXIT
+trap cleanup EXIT
+cp "$SOURCE_CONFIG" "$REDIS_PVXS_IOC_CONFIG"
 
 run_with_timeout() {
   if command -v timeout >/dev/null 2>&1; then
@@ -62,18 +75,16 @@ if ! command -v xxd >/dev/null 2>&1; then
   exit 1
 fi
 
-docker compose pull redis
-if [ -n "$USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE" ]; then
-  docker image inspect "$REDIS_PVXS_IOC_IMAGE" >/dev/null 2>&1 || docker pull "$REDIS_PVXS_IOC_IMAGE"
-else
-  docker compose pull ioc
-fi
-docker compose up -d
+source "$ROOT_DIR/scripts/image-pull.sh"
+ensure_test_image "$REDIS_IMAGE" "${REDIS_IMAGE_PULL_POLICY:-auto}"
+ensure_test_image "$REDIS_PVXS_IOC_IMAGE" "${REDIS_PVXS_IOC_PULL_POLICY:-auto}"
+STARTED=true
+compose up -d --pull never
 
 sleep 5
 
-IOC_CONTAINER="$(docker compose ps -q ioc)"
-REDIS_CONTAINER="$(docker compose ps -q redis)"
+IOC_CONTAINER="$(compose ps -q ioc)"
+REDIS_CONTAINER="$(compose ps -q redis)"
 
 for _ in {1..30}; do
   if run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget SYS:demo:backend:health" | grep -Eq 'value string = "[0-9]+/[0-9]+ connected'; then
@@ -129,7 +140,7 @@ run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxge
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxput EXTERNAL:magnet:current 8.0"
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 8'
 
-MONITOR_OUTPUT="$(mktemp)"
+MONITOR_OUTPUT="$RUN_DIR/monitor.log"
 docker exec "$IOC_CONTAINER" sh -lc \
   "$PV_ENV timeout 4 stdbuf -oL -eL $PVX_BIN_DIR/pvxmonitor EXTERNAL:magnet:current" >"$MONITOR_OUTPUT" 2>&1 &
 MONITOR_PID=$!
@@ -142,8 +153,8 @@ for _ in {1..10}; do
   sleep 0.5
 done
 wait "$MONITOR_PID" 2>/dev/null || true
+MONITOR_PID=""
 grep 'value double = 9' "$MONITOR_OUTPUT"
-rm -f "$MONITOR_OUTPUT"
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget DEMO:magnet:current" | grep 'value double = 9'
 run_with_timeout docker exec "$IOC_CONTAINER" sh -lc "$PV_ENV $PVX_BIN_DIR/pvxget EXTERNAL:magnet:current:secondary" | grep 'value double = 9'
 run_with_timeout docker exec "$REDIS_CONTAINER" /bin/sh -lc "redis-cli --raw XREVRANGE '{demo}:magnet:current' + - COUNT 1 | tail -n 1" | xxd -p -c 256 | grep '^0000000000805640'

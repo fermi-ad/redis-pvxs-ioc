@@ -113,6 +113,21 @@ int main() {
   eventually([&] { return queue->stats().running == 0; });
   assert(producer.getValues<double>("timeout-command").size() == 1);
 
+  // Cancellation racing confirmation setup must release the worker promptly,
+  // without waiting for the five-second confirmation timeout.
+  for (unsigned attempt = 0; attempt < 64; ++attempt) {
+    Completion cancelled;
+    const double value = 100. + attempt;
+    auto operation = put("TEST:value", value, cancelled);
+    eventually([&] { return written("command", value); });
+    operation->cancel();
+    const auto releasedBy = std::chrono::steady_clock::now() + 1s;
+    while (queue->stats().running || queue->stats().queued) {
+      assert(std::chrono::steady_clock::now() < releasedBy);
+      std::this_thread::sleep_for(1ms);
+    }
+  }
+
   // Reject oversized arrays before queueing or touching Redis, and retain the
   // last good readback when oversized source data arrives.
   auto arrayConfig = config;

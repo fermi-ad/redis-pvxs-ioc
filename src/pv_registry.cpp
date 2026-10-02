@@ -6,7 +6,6 @@
 #include <atomic>
 #include <mutex>
 #include <set>
-#include <shared_mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -87,7 +86,7 @@ private:
 
 class TrackedChannel final : public pvxs::server::ChannelControl {
 public:
-  TrackedChannel(PVRegistry::Channel target, std::shared_ptr<Registration> registration)
+  TrackedChannel(std::shared_ptr<pvxs::server::ChannelControl> target, std::shared_ptr<Registration> registration)
       : ChannelControl(target->name(), target->credentials(), target->op()),
         target_(std::move(target)), registration_(std::move(registration)) {
     registration_->track(target_);
@@ -128,7 +127,9 @@ struct Snapshot {
 }
 
 struct PVRegistry::Impl {
-  mutable std::shared_mutex mutex;
+  // Serialize publishers, including the last fallible commit action. Readers
+  // use immutable snapshots and never wait for policy DNS or runtime dispatch.
+  std::mutex publishMutex;
   std::shared_ptr<const Snapshot> current = std::make_shared<Snapshot>();
 };
 struct PVRegistry::Prepared {
@@ -139,18 +140,15 @@ struct PVRegistry::Prepared {
 PVRegistry::PVRegistry() : impl_(std::make_unique<Impl>()) {}
 PVRegistry::~PVRegistry() = default;
 PVBindings PVRegistry::bindings() const {
-  std::shared_lock<std::shared_mutex> guard(impl_->mutex);
+  const auto snapshot = std::atomic_load(&impl_->current);
   PVBindings result;
-  for (const auto& entry : impl_->current->entries) result.emplace(entry.first, entry.second->binding);
+  for (const auto& entry : snapshot->entries) result.emplace(entry.first, entry.second->binding);
   return result;
 }
 
 std::shared_ptr<PVRegistry::Prepared> PVRegistry::prepare(PVBindings desired, const Wrappers& wrappers) const {
   auto result = std::make_shared<Prepared>();
-  {
-    std::shared_lock<std::shared_mutex> guard(impl_->mutex);
-    result->previous = impl_->current;
-  }
+  result->previous = std::atomic_load(&impl_->current);
   auto next = std::make_shared<Snapshot>();
   auto names = std::make_shared<std::set<std::string>>();
   for (auto& entry : desired) {
@@ -182,14 +180,14 @@ std::shared_ptr<PVRegistry::Prepared> PVRegistry::prepare(PVBindings desired, co
 bool PVRegistry::publish(const std::shared_ptr<Prepared>& prepared,
                           const std::function<bool(std::string&)>& beforeCommit, std::string& error) {
   {
-    std::unique_lock<std::shared_mutex> guard(impl_->mutex);
-    if (!prepared || !prepared->next || prepared->previous != impl_->current) {
+    std::lock_guard<std::mutex> guard(impl_->publishMutex);
+    if (!prepared || !prepared->next || prepared->previous != std::atomic_load(&impl_->current)) {
       error = "endpoint publication changed during preparation";
       return false;
     }
     if (beforeCommit && !beforeCommit(error)) return false;
     for (const auto& registration : prepared->retiring) registration->active = false;
-    impl_->current.swap(prepared->next);
+    std::atomic_store(&impl_->current, prepared->next);
   }
   error.clear();
   return true;
@@ -206,24 +204,26 @@ void PVRegistry::clear() {
   finish(prepared);
 }
 void PVRegistry::onSearch(Search& search) {
-  std::shared_lock<std::shared_mutex> guard(impl_->mutex);
-  for (auto& name : search) if (impl_->current->entries.count(name.name())) name.claim();
+  const auto snapshot = std::atomic_load(&impl_->current);
+  for (auto& name : search) if (snapshot->entries.count(name.name())) name.claim();
 }
 void PVRegistry::onCreate(Channel&& channel) {
-  // Hold through attach: publication cannot retire an old registration and
-  // then let a racing create attach to it after its channels were closed.
-  std::shared_lock<std::shared_mutex> guard(impl_->mutex);
-  const auto found = impl_->current->entries.find(channel->name());
-  if (found == impl_->current->entries.end()) return;
+  const auto snapshot = std::atomic_load(&impl_->current);
+  const auto found = snapshot->entries.find(channel->name());
+  if (found == snapshot->entries.end()) return;
   const auto registration = found->second;
-  Channel tracked = std::make_unique<TrackedChannel>(std::move(channel), registration);
+  const std::shared_ptr<pvxs::server::ChannelControl> control(std::move(channel));
+  Channel tracked = std::make_unique<TrackedChannel>(control, registration);
   if (registration->wrapper) tracked = registration->wrapper(std::move(tracked));
   if (!tracked) return;
   registration->binding.pv.attach(std::move(tracked));
+  // Retirement may have drained the tracked channel list before attach
+  // completed. Check after attaching; later retirements will find the channel
+  // in that list. Operation callbacks also fence all retired registrations.
+  if (!registration->active) control->close();
 }
 pvxs::server::Source::List PVRegistry::onList() {
-  std::shared_lock<std::shared_mutex> guard(impl_->mutex);
-  auto names = impl_->current->names;
+  auto names = std::atomic_load(&impl_->current)->names;
   return {std::move(names), true};
 }
 

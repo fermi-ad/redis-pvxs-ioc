@@ -309,6 +309,13 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_compile_options(pv_registry_tests PRIVATE -UNDEBUG)
   add_test(NAME pv_registry_tests COMMAND pv_registry_tests)
   set_tests_properties(pv_registry_tests PROPERTIES TIMEOUT 20)
+  add_executable(registry_runtime_tests tests/registry_runtime_tests.cpp)
+  target_link_libraries(registry_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(registry_runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME registry_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:registry_runtime_tests>)
+  set_tests_properties(registry_runtime_tests PROPERTIES TIMEOUT 75)
   add_executable(transaction_tests tests/transaction_tests.cpp)
   target_link_libraries(transaction_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(transaction_tests PRIVATE -UNDEBUG)

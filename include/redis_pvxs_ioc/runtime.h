@@ -17,6 +17,13 @@ class OperationQueue;
 
 using RedisBackendRegistry = std::map<std::string, std::shared_ptr<RedisAdapter>>;
 
+class PVRuntimeUpdate {
+public:
+  virtual ~PVRuntimeUpdate() = default;
+  virtual void commit() noexcept = 0;
+  virtual void refresh() = 0;
+};
+
 class PVRuntimeBase {
 public:
   virtual ~PVRuntimeBase() = default;
@@ -26,8 +33,9 @@ public:
   virtual pvxs::server::SharedPV& sharedPV() = 0;
   virtual bool structurallyCompatible(const PVConfig& config) const = 0;
   virtual void reconfigure(const PVConfig& config, uint64_t generation) = 0;
-  virtual void setAlarmPublisher(std::shared_ptr<AlarmPublisher> publisher) = 0;
-  virtual void activate() = 0;
+  virtual std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation) = 0;
+  virtual void setAlarmPublisher(std::shared_ptr<AlarmPublisher> publisher) noexcept = 0;
+  virtual void activate() noexcept = 0;
   virtual void deactivate(const std::string& reason) = 0;
 };
 

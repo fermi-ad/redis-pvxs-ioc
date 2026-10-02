@@ -106,28 +106,62 @@ public:
   const std::string& fullName() const override { return fullName_; }
   pvxs::server::SharedPV& sharedPV() override { return pv_; }
   bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
-  void activate() override { committed_ = true; }
+  void activate() noexcept override { committed_ = true; }
 
-  void setAlarmPublisher(std::shared_ptr<AlarmPublisher> publisher) override {
+  void setAlarmPublisher(std::shared_ptr<AlarmPublisher> publisher) noexcept override {
     std::lock_guard<std::mutex> lock(mutex_);
     alarmPublisher_ = std::move(publisher);
   }
 
+  class Update final : public PVRuntimeUpdate {
+  public:
+    std::shared_ptr<TypedRuntime> runtime;
+    PVConfig config;
+    uint64_t generation = 0;
+    std::shared_ptr<const std::string> cancellation;
+    void commit() noexcept override {
+      std::lock_guard<std::mutex> lock(runtime->mutex_);
+      const auto& old = runtime->config_.transform;
+      const bool sameTransform = old.has_value() == config.transform.has_value() &&
+          (!old || (old->scale == config.transform->scale && old->offset == config.transform->offset));
+      if (!sameTransform) {
+        ++runtime->commandEpoch_;
+        runtime->failPendingLocked(cancellation);
+      }
+      static_assert(std::is_nothrow_swappable_v<PVConfig>);
+      std::swap(runtime->config_, config);
+      runtime->generation_ = generation;
+    }
+    void refresh() override { runtime->refreshMetadata(); }
+  };
+
+  std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation) override {
+    auto result = std::make_unique<Update>();
+    result->runtime = this->shared_from_this();
+    result->config = config;
+    result->generation = generation;
+    result->cancellation = std::make_shared<const std::string>("write transform changed during reload");
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!alive_ || !sameReaderTopology(config_, config)) throw std::runtime_error("runtime changed during preparation");
+    // Validate metadata/value construction now, but do not post a stale sample
+    // at commit: readback can advance while the remaining generation is staged.
+    auto preview = pv_.fetch();
+    populateValue(preview, config);
+    return result;
+  }
+
   void reconfigure(const PVConfig& config, uint64_t generation) override {
+    auto update = prepareReconfigure(config, generation);
+    update->commit();
+    update->refresh();
+  }
+
+  void refreshMetadata() {
     AlarmState state;
     bool transition = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!alive_) return;
-      const bool sameTransform = config_.transform.has_value() == config.transform.has_value() &&
-          (!config_.transform || (config_.transform->scale == config.transform->scale &&
-                                  config_.transform->offset == config.transform->offset));
-      if (!sameTransform) {
-        ++commandEpoch_;
-        failPendingLocked("write transform changed during reload");
-      }
-      config_ = config;
-      generation_ = generation;
       auto value = pv_.fetch();
       state = populateValue(value);
       transition = recordAlarmLocked(state);
@@ -141,7 +175,7 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++commandEpoch_;
-      failPendingLocked(reason);
+      failPendingLocked(std::make_shared<const std::string>(reason));
     }
     readReader_.reset();
     confirmReader_.reset();
@@ -154,7 +188,7 @@ private:
     ValueType expectedRaw{};
     std::string afterId;
     bool done = false;
-    std::string error;
+    std::shared_ptr<const std::string> error;
     std::condition_variable cv;
   };
 
@@ -163,11 +197,11 @@ private:
     else return RedisAdapter::decodeScalar(fields, raw, limits_.maxPayloadBytes);
   }
 
-  AlarmState populateValue(pvxs::Value& value) {
-    const auto present = applyForwardTransform(config_, lastRaw_);
+  AlarmState populateValue(pvxs::Value& value, const PVConfig& config) {
+    const auto present = applyForwardTransform(config, lastRaw_);
     if constexpr (Array) assignArrayValue(value, present);
     else assignScalarValue(value, present);
-    applyStandardMetadata(value, config_);
+    applyStandardMetadata(value, config);
     if (lastTimestampNs_) applyTimestamp(value, lastTimestampNs_);
     else {
       value["timeStamp.secondsPastEpoch"] = static_cast<int64_t>(0);
@@ -178,11 +212,13 @@ private:
     if (!sourceValid_) state = {epicsSevInvalid, epicsAlarmUDF, sourceError_};
     else if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
       const int prior = value["alarm.status"].as<int>();
-      state = evaluateNumericAlarm(config_, static_cast<double>(present), prior);
+      state = evaluateNumericAlarm(config, static_cast<double>(present), prior);
     }
-    applyAlarmFields(value, config_, state);
+    applyAlarmFields(value, config, state);
     return state;
   }
+
+  AlarmState populateValue(pvxs::Value& value) { return populateValue(value, config_); }
 
   bool recordAlarmLocked(const AlarmState& state) {
     const bool changed = state.status != lastPublishedStatus_ || state.severity != lastPublishedSeverity_;
@@ -262,7 +298,7 @@ private:
     publishAlarm(state, transition);
   }
 
-  void failPendingLocked(const std::string& reason) {
+  void failPendingLocked(const std::shared_ptr<const std::string>& reason) {
     for (auto& item : pendingPuts_) {
       item.second->done = true;
       item.second->error = reason;
@@ -340,7 +376,7 @@ private:
       const auto operation = request->operation();
       if (!operation) return;
       if (!authorizeWriteDispatch(*operation, value)) {
-        request->error("access denied at dispatch"); return;
+        request->error("write no longer authorized at dispatch"); return;
       }
       if (request->stopped()) return;
       if (pending) {
@@ -382,7 +418,7 @@ private:
     const bool confirmed = completed && pending->done;
     lock.unlock();
     if (request->stopped()) return;
-    if (!error.empty()) request->error(error);
+    if (error) request->error(*error);
     else if (OperationQueue::Clock::now() >= deadline)
       request->error("total operation deadline exceeded after dispatch; not retried");
     else if (!confirmed) request->error("backend confirmation timeout; not retried");

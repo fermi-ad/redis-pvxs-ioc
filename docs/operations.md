@@ -46,9 +46,17 @@ generation, and only then applies it. A successful reload increments
 
 Parsing or schema errors report `reload failed`. A replacement that parses but
 cannot be safely applied reports `reload rejected`. In both cases the generation
-number remains unchanged. Rejection during staging preserves the active
-generation; complete rollback for failures after endpoint cutover begins remains
-tracked by [#4](https://github.com/fermi-ad/redis-pvxs-ioc/issues/4).
+number remains unchanged. Preparation and final-gate rejection preserve the
+active values, channels, pending confirmations, access policy and discovery
+catalog. The complete endpoint set is prepared before policy activation, then
+published as one snapshot. No endpoint-by-endpoint installation occurs after
+policy activation. Metadata refresh uses the latest source sample, including
+updates received during preparation.
+
+Removing an alias disconnects that alias's channels while retaining canonical
+and unchanged-alias monitors. Once the complete generation is published, a later
+notification/refresh failure is reported as `generation active; refresh failed`,
+with the committed generation retained; it is not reported as a rollback.
 
 Unchanged Redis backend definitions retain their existing adapters. Only PVs
 whose reader topology or referenced backend changes are replaced. An unrelated

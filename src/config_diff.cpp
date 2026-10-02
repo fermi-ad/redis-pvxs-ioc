@@ -32,6 +32,7 @@ std::set<std::string> aliasSet(const PVConfig& pv) { return {pv.aliases.begin(),
 
 ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
   ConfigDiff diff;
+  if (!sameOperationLimits(before.limits, after.limits)) diff.restartRequired.push_back("limits");
   if (before.server.instance != after.server.instance) diff.restartRequired.push_back("server.instance");
   if (before.server.nameSpace != after.server.nameSpace) diff.restartRequired.push_back("server.namespace");
   if (before.server.interfaces != after.server.interfaces) diff.restartRequired.push_back("server.interfaces");

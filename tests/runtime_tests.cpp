@@ -70,6 +70,8 @@ int main() {
     double value = 0.;
     return producer.getSingleValue<double>("command", value).ok() && value == 123.;
   });
+  // A pending confirmation must not block unrelated PVA operations.
+  assert(client.get("TEST:value").exec()->wait(.5)["value"].as<double>() == 0.);
   assert(producer.addSingleDouble("readback", 123.).ok());
   eventually([&] { return runtime->sharedPV().fetch()["value"].as<double>() == 123.; });
   assert(!completion.waitFor(100ms));

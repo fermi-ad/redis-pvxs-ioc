@@ -13,6 +13,7 @@ class RedisAdapter;
 namespace redis_pvxs_ioc {
 
 class AlarmPublisher;
+class OperationQueue;
 
 using RedisBackendRegistry = std::map<std::string, std::shared_ptr<RedisAdapter>>;
 
@@ -34,6 +35,8 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
                                            const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
-                                           uint64_t generation);
+                                           uint64_t generation,
+                                           std::shared_ptr<OperationQueue> operations = {},
+                                           OperationLimitsConfig limits = {});
 
 }  // namespace redis_pvxs_ioc

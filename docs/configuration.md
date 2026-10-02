@@ -110,6 +110,21 @@ redis:
   reader_probe_ms: 1000
 ```
 
+`user_file` and `password_file` are alternatives to inline `user` and `password`.
+Each inline/file pair is mutually exclusive. Relative paths resolve beside the
+YAML file. Files must be nonempty regular files (symlinks to regular files are
+allowed), readable by the runtime UID/GID, and contain at most 16 KiB of text.
+One trailing LF or CRLF is removed; other whitespace is preserved. Embedded
+newlines and NUL bytes are rejected. Errors and JSON check/diff output do not
+include credential contents.
+
+Files are read during configuration parsing, including offline checks/differences.
+Replace a secret file atomically, then reload to rotate it. The active configuration
+keeps its loaded credentials until reload succeeds. Missing, unreadable or invalid
+files reject the candidate. An offline file-to-file diff reads both files' current
+secret inputs; it does not recover an older secret from a reused path. See
+[Container runtime and secret files](container-runtime.md).
+
 Use `redis_backends` for one or more named backends:
 
 ```yaml

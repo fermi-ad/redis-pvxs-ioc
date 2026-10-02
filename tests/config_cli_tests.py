@@ -2,6 +2,7 @@
 """Exercise strict, compatible offline checking and semantic configuration diffs."""
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -136,6 +137,65 @@ def main():
         assert report["backend_changes"] == ["default"] and report["replacements"] == ["C:value"]
         assert "secret-that-must-not-appear" not in json.dumps(report)
         assert "secret-that-must-not-appear" not in json.dumps(check(changed))
+        # File inputs resolve relative to the config, preserve spaces, support
+        # projected-secret symlinks and never expose contents through JSON.
+        secret = directory / "password.secret"
+        secret.write_bytes(b" secret-that-must-not-appear \r\n")
+        alias = directory / "password-link"
+        alias.symlink_to(secret.name)
+        changed = copy.deepcopy(base)
+        changed["redis"]["password_file"] = alias.name
+        assert "secret-that-must-not-appear" not in json.dumps(check(changed))
+        inline = copy.deepcopy(base)
+        inline["redis"]["password"] = " secret-that-must-not-appear "
+        old.write_text(json.dumps(inline))
+        unchanged(diff(changed))
+        conflict = copy.deepcopy(changed)
+        conflict["redis"]["password"] = "secret-that-must-not-appear"
+        assert "mutually exclusive" in check(conflict, False)["error"]
+        # File authentication and source-health probing share the same strict
+        # backend parser in both legacy and named-backend configurations.
+        user = directory / "user.secret"
+        user.write_text("fixture-user\n")
+        coupled = copy.deepcopy(changed)
+        coupled["redis"]["user_file"] = user.name
+        coupled["pvs"][0]["source_health"] = dict(required=False, stale_after_ms=1000)
+        for named in (False, True):
+            value = copy.deepcopy(coupled)
+            backend = value["redis"]
+            if named:
+                value["redis_backends"] = {"primary": value.pop("redis")}
+                value["pvs"][0]["read"]["backend"] = "primary"
+            for interval in (0, 100, 60000):
+                backend["reader_probe_ms"] = interval
+                report = check(value)
+                assert "secret-that-must-not-appear" not in json.dumps(report)
+            for interval in (-1, 99, 60001, 1.5):
+                backend["reader_probe_ms"] = interval
+                assert "reader_probe_ms" in check(value, False)["error"]
+            backend["reader_probe_ms"] = 1000
+            backend["reader_probe_mz"] = 1000
+            error = check(value, False)["error"]
+            assert "reader_probe_mz" in error and "unknown key" in error
+            del backend["reader_probe_mz"]
+            backend["user"] = "fixture-user"
+            assert "mutually exclusive" in check(value, False)["error"]
+        for content in (b"", b"\n", b"secret-that-must-not-appear\x00", b"one\ntwo", b"x" * 16385):
+            secret.write_bytes(content)
+            report = check(changed, False)
+            assert "secret-that-must-not-appear" not in json.dumps(report)
+        secret.write_bytes(b"x" * 16384 + b"\r\n")
+        check(changed)
+        secret.unlink()
+        assert "cannot open secret file" in check(changed, False)["error"]
+        secret.mkdir()
+        assert "regular file" in check(changed, False)["error"]
+        secret.rmdir()
+        os.mkfifo(secret)
+        assert "regular file" in check(changed, False)["error"]  # must not block on FIFO
+        secret.unlink()
+        # Restore the unrelated baseline for the remaining difference checks.
+        old.write_text(json.dumps(base))
         changed = copy.deepcopy(base)
         changed["pvs"][0]["aliases"] = ["SYS:offline:config:lastDiff"]
         check(changed, False)
@@ -147,6 +207,8 @@ def main():
         changed = copy.deepcopy(base)
         changed["discovery"] = dict(enabled=False)
         assert diff(changed)["restart_required"] == ["discovery"]
+        restrictive = Path(__file__).resolve().parents[1] / "demo" / "config.access.restrictive.yaml"
+        assert invoke("--check-config", restrictive)["valid"]
     print("compatible schema, strict unsafe-input rejection, secret-safe JSON check and offline config diff passed")
 
 

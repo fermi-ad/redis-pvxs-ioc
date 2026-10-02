@@ -163,5 +163,27 @@ docker run --rm redis-pvxs-ioc:local \
 REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local REDIS_PVXS_IOC_PULL_POLICY=never ./scripts/smoke-test.sh
 ```
 
+`Dockerfile` fixes the Ubuntu base by digest, and
+`packaging/ubuntu.sources` fixes the signed Ubuntu package archive for
+both build and runtime stages. All source dependencies use the committed Git
+submodule revisions. Rebuilds therefore do not silently pick newer system
+packages. This pins dependency inputs; it does not promise byte-identical
+compiler output.
+
+The minimal base has no CA bundle, so a checksum-pinned Ubuntu certificate
+package supplies the initial HTTPS trust roots. APT then installs that package
+normally. Only the fixed archive is configured, and index download errors fail
+the build. The historical archive's freshness expiry is disabled; signature,
+package hash, and HTTPS certificate verification remain enabled.
+
+Refresh the base digest and snapshot together in a reviewed change, then run
+the full image and native validation before qualifying a replacement image.
+Security updates require that explicit refresh and validation. Do not run
+package upgrades inside a deployed IOC container.
+
+The image retains exact build/runtime package inventories and source dependency
+notices under `/usr/share/doc/redis-pvxs-ioc/`. The snapshot is selected using
+Ubuntu's [APT snapshot configuration](https://ubuntu.com/server/docs/how-to/software/snapshot-service/).
+
 Native RecCeiver discovery is part of the service and requires no additional
 support-module checkout or build. See [Discovery](reccaster.md).

@@ -328,8 +328,6 @@ private:
       pending = std::make_shared<PendingPut>();
       pending->expectedRaw = raw;
       pending->afterId = snapshot.id;
-      std::weak_ptr<PendingPut> weak = pending;
-      request->wake([weak] { if (const auto item = weak.lock()) item->cv.notify_all(); });
     }
     RA_Time writeTime;
     {
@@ -365,6 +363,14 @@ private:
       else request->reply();
       return;
     }
+    // Register outside mutex_: wake() also calls back if already stopped.
+    // Taking the waiter's mutex closes the predicate-check/wait wake-up gap.
+    request->wake([owner = this->weak_from_this(), weak = std::weak_ptr<PendingPut>(pending)] {
+      if (const auto self = owner.lock()) {
+        std::lock_guard<std::mutex> guard(self->mutex_);
+        if (const auto item = weak.lock()) item->cv.notify_all();
+      }
+    });
     std::unique_lock<std::mutex> lock(mutex_);
     const auto confirmationDeadline = std::min(deadline,
         OperationQueue::Clock::now() + std::chrono::milliseconds(current.confirm->timeoutMs));

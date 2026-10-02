@@ -60,8 +60,7 @@ deployment needs them. Fleet deployment is a separate task.
    replacing them, add only missing files, and never withdraw a published release.
    The evidence archive is reproducible across local extraction timestamps.
 7. Open and merge a post-release pin-sync PR updating every checked-in main-runtime
-   image example to `image:v${VERSION}@sha256:<digest>`. Keep the independently
-   versioned historical sidecar image unchanged.
+   image example to `image:v${VERSION}@sha256:<digest>`.
 
 A final release candidate must already contain its final version: qualify
 `VERSION=0.9.0` before publishing v0.9.0. A `0.9.0-rc.1` binary cannot be relabeled
@@ -123,3 +122,7 @@ with `--prefer-index=false` and verifies the destination digest after each tag.
 Production references include both tag and digest. Rollback restores the previous
 immutable image and its saved compatible configuration, including the ACF files;
 it does not run the previous image against a newer incompatible configuration.
+
+Legacy sidecar build and publication support is retired. This release pipeline
+covers the standalone runtime; [historical sidecar notes](legacy-sidecar.md)
+remain available for existing deployments.

@@ -134,14 +134,6 @@ immutable digest. `:latest` is only a development convenience. See the
 - [Contributor development guide](docs/development.md)
 - [Release process](docs/releasing.md)
 
-## Optional legacy sidecar
-
-An independently versioned conventional IOC sidecar is available for `.db`
-records, RecCaster, and selected support modules. It is experimental and is not
-part of the core quick start while its long-term product boundary is decided in
-[issue #68](https://github.com/fermi-ad/redis-pvxs-ioc/issues/68). See the
-[legacy sidecar guide](docs/legacy-sidecar.md) for the current image and limits.
-
 ## License
 
 Project-authored code is available under the [BSD 3-Clause License](LICENSE).

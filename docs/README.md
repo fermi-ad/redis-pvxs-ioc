@@ -22,8 +22,6 @@
   catalog entries.
 - [PVA RPC to gRPC forwarding](rpc-forwarding.md): expose reflected gRPC methods
   as RPC PVs.
-- [Legacy IOC sidecar](legacy-sidecar.md): experimental `.db` and support-module
-  compatibility lane.
 - [Discovery](reccaster.md): native RecCeiver catalog registration and PVA search.
 
 ## Contributors
@@ -50,6 +48,7 @@
 
 ## Historical design material
 
+- [Sidecar retirement and migration](legacy-sidecar.md)
 - [Original design proposal](history/original-design.md)
 - [Initial MVP specification](history/mvp-spec.md)
 - [Architecture decisions](adr/)

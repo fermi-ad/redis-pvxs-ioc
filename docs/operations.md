@@ -22,6 +22,8 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:rpc:status` | structure/read | RPC discovery/retry state, per-service call outcomes and RPC queue reservations |
 | `SYS:<instance>:alarms:status` | structure/read | Alarm delivery state, outcomes, reconciliation and reservations |
 | `SYS:<instance>:backend:health` | string/read | `<connected>/<total> connected`, with disconnected aliases when applicable |
+| `SYS:<instance>:source:status` | structure/read | Required-source readiness and per-source validity, freshness, exact cursors, epochs and recovery counters |
+| `SYS:<instance>:ready` | bool/read | All required Redis data sources are ready; other subsystem states have their own diagnostics |
 | `SYS:<instance>:access:reload` | int64/write | Request an ACF-only reload |
 | `SYS:<instance>:access:enabled` | bool/read | Startup access-control state |
 | `SYS:<instance>:access:generation` | int64/read | Active ACF generation; `0` disabled, `1` after enabled startup |

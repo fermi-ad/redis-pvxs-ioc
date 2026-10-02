@@ -2,6 +2,12 @@
 
 ## v0.8.2 - unreleased
 
+- report Redis source readiness, monotonic freshness, exact cursors and stream
+  epochs; retain last-good values/time through source failures and fence
+  confirmations across stream replacement
+- deliberately enable bounded IOC continuity inspection at a configurable
+  1000 ms minimum interval; see source-health documentation for workload cost,
+  disabling, permissions and required qualification
 - count NTNDArray rollover gaps with serial arithmetic and bound ambiguous ID
   jumps with `max_frame_gap`; expose a separate discontinuity diagnostic
 - fix native macOS PVA startup by avoiding a second libevent threading state

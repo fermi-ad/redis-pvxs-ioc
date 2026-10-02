@@ -58,7 +58,8 @@ ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
     if (!sameReaderTopology(a, b)) diff.replaced.push_back(item.first);
     else if (!sameMetadata(a.metadata, b.metadata) || !sameAlarms(a.alarms, b.alarms)
              || !sameTransform(a.transform, b.transform) || a.initialValue != b.initialValue
-             || a.maxFrameGap != b.maxFrameGap)
+             || a.maxFrameGap != b.maxFrameGap || a.sourceHealth.required != b.sourceHealth.required
+             || a.sourceHealth.staleAfterMs != b.sourceHealth.staleAfterMs)
       diff.metadataChanged.push_back(item.first);
     if (!sameAssignment(a.access, b.access)) diff.accessChanged.push_back(item.first);
   }

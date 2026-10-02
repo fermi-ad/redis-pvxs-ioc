@@ -107,6 +107,7 @@ redis:
   password: optional-password
   workers: 1
   readers: 1
+  reader_probe_ms: 1000
 ```
 
 Use `redis_backends` for one or more named backends:
@@ -127,6 +128,19 @@ Each backend requires `base_key`, `host`, and `port`. `user` and `password`
 default to empty; `workers` and `readers` default to `1`.
 Worker/reader counts must be 1–256 and the Redis port must be 1–65535. Server
 ports may still be zero to request an ephemeral port.
+
+The IOC deliberately enables standalone continuity inspection with
+`reader_probe_ms: 1000` per backend. Zero disables it; enabled values must be
+100–60000 ms. The adapter itself defaults to inspection disabled. Probes share
+the adapter's scheduler and connections: at most 16 due keys per batch, active
+keys skip unnecessary probes, idle keys back off to at most eight times the
+interval, and denied/unsupported inspection backs off for 60 seconds. These are
+minimum intervals, not hard detection deadlines. `XINFO STREAM FULL COUNT 1`
+transfers a retained payload, so large idle images and many keys require an
+explicit traffic/capacity check; increase the interval or disable it when
+appropriate. A backend policy change recreates that backend and its affected
+runtimes on reload. See [source health](source-health.md) for permissions,
+readiness semantics and qualification recipes.
 
 Routes may omit `backend` when exactly one backend exists. With multiple
 backends, every read/write/confirm route and `alarms.backend` must name a defined
@@ -263,6 +277,32 @@ alarm. A missing source uses the configured `initial` fallback with an INVALID
 alarm and zero source timestamp until valid data arrives. Empty numeric arrays
 are valid. Legacy payload byte order and source timestamp interpretation are
 unchanged; the exact Redis stream cursor is tracked separately for ordering.
+
+### Source health policy
+
+Scalar, array and NTNDArray PVs accept an optional `source_health` mapping:
+
+```yaml
+source_health:
+  required: true
+  stale_after_ms: 0
+```
+
+`required` defaults to true and controls inclusion in aggregate Redis source
+readiness. It applies to both read and distinct confirmation sources. Setting it
+false retains source diagnostics and health alarms. `stale_after_ms` defaults to
+zero (cadence unspecified); otherwise it is 1–86400000 ms. Freshness measures
+time since the last valid snapshot/update was received on the IOC's monotonic
+clock. It does not estimate acquisition age from the legacy source timestamp.
+An idle source with valid data and no cadence stays fresh; a source that has
+never supplied valid data remains unready. A freshness failure retains the
+last-good value and source timestamp with an INVALID alarm. Health diagnostics
+and those alarms refresh once per second and after successful configuration
+publication. Policy edits retain the runtime, reader, cursor and counters.
+
+Source epoch changes cancel pending confirmations without replaying commands;
+new matching observations must belong to the command's source epoch. A valid
+decoded sample in the current epoch restores readiness after stream replacement.
 
 ### Collision and route validation
 
@@ -402,7 +442,7 @@ not a change.
 A replacement includes type/route/confirmation changes and affected PVs when a
 backend definition changes. Alias-set changes are reported as `alias_changes`;
 they retain the canonical runtime and disconnect only removed alias channels.
-Metadata changes include metadata, alarm thresholds, transforms and initial
+Metadata changes include metadata, alarm thresholds, transforms, source-health policy and initial
 fallback definitions. They retain the runtime's subscription topology; changing
 a transform can cancel pending commands. Access and alias changes are listed separately
 and may overlap retained metadata changes.

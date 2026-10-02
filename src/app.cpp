@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <future>
 #include <map>
 #include <memory>
 #include <set>
@@ -38,6 +39,21 @@
 
 namespace redis_pvxs_ioc {
 namespace {
+
+using RpcMap = std::unordered_map<std::string, std::shared_ptr<pvxs::server::SharedPV>>;
+using AssignmentMap = std::unordered_map<std::string, AccessAssignment>;
+struct RpcServiceState {
+  RpcServiceConfig config;
+  RpcMap pvs;
+  std::map<std::string, std::string> owners;
+  std::string state = "ready", error;
+  uint64_t attempts = 1;
+  std::chrono::steady_clock::time_point nextRetry{};
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+  std::shared_ptr<RpcCallStats> calls = std::make_shared<RpcCallStats>();
+#endif
+};
+using RpcServices = std::vector<RpcServiceState>;
 
 pvxs::Value makeAdminValue(const pvxs::TypeCode code, const std::string& description = {}) {
   const bool numeric = code.kind() == pvxs::Kind::Integer || code.kind() == pvxs::Kind::Real;
@@ -147,6 +163,25 @@ public:
       Member(TypeCode::UInt64, "peakBytes"), Member(TypeCode::UInt64, "byteLimit"),
       Member(TypeCode::UInt64, "payloadLimit"), Member(TypeCode::UInt32, "workers"),
       Member(TypeCode::UInt32, "queuedPerPV")}).create());
+    rpcName_ = adminPVName(serverConfig, "rpc:status");
+    rpc_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:rpc:1.0", {
+      Member(TypeCode::String, "state"),
+      Member(TypeCode::Struct, "queue", {
+        Member(TypeCode::UInt64, "accepted"), Member(TypeCode::UInt64, "finished"),
+        Member(TypeCode::UInt64, "overloaded"), Member(TypeCode::UInt64, "expired"),
+        Member(TypeCode::UInt64, "cancelled"), Member(TypeCode::UInt64, "queued"),
+        Member(TypeCode::UInt64, "running"), Member(TypeCode::UInt64, "residentBytes"),
+        Member(TypeCode::UInt64, "peakBytes"), Member(TypeCode::UInt64, "byteLimit"),
+        Member(TypeCode::UInt64, "payloadLimit"), Member(TypeCode::UInt32, "workers"),
+        Member(TypeCode::UInt32, "queuedPerMethod")}),
+      Member(TypeCode::Struct, "services", {
+        Member(TypeCode::StringA, "name"), Member(TypeCode::StringA, "endpoint"),
+        Member(TypeCode::StringA, "state"), Member(TypeCode::StringA, "lastError"),
+        Member(TypeCode::BoolA, "optional"), Member(TypeCode::UInt64A, "methods"),
+        Member(TypeCode::UInt64A, "attempts"), Member(TypeCode::UInt64A, "retryInMs"),
+        Member(TypeCode::UInt64A, "dispatched"), Member(TypeCode::UInt64A, "succeeded"),
+        Member(TypeCode::UInt64A, "failed"), Member(TypeCode::UInt64A, "invalid"),
+        Member(TypeCode::UInt64A, "unauthorized")})}).create());
     alarmName_ = adminPVName(serverConfig, "alarms:status");
     alarms_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:alarms:1.0", {
       Member(TypeCode::String, "state"), Member(TypeCode::String, "lastError"),
@@ -307,6 +342,49 @@ public:
     discovery_.post(value);
   }
 
+  void setRpcStatus(const RpcServices& services, const OperationQueueStats& queue,
+                    const OperationLimitsConfig& limits) {
+    auto value = rpc_.fetch();
+    value["state"] = services.empty() ? "disabled" : "ready";
+    value["queue.accepted"] = queue.accepted; value["queue.finished"] = queue.completed;
+    value["queue.overloaded"] = queue.overloaded; value["queue.expired"] = queue.expired;
+    value["queue.cancelled"] = queue.cancelled; value["queue.queued"] = uint64_t(queue.queued);
+    value["queue.running"] = uint64_t(queue.running); value["queue.residentBytes"] = uint64_t(queue.residentBytes);
+    value["queue.peakBytes"] = uint64_t(queue.peakBytes); value["queue.byteLimit"] = limits.queuedRpcBytes;
+    value["queue.payloadLimit"] = limits.maxPayloadBytes; value["queue.workers"] = limits.rpcWorkers;
+    value["queue.queuedPerMethod"] = limits.queuedRpcPerMethod;
+    const auto size = services.size();
+    pvxs::shared_array<std::string> names(size), endpoints(size), states(size), errors(size);
+    pvxs::shared_array<bool> optional(size);
+    pvxs::shared_array<uint64_t> methods(size), attempts(size), retry(size), sent(size), succeeded(size);
+    pvxs::shared_array<uint64_t> failed(size), invalid(size), unauthorized(size);
+    const auto now = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < size; ++i) {
+      const auto& service = services[i];
+      names[i] = service.config.service; endpoints[i] = service.config.endpoint;
+      states[i] = service.state; errors[i] = service.error; optional[i] = service.config.optional;
+      methods[i] = service.pvs.size(); attempts[i] = service.attempts;
+      retry[i] = service.state == "unavailable" && service.nextRetry > now
+          ? std::chrono::duration_cast<std::chrono::milliseconds>(service.nextRetry - now).count() : 0;
+      if (service.state != "ready") value["state"] = "degraded";
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+      sent[i] = service.calls->dispatched; succeeded[i] = service.calls->succeeded;
+      failed[i] = service.calls->failed; invalid[i] = service.calls->invalid;
+      unauthorized[i] = service.calls->unauthorized;
+#else
+      sent[i] = succeeded[i] = failed[i] = invalid[i] = unauthorized[i] = 0;
+#endif
+    }
+    value["services.name"] = names.freeze(); value["services.endpoint"] = endpoints.freeze();
+    value["services.state"] = states.freeze(); value["services.lastError"] = errors.freeze();
+    value["services.optional"] = optional.freeze(); value["services.methods"] = methods.freeze();
+    value["services.attempts"] = attempts.freeze(); value["services.retryInMs"] = retry.freeze();
+    value["services.dispatched"] = sent.freeze(); value["services.succeeded"] = succeeded.freeze();
+    value["services.failed"] = failed.freeze(); value["services.invalid"] = invalid.freeze();
+    value["services.unauthorized"] = unauthorized.freeze();
+    rpc_.post(value);
+  }
+
   void setAlarmStatus(const AlarmPublisherStatus& status) {
     auto value = alarms_.fetch();
     value["state"] = status.state; value["lastError"] = status.lastError;
@@ -331,6 +409,7 @@ public:
     add(lastDiffName_, lastDiff_, defaults.adminRead);
     add(reloadStatusName_, reloadStatus_, defaults.adminRead);
     add(operationsName_, operations_, defaults.adminRead);
+    add(rpcName_, rpc_, defaults.adminRead);
     add(alarmName_, alarms_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
     add(reloadName_, reloadCommand_, defaults.adminWrite);
@@ -415,6 +494,8 @@ private:
   std::string reloadStatusName_;
   pvxs::server::SharedPV operations_ = pvxs::server::SharedPV::buildReadonly();
   std::string operationsName_;
+  pvxs::server::SharedPV rpc_ = pvxs::server::SharedPV::buildReadonly();
+  std::string rpcName_;
   pvxs::server::SharedPV alarms_ = pvxs::server::SharedPV::buildReadonly();
   std::string alarmName_;
   pvxs::server::SharedPV discovery_ = pvxs::server::SharedPV::buildReadonly();
@@ -565,14 +646,6 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 }
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
-using RpcMap = std::unordered_map<std::string, std::shared_ptr<pvxs::server::SharedPV>>;
-using AssignmentMap = std::unordered_map<std::string, AccessAssignment>;
-struct RpcServiceState {
-  RpcServiceConfig config;
-  RpcMap pvs;
-  std::map<std::string, std::string> owners;
-};
-using RpcServices = std::vector<RpcServiceState>;
 
 std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
   std::set<std::string> groups;
@@ -586,77 +659,78 @@ std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
   return groups;
 }
 
-// Build RPC-forwarding PVs by reflecting each configured gRPC service and
-// creating one PV per method, named <namespace>:<UPPER_SNAKE(Method)><suffix>.
-// The IOC has no compiled-in knowledge of the methods or message schema.
-RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments,
-                  const RpcServices& previous, RpcServices& staged) {
+RpcMap assembleRpcPVs(const AppConfig& config, const RpcServices& services, AssignmentMap& assignments) {
   RpcMap rpcPVs;
   auto endpoints = configuredEndpoints(config);
   assignments.clear();
+  for (const auto& service : services) for (const auto& item : service.pvs) {
+    endpoints.reserve(item.first, EndpointKind::RPC, service.owners.at(item.first), "root.rpc_services");
+    rpcPVs.emplace(item);
+    assignments.emplace(item.first, service.config.access.value_or(config.access.defaults.rpc));
+  }
+  return rpcPVs;
+}
+
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+// This function only prepares owners/descriptors. It never publishes endpoints.
+RpcServiceState reflectRpcService(const ServerConfig& server, const RpcServiceConfig& svc,
+                                  size_t payloadLimit, const std::shared_ptr<OperationQueue>& queue,
+                                  std::shared_ptr<GrpcCallControl> control = {}) {
+  RpcServiceState result;
+  result.config = svc;
+  auto bridge = std::make_shared<GrpcBridge>(svc.endpoint, svc.discoveryTimeoutMs, svc.timeoutMs, payloadLimit);
+  const auto methods = bridge->discover(svc.service, std::move(control));
+  if (methods.empty()) throw std::runtime_error("reflected service has no methods: " + svc.service);
+  const auto defaults = bridge->prepareDefaults(svc.service, svc.defaults, svc.methodDefaults);
+  for (const auto& method : methods) {
+    const auto leaf = methodToPvLeaf(method.method) + svc.suffix;
+    const auto name = server.nameSpace.empty() ? leaf : server.nameSpace + ":" + leaf;
+    auto runtime = std::make_shared<RpcPV>(bridge, method, defaults.at(method.method), name, queue,
+                                         svc.timeoutMs, result.calls);
+    auto pv = std::shared_ptr<pvxs::server::SharedPV>(runtime, &runtime->sharedPV());
+    if (!result.pvs.emplace(name, std::move(pv)).second)
+      throw std::runtime_error("duplicate served PV name '" + name + "' within reflected service " + svc.service);
+    result.owners.emplace(name, method.service + "/" + method.method);
+  }
+  return result;
+}
+#endif
+
+RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments,
+                  const RpcServices& previous, RpcServices& staged,
+                  const std::shared_ptr<OperationQueue>& queue) {
   staged.clear();
 #if REDIS_PVXS_IOC_ENABLE_GRPC
   for (const auto& svc : config.rpcServices) {
     const auto prior = std::find_if(previous.begin(), previous.end(), [&](const auto& entry) {
       return !entry.pvs.empty() && entry.config.endpoint == svc.endpoint &&
              entry.config.service == svc.service && entry.config.suffix == svc.suffix &&
-             entry.config.defaults == svc.defaults;
+             entry.config.defaults == svc.defaults && entry.config.methodDefaults == svc.methodDefaults &&
+             entry.config.optional == svc.optional && entry.config.discoveryTimeoutMs == svc.discoveryTimeoutMs &&
+             entry.config.timeoutMs == svc.timeoutMs && entry.config.retryIntervalMs == svc.retryIntervalMs;
     });
     if (prior != previous.end()) {
-      for (const auto& item : prior->pvs) {
-        endpoints.reserve(item.first, EndpointKind::RPC, prior->owners.at(item.first), "root.rpc_services");
-        rpcPVs.emplace(item);
-        assignments.emplace(item.first, svc.access.value_or(config.access.defaults.rpc));
-      }
       staged.push_back(*prior);
       staged.back().config = svc;
       continue;
     }
-    auto bridge = std::make_shared<GrpcBridge>(svc.endpoint);
-
-    // The backend may not be up yet at IOC startup; retry reflection briefly.
-    std::vector<BridgeMethod> methods;
-    std::string lastErr;
-    for (int attempt = 0; attempt < 30; ++attempt) {
-      try {
-        methods = bridge->discover(svc.service);
-        break;
-      } catch (const std::exception& e) {
-        lastErr = e.what();
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-      }
+    try {
+      staged.push_back(reflectRpcService(config.server, svc, config.limits.maxPayloadBytes, queue));
+    } catch (const RpcDiscoveryUnavailable& e) {
+      if (!svc.optional)
+        throw std::runtime_error("required rpc_service " + svc.service + " unavailable: " + e.what());
+      RpcServiceState missing;
+      missing.config = svc; missing.state = "unavailable";
+      missing.error = std::string(e.what()).substr(0, 1024);
+      missing.nextRetry = std::chrono::steady_clock::now() + std::chrono::milliseconds(svc.retryIntervalMs);
+      staged.push_back(std::move(missing));
     }
-    if (methods.empty()) {
-      std::fprintf(stderr,
-                   "[redis-pvxs-ioc] rpc_service %s @ %s: reflection failed (%s); "
-                   "no RPC PVs created for it\n",
-                   svc.service.c_str(), svc.endpoint.c_str(), lastErr.c_str());
-      continue;
-    }
-
-    RpcServiceState serviceState;
-    serviceState.config = svc;
-    for (const auto& m : methods) {
-      std::string leaf = methodToPvLeaf(m.method) + svc.suffix;
-      std::string name =
-          config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
-      endpoints.reserve(name, EndpointKind::RPC, m.service + "/" + m.method, "root.rpc_services");
-      auto runtime = std::make_shared<RpcPV>(bridge, m, svc.defaults);
-      auto pv = std::shared_ptr<pvxs::server::SharedPV>(runtime, &runtime->sharedPV());
-      rpcPVs.emplace(name, pv);
-      serviceState.pvs.emplace(name, std::move(pv));
-      serviceState.owners.emplace(name, m.service + "/" + m.method);
-      assignments.emplace(name, svc.access.value_or(config.access.defaults.rpc));
-      std::fprintf(stderr, "[redis-pvxs-ioc] rpc PV %s -> %s/%s\n",
-                   name.c_str(), m.service.c_str(), m.method.c_str());
-    }
-    staged.push_back(std::move(serviceState));
   }
 #else
   if (!config.rpcServices.empty())
     throw std::runtime_error("rpc_services requires a build with REDIS_PVXS_IOC_ENABLE_GRPC=ON");
 #endif
-  return rpcPVs;
+  return assembleRpcPVs(config, staged, assignments);
 }
 
 std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
@@ -690,6 +764,13 @@ std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
 
 struct Application::Impl {
   std::shared_ptr<OperationQueue> operations;
+  std::shared_ptr<OperationQueue> rpcOperations;
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+  std::future<RpcServiceState> rpcDiscovery;
+  std::shared_ptr<GrpcCallControl> rpcDiscoveryControl;
+  uint64_t rpcDiscoveryGeneration = 0;
+  size_t rpcDiscoveryIndex = 0, nextRpcDiscoveryIndex = 0;
+#endif
   pvxs::server::Server server;
   std::unique_ptr<DiscoveryPublisher> discovery;
   std::shared_ptr<const DiscoveryCatalog> catalog;
@@ -808,6 +889,10 @@ bool Application::start(std::string& error) {
     impl_->describeReload(config);
     impl_->operations = std::make_shared<OperationQueue>(OperationQueueLimits{
         config.limits.writeWorkers, config.limits.queuedWritesPerPV, static_cast<size_t>(config.limits.queuedWriteBytes)});
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+    impl_->rpcOperations = std::make_shared<OperationQueue>(OperationQueueLimits{
+        config.limits.rpcWorkers, config.limits.queuedRpcPerMethod, static_cast<size_t>(config.limits.queuedRpcBytes)});
+#endif
     impl_->server = buildServerConfig(config).build();
     if (config.access.enabled) {
       impl_->reloadPhase("policy");
@@ -878,6 +963,7 @@ void Application::pump() {
   }
 
   if (impl_->access) impl_->access->pump();
+  pumpRpcRecovery();
 
   const auto now = std::chrono::steady_clock::now();
   if (now - impl_->lastHealthUpdate >= std::chrono::seconds(1)) {
@@ -885,6 +971,8 @@ void Application::pump() {
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
       impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
+      impl_->admin->setRpcStatus(impl_->rpcServices, impl_->rpcOperations ? impl_->rpcOperations->stats() : OperationQueueStats{},
+                                 impl_->currentConfig.limits);
       impl_->admin->setAlarmStatus(impl_->alarmPublisher->status());
       impl_->admin->setDiscoveryStatus(impl_->discovery ? impl_->discovery->status() : DiscoveryStatus{});
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
@@ -892,7 +980,120 @@ void Application::pump() {
   }
 }
 
+void Application::pumpRpcRecovery() {
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+  using Clock = std::chrono::steady_clock;
+  if (impl_->rpcDiscovery.valid()) {
+    if (impl_->rpcDiscovery.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    auto recovered = impl_->rpcDiscovery.get();
+    impl_->rpcDiscoveryControl.reset();
+    const auto index = impl_->rpcDiscoveryIndex;
+    // A reload may have retired the service while reflection was in flight.
+    if (impl_->rpcDiscoveryGeneration == impl_->generation && index < impl_->rpcServices.size()) {
+      recovered.attempts = impl_->rpcServices[index].attempts + 1;
+      if (recovered.state != "ready") {
+        recovered.nextRetry = Clock::now() + std::chrono::milliseconds(recovered.config.retryIntervalMs);
+        impl_->rpcServices[index] = std::move(recovered);
+      } else {
+        impl_->beginReload("rpc-recovery");
+        impl_->describeReload(impl_->currentConfig);
+        bool committed = false;
+        std::string error;
+        try {
+          const auto& config = impl_->currentConfig;
+          const auto generation = impl_->generation + 1;
+          auto services = impl_->rpcServices;
+          services[index] = std::move(recovered);
+          AssignmentMap assignments;
+          auto rpcs = assembleRpcPVs(config, services, assignments);
+          auto catalog = buildDiscoveryCatalog(config, rpcs, impl_->server.config().tcp_port, generation);
+          auto bindings = impl_->admin->bindings(config.access.defaults);
+          std::vector<std::unique_ptr<PVRuntimeUpdate>> updates;
+          for (const auto& pv : config.pvs) {
+            const auto runtime = impl_->runtimes.at(fullPVName(config.server, pv));
+            updates.push_back(runtime->prepareReconfigure(pv, generation, impl_->alarmPublisher));
+            for (const auto& name : fullPVNames(config.server, pv))
+              bindings.emplace(name, PVBinding{runtime->sharedPV(), runtime,
+                                                pv.access.value_or(config.access.defaults.pv)});
+          }
+          for (const auto& rpc : rpcs)
+            bindings.emplace(rpc.first, PVBinding{*rpc.second, rpc.second, assignments.at(rpc.first)});
+
+          // Use the already active access policy. Background discovery must not
+          // reload changed ACF bytes or rebuild live Redis/runtime resources.
+          auto secured = impl_->access ? impl_->access->prepareBindings(bindings) : nullptr;
+          auto plain = impl_->access ? nullptr : impl_->registry->prepare(std::move(bindings));
+          const auto commit = [&](std::string&) {
+            for (const auto& update : updates) update->commit();
+            return true;
+          };
+          impl_->reloadPhase("publish");
+          const bool published = impl_->access ? impl_->access->publishBindings(secured, commit, error)
+                                               : impl_->registry->publish(plain, commit, error);
+          if (!published) throw std::runtime_error(error);
+          committed = true;
+          impl_->rpcServices.swap(services); impl_->rpcPVs.swap(rpcs);
+          impl_->rpcAssignments.swap(assignments); impl_->catalog.swap(catalog);
+          impl_->generation = generation;
+          impl_->reloadPhase("refresh");
+          if (secured) impl_->access->finishBindings(secured); else impl_->registry->finish(plain);
+          for (const auto& update : updates) update->refresh();
+          if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
+          impl_->admin->setGeneration(generation);
+          impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
+          impl_->admin->setStatus("generation " + std::to_string(generation) + " active after optional RPC recovery");
+          impl_->admin->setError("");
+        } catch (const std::exception& exception) {
+          error = exception.what();
+          if (!committed) {
+            auto& service = impl_->rpcServices[index];
+            service.state = "invalid"; service.error = error.substr(0, 1024); ++service.attempts;
+          }
+          impl_->admin->setError(error);
+        }
+        impl_->finishReload(committed, error);
+      }
+      impl_->admin->setRpcStatus(impl_->rpcServices, impl_->rpcOperations->stats(), impl_->currentConfig.limits);
+    }
+  }
+  // One reflection task at a time, in round-robin order, with a finite deadline.
+  // Unavailable services retry; invalid schemas/defaults/collisions need a
+  // configuration reload. Commands themselves are never retried.
+  const auto count = impl_->rpcServices.size();
+  for (size_t offset = 0; offset < count; ++offset) {
+    const auto index = (impl_->nextRpcDiscoveryIndex + offset) % count;
+    auto& service = impl_->rpcServices[index];
+    if (service.state != "unavailable" || service.nextRetry > Clock::now()) continue;
+    const auto config = service.config;
+    const auto server = impl_->currentConfig.server;
+    const auto limit = impl_->currentConfig.limits.maxPayloadBytes;
+    const auto queue = impl_->rpcOperations;
+    auto control = std::make_shared<GrpcCallControl>();
+    impl_->rpcDiscovery = std::async(std::launch::async, [server, config, limit, queue, control] {
+      RpcServiceState result;
+      result.config = config;
+      try { return reflectRpcService(server, config, limit, queue, control); }
+      catch (const RpcDiscoveryUnavailable& error) {
+        result.state = "unavailable"; result.error = std::string(error.what()).substr(0, 1024);
+      } catch (const std::exception& error) {
+        result.state = "invalid"; result.error = std::string(error.what()).substr(0, 1024);
+      }
+      return result;
+    });
+    impl_->rpcDiscoveryControl = std::move(control);
+    impl_->rpcDiscoveryGeneration = impl_->generation;
+    impl_->rpcDiscoveryIndex = index; impl_->nextRpcDiscoveryIndex = (index + 1) % count;
+    service.state = "discovering";
+    break;
+  }
+#endif
+}
+
 void Application::stop() {
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+  if (impl_->rpcDiscoveryControl) impl_->rpcDiscoveryControl->cancel();
+  if (impl_->rpcDiscovery.valid()) impl_->rpcDiscovery.wait();
+#endif
   if (!started_ && !impl_->hasConfig) return;
   impl_->discovery.reset();
   impl_->catalog.reset();
@@ -900,6 +1101,7 @@ void Application::stop() {
   else impl_->registry->clear();
   for (auto& item : impl_->runtimes) item.second->deactivate("application stopping");
   if (impl_->operations) impl_->operations->shutdown();
+  if (impl_->rpcOperations) impl_->rpcOperations->shutdown();
   impl_->runtimes.clear();
   impl_->rpcPVs.clear();
   impl_->rpcServices.clear();
@@ -979,7 +1181,7 @@ bool Application::applyGeneration(const AppConfig& config,
     AssignmentMap nextRpcAssignments;
     RpcServices nextRpcServices;
     impl_->reloadPhase("rpc");
-    auto nextRpcs = buildRpcPVs(config, nextRpcAssignments, impl_->rpcServices, nextRpcServices);
+    auto nextRpcs = buildRpcPVs(config, nextRpcAssignments, impl_->rpcServices, nextRpcServices, impl_->rpcOperations);
     auto nextCatalog = buildDiscoveryCatalog(config, nextRpcs, impl_->server.config().tcp_port, generation);
 
     auto bindings = impl_->admin->bindings(config.access.defaults);
@@ -1033,6 +1235,9 @@ bool Application::applyGeneration(const AppConfig& config,
     std::swap(impl_->currentConfig, nextConfig);
     impl_->catalog.swap(nextCatalog);
     impl_->generation = generation;
+#if REDIS_PVXS_IOC_ENABLE_GRPC
+    if (impl_->rpcDiscoveryControl) impl_->rpcDiscoveryControl->cancel();
+#endif
     impl_->hasConfig = true;
     try {
       impl_->reloadPhase("refresh");
@@ -1049,6 +1254,8 @@ bool Application::applyGeneration(const AppConfig& config,
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
+      impl_->admin->setRpcStatus(impl_->rpcServices, impl_->rpcOperations ? impl_->rpcOperations->stats() : OperationQueueStats{},
+                                 impl_->currentConfig.limits);
       impl_->admin->setAlarmStatus(impl_->alarmPublisher->status());
     } catch (const std::exception& ex) {
       // The active registry is already complete. Preserve its generation and

@@ -677,6 +677,27 @@ int main(int argc, char** argv) {
   assert(rpc.rpcServices[0].suffix == "_RPC");
   assert(rpc.rpcServices[0].defaults.at("digitizer") == "MTCA1-1");
   assert(rpc.rpcServices[0].defaults.at("length_ns") == "1000000000");
+  assert(!rpc.rpcServices[0].optional && rpc.rpcServices[0].discoveryTimeoutMs == 3000);
+  assert(rpc.rpcServices[0].timeoutMs == 10000 && rpc.rpcServices[0].retryIntervalMs == 5000);
+  const auto rpcLimits = loadConfigString(std::string(kLegacyConfig) +
+      "\nlimits: {rpc_workers: 2, queued_rpc_per_method: 3, queued_rpc_bytes: 4096}\n");
+  assert(rpcLimits.limits.rpcWorkers == 2 && rpcLimits.limits.queuedRpcPerMethod == 3 && rpcLimits.limits.queuedRpcBytes == 4096);
+  assert(!sameOperationLimits(rpcLimits.limits, rpc.limits));
+  for (const auto* setting : {"rpc_workers: 0", "rpc_workers: 65", "queued_rpc_per_method: 0", "queued_rpc_bytes: 1023"}) {
+    const auto invalidLimits = std::string(kLegacyConfig) + "\nlimits: {" + setting + "}\n";
+    assert(throwsConfig(invalidLimits.c_str()));
+  }
+  const auto configuredRpc = loadConfigString(std::string(kRpcOnly) +
+      "    optional: true\n    discovery_timeout_ms: 200\n    timeout_ms: 1500\n"
+      "    retry_interval_ms: 500\n    method_defaults: {Value: {number: 4}}\n");
+  assert(configuredRpc.rpcServices[0].optional && configuredRpc.rpcServices[0].discoveryTimeoutMs == 200);
+  assert(configuredRpc.rpcServices[0].methodDefaults.at("Value").at("number") == "4");
+  for (const auto* setting : {"optional: maybe", "discovery_timeout_ms: 0", "timeout_ms: 300001",
+                             "retry_interval_ms: 99", "method_defaults: {Value: [1]}",
+                             "method_defaults: {'': {number: 1}}", "defaults: {'': 1}"}) {
+    const auto text = std::string(kRpcOnly) + "    " + setting + "\n";
+    assert(throwsConfig(text.c_str()));
+  }
 
   const auto rpcOnly = loadConfigString(kRpcOnly);  // no pvs is allowed
   assert(rpcOnly.pvs.empty());

@@ -28,6 +28,7 @@ public:
 
   bool stopped() const { return stopped_.load(); }
   void reply() { finish(""); }
+  void reply(const pvxs::Value& value) { finish("", false, &value); }
   void error(const std::string& message) { finish(message); }
   void ticket(const std::shared_ptr<OperationQueue>& queue, uint64_t id) {
     // The ID may arrive after an immediate peer cancellation.
@@ -51,7 +52,7 @@ public:
 private:
   QueuedExec(std::unique_ptr<pvxs::server::ExecOp> op, const std::shared_ptr<OperationQueue>& queue)
       : op_(std::move(op)), queue_(queue) {}
-  void finish(const std::string& message, bool cancelled = false) {
+  void finish(const std::string& message, bool cancelled = false, const pvxs::Value* value = nullptr) {
     std::shared_ptr<pvxs::server::ExecOp> op;
     std::function<void()> notify;
     {
@@ -63,7 +64,7 @@ private:
     }
     if (notify) notify();
     if (op && !cancelled) {
-      if (message.empty()) op->reply();
+      if (message.empty()) { if (value) op->reply(*value); else op->reply(); }
       else op->error(message);
     }
   }

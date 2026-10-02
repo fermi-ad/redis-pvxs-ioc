@@ -24,7 +24,10 @@ bool sameAssignment(const std::optional<AccessAssignment>& a, const std::optiona
   return (!a && !b) || (a && b && sameAccessAssignment(*a, *b));
 }
 bool sameRpc(const RpcServiceConfig& a, const RpcServiceConfig& b) {
-  return std::tie(a.service, a.endpoint, a.suffix, a.defaults) == std::tie(b.service, b.endpoint, b.suffix, b.defaults)
+  return std::tie(a.service, a.endpoint, a.suffix, a.defaults, a.methodDefaults, a.optional,
+                  a.discoveryTimeoutMs, a.timeoutMs, a.retryIntervalMs) ==
+         std::tie(b.service, b.endpoint, b.suffix, b.defaults, b.methodDefaults, b.optional,
+                  b.discoveryTimeoutMs, b.timeoutMs, b.retryIntervalMs)
       && sameAssignment(a.access, b.access);
 }
 std::set<std::string> aliasSet(const PVConfig& pv) { return {pv.aliases.begin(), pv.aliases.end()}; }

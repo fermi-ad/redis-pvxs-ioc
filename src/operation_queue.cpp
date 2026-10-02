@@ -190,7 +190,7 @@ uint64_t OperationQueue::submit(Work work) {
   task->work = std::move(work);
   task->charge = std::max<size_t>(task->work.bytes, 256); // empty arrays still consume bookkeeping space
   OperationFailure failure = OperationFailure::Overload;
-  std::string message = "write queue overloaded";
+  std::string message = "operation queue overloaded";
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->stopped) {

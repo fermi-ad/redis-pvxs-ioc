@@ -19,6 +19,7 @@ public:
 
 private:
   bool applyConfig(const struct AppConfig& config, bool initialLoad, std::string& error);
+  void pumpRpcRecovery();
   bool applyGeneration(const struct AppConfig& config,
                         uint64_t generation,
                         std::string& error);

@@ -172,6 +172,7 @@ set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 add_library(redis-pvxs-ioc-core STATIC
+  src/source_health.cpp
   src/access_control.cpp
   src/config.cpp
   src/config_diff.cpp
@@ -318,6 +319,22 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- $<TARGET_FILE:runtime_tests>)
   set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
+
+  add_executable(source_health_tests tests/source_health_tests.cpp)
+  target_link_libraries(source_health_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(source_health_tests PRIVATE -UNDEBUG)
+  add_test(NAME source_health_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:source_health_tests>)
+  set_tests_properties(source_health_tests PROPERTIES TIMEOUT 75)
+  add_executable(source_health_pva_tests tests/source_health_pva_tests.cpp)
+  target_link_libraries(source_health_pva_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(source_health_pva_tests PRIVATE -UNDEBUG)
+  add_test(NAME source_health_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/source_health_e2e.py
+    --redis-server ${REDIS_SERVER_EXECUTABLE} --fixture $<TARGET_FILE:source_health_pva_tests>)
+  set_tests_properties(source_health_e2e PROPERTIES TIMEOUT 75)
 
   add_executable(operation_runtime_tests tests/operation_runtime_tests.cpp)
   target_link_libraries(operation_runtime_tests PRIVATE redis-pvxs-ioc-core)

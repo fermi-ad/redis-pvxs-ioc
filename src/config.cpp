@@ -356,7 +356,7 @@ ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
 }
 
 RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "workers", "readers"});
+  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "workers", "readers", "reader_probe_ms"});
   const auto redisNode = node;
 
   RedisConfig config;
@@ -375,6 +375,10 @@ RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path) {
   if (redisNode["readers"]) {
     config.readers = parseNumeric<uint16_t>(redisNode["readers"], path + ".readers");
   }
+  if (redisNode["reader_probe_ms"])
+    config.readerProbeMs = parseNumeric<uint32_t>(redisNode["reader_probe_ms"], path + ".reader_probe_ms");
+  if (config.readerProbeMs && (config.readerProbeMs < 100 || config.readerProbeMs > 60000))
+    fail(path + ".reader_probe_ms", "must be zero (disabled) or 100..60000");
 
   if (config.host.empty()) fail(path + ".host", "must not be empty");
   if (!config.port) fail(path + ".port", "must be 1..65535");
@@ -586,7 +590,7 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
 }
 
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access"});
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -618,7 +622,7 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   }
 
   if (pv.kind == PVKind::NTNDArray) {
-    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "max_frame_gap", "access"});
+    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "max_frame_gap", "access", "source_health"});
     pv.type = PrimitiveType::UInt8;
     pv.shape = Shape::Array;
     if (node["max_frame_bytes"]) {
@@ -654,6 +658,14 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   pv.transform = parseTransform(node["transform"], path + ".transform");
   pv.initialValue = parseInitialValue(node["initial"], pv.type, pv.shape, path + ".initial");
   if (node["access"]) pv.access = parseAccessAssignment(node["access"], path + ".access");
+  if (const auto health = node["source_health"]) {
+    rejectUnknownKeys(health, path + ".source_health", {"required", "stale_after_ms"});
+    if (health["required"]) pv.sourceHealth.required = parseNumeric<bool>(health["required"], path + ".source_health.required");
+    if (health["stale_after_ms"])
+      pv.sourceHealth.staleAfterMs = parseNumeric<uint32_t>(health["stale_after_ms"], path + ".source_health.stale_after_ms");
+    if (pv.sourceHealth.staleAfterMs > 86400000)
+      fail(path + ".source_health.stale_after_ms", "must be 0..86400000");
+  }
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
     fail(path + ".type", "this array element type is unsupported");
@@ -1080,7 +1092,8 @@ bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs) {
          lhs.user == rhs.user &&
          lhs.password == rhs.password &&
          lhs.workers == rhs.workers &&
-         lhs.readers == rhs.readers;
+         lhs.readers == rhs.readers &&
+         lhs.readerProbeMs == rhs.readerProbeMs;
 }
 
 bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs& rhs) {
@@ -1159,6 +1172,8 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "rpc:status"),
     adminPVName(server, "alarms:status"),
     adminPVName(server, "backend:health"),
+    adminPVName(server, "source:status"),
+    adminPVName(server, "ready"),
     adminPVName(server, "access:reload"),
     adminPVName(server, "access:enabled"),
     adminPVName(server, "access:generation"),

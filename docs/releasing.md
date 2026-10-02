@@ -20,11 +20,18 @@ deployment needs them. Fleet deployment is a separate task.
    dependency notices, and regression evidence. Keep branch protections and
    independent Instrumentation code-owner approval.
 2. Dispatch **Publish redis-pvxs-ioc candidate image** from that exact merged
-   revision. It builds on adlinux3, validates Linux amd64 identity and default
-   configuration, and runs isolated Redis/PVA and access-control tests before
-   pushing a unique `candidate-<run>-<attempt>-<commit>` tag. It then pulls and
-   rechecks the immutable digest and retains `candidate.json` and validation logs
-   in the `release-candidate-<run>-<attempt>` workflow artifact.
+   revision. An isolated, digest-pinned BuildKit builder on adlinux3 builds and
+   pushes only a unique `candidate-<run>-<attempt>-<commit>` tag, including an
+    SPDX SBOM and full build provenance. `candidate-*` tags are run outputs for
+    validation and diagnosis; do not deploy them directly. A failed run may
+    leave its unique tag in the registry, and the tag alone proves no
+    qualification. Promotion requires the successful run's evidence for the
+    exact immutable digest. The workflow pulls that digest, validates Linux amd64 identity
+   and default configuration, and runs isolated Redis/PVA and access-control
+   tests against that digest. A successful run retains `candidate.json`,
+   attestations, source revisions and validation logs in the
+   `release-candidate-<run>-<attempt>` workflow artifact. Candidate publication
+    never changes a stable release tag or `latest`.
 3. For stable 0.9.0 and later, complete the separate qualification workflow on
    the same commit and digest: integration/sanitizer/native checks, 600 exact
    1080p Mono8 frames, capacity evidence, a 24-hour amd64 soak, and rollback to
@@ -43,7 +50,15 @@ deployment needs them. Fleet deployment is a separate task.
    Existing release tags cannot be replaced by a different digest. Prereleases
    never change `latest`, and publishing an older stable version cannot move
    `latest` backward. The GitHub Release includes its changelog, source, immutable
-   image, validation links, and evidence JSON.
+   image, validation links, evidence JSON, and `release-evidence.tar.gz` containing
+   the candidate and qualification artifacts. The complete image index, including
+   its attestations, retains the validated digest during promotion.
+   A new GitHub Release remains a draft until every required evidence asset is
+   uploaded and its downloaded bytes match the validated files. Publication and
+   the final prerelease/latest classification happen last. Failed uploads leave
+   the new release unpublished. Retries verify existing published assets without
+   replacing them, add only missing files, and never withdraw a published release.
+   The evidence archive is reproducible across local extraction timestamps.
 7. Open and merge a post-release pin-sync PR updating every checked-in main-runtime
    image example to `image:v${VERSION}@sha256:<digest>`. Keep the independently
    versioned historical sidecar image unchanged.
@@ -52,6 +67,24 @@ A final release candidate must already contain its final version: qualify
 `VERSION=0.9.0` before publishing v0.9.0. A `0.9.0-rc.1` binary cannot be relabeled
 as `0.9.0`. Any runtime/dependency change creates a new candidate and invalidates
 qualification of the prior digest.
+
+## Build evidence
+
+The candidate workflow pins the BuildKit and SBOM scanner images by digest.
+Docker's [SBOM](https://docs.docker.com/build/metadata/attestations/sbom/) covers
+the runtime and builder stages. The source inventory records every recursive
+Git submodule revision, because package scanning cannot identify every static
+C++ dependency. Dirty checkouts and uninitialized or changed gitlinks fail
+before building. Full [provenance](https://docs.docker.com/build/metadata/attestations/slsa-provenance/)
+retains build arguments and the build definition; credentials must never be
+passed as build arguments.
+
+Candidate records bind the retained source inventory, SBOM, provenance and
+registry manifest by SHA-256. Promotion checks these files before publishing.
+The attestations describe the build and are bound to the image digest; they
+are not an independent code review or a claim of a particular SLSA assurance
+level. Validation logs live with GitHub Releases after the workflow artifact's
+90-day retention window expires.
 
 ## Image pull and smoke isolation
 

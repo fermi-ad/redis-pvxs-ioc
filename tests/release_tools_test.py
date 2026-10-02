@@ -41,7 +41,8 @@ class ReleaseTests(unittest.TestCase):
 
     def evidence(self):
         record = dict(version="0.9.0", revision=SHA, image=IMAGE, run_id=123,
-                      run_attempt=2, platform="linux/amd64", checks=["image", "smoke", "access"])
+                      run_attempt=2, platform="linux/amd64", checks=list(release.CANDIDATE_CHECKS),
+                      evidence={name: "d" * 64 for name in release.CANDIDATE_EVIDENCE})
         workflow = dict(conclusion="success", head_sha=SHA, event="workflow_dispatch",
                         path=".github/workflows/candidate-image.yml", id=123, run_attempt=2)
         return record, workflow
@@ -50,7 +51,8 @@ class ReleaseTests(unittest.TestCase):
         record, workflow = self.evidence()
         release.verify_record(record, workflow, "0.9.0", SHA, "candidate")
         for key, value in {"revision": "c" * 40, "version": "0.9.0-rc.1",
-                           "run_attempt": 1, "platform": "linux/arm64", "checks": ["image"], "image": "other@" + DIGEST}.items():
+                           "run_attempt": 1, "platform": "linux/arm64", "checks": ["image"],
+                           "evidence": {}, "image": "other@" + DIGEST}.items():
             with self.subTest(record=key), self.assertRaises(ValueError):
                 release.verify_record(dict(record, **{key: value}), workflow, "0.9.0", SHA, "candidate")
         for key, value in {"head_sha": "c" * 40, "conclusion": "failure", "event": "pull_request",
@@ -81,6 +83,44 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.validate_image(IMAGE, "0.8.2", SHA)
                 self.assertEqual(run.call_count, 1)
+
+    def test_attestations_require_sbom_full_provenance_and_matching_revision(self):
+        values = {
+            "SBOM": {"linux/amd64": {"SPDX": {"spdxVersion": "SPDX-2.3", "packages": [{"name": "test"}]}}},
+            "Provenance": {"linux/amd64": {"SLSA": {"buildConfig": {"llbDefinition": [1]},
+                "materials": [{"uri": "test"}], "invocation": {"parameters": {
+                    "args": {"build-arg:REDIS_PVXS_IOC_REVISION": SHA}}}}}},
+            "Manifest": {"digest": DIGEST},
+        }
+        def command(*args):
+            return json.dumps(values[args[-1].removeprefix("{{json .").removesuffix("}}")])
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "source-inputs.json").write_text(json.dumps({
+                "repository": release.SOURCE, "revision": SHA, "submodules": [{"path": "test", "revision": SHA}]}))
+            with patch.object(release, "run", side_effect=command):
+                hashes = release.capture_attestations(IMAGE, SHA, directory)
+                self.assertEqual(set(hashes), release.CANDIDATE_EVIDENCE)
+                with self.assertRaisesRegex(ValueError, "revision"):
+                    release.capture_attestations(IMAGE, "c" * 40, directory)
+                values["Provenance"]["linux/amd64"]["SLSA"].pop("buildConfig")
+                with self.assertRaisesRegex(ValueError, "full build provenance"):
+                    release.capture_attestations(IMAGE, SHA, directory)
+                values["SBOM"] = None
+                with self.assertRaisesRegex(ValueError, "missing image attestation"):
+                    release.capture_attestations(IMAGE, SHA, directory)
+
+    def test_source_inventory_rejects_uninitialized_or_changed_submodules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "source-inputs.json"
+            for prefix in ("-", "+", "U"):
+                with self.subTest(prefix=prefix), patch.object(release, "run", return_value=""), \
+                        patch.object(release.subprocess, "check_output", return_value=prefix + SHA + " third_party/test\n"):
+                    with self.assertRaisesRegex(ValueError, "pinned revisions"):
+                        release.source_inputs(output)
+            with patch.object(release, "run", return_value=" M Dockerfile"):
+                with self.assertRaisesRegex(ValueError, "clean checkout"):
+                    release.source_inputs(output)
 
     def test_prerelease_promotion_preserves_digest_and_never_touches_latest(self):
         manifests = {}
@@ -136,17 +176,127 @@ class ReleaseTests(unittest.TestCase):
             (root / "VERSION").write_text("0.8.2\n")
             (root / "CHANGELOG.md").write_text("## v0.8.2\n\nCorrectness fixes.\n")
             record = dict(self.evidence()[0], version="0.8.2")
+            def candidate_record(*args):
+                candidate = args[-1] / "candidate"
+                candidate.mkdir()
+                (candidate / "candidate.json").write_text(json.dumps(record))
+                (candidate / "smoke.log").write_text("passed\n")
+                return record
             with patch.object(release, "ROOT", root), patch.object(release, "run", return_value=SHA), \
-                    patch.object(release, "load_record", return_value=record), \
+                    patch.object(release, "load_record", side_effect=candidate_record), \
                     patch.object(release, "validate_image"), \
+                    patch.object(release, "existing_release", return_value={"isDraft": True}), \
+                    patch.object(release, "verify_release_assets") as verify, \
                     patch.object(release, "promote_digest", return_value=(release.IMAGE_REPOSITORY + ":v0.8.2", True)), \
                     patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as calls:
                 release.release("v0.8.2", "123", "")
-            edits = [call.args[0] for call in calls.call_args_list if call.args[0][:3] == ["gh", "release", "edit"]]
+            edits = [call.args[0] for call in calls.call_args_list
+                     if call.args[0][:3] == ["gh", "release", "edit"] and "--draft=false" in call.args[0]]
             self.assertEqual(len(edits), 1)
             self.assertIn("--draft=false", edits[0])
             self.assertIn("--prerelease=false", edits[0])
             self.assertIn("--latest=true", edits[0])
+            uploads = [call.args[0] for call in calls.call_args_list if call.args[0][:3] == ["gh", "release", "upload"]]
+            self.assertTrue(any(any(arg.endswith("release-evidence.tar.gz") for arg in call) for call in uploads))
+            verify.assert_called_once()
+
+    def test_assets_are_uploaded_and_verified_before_new_draft_or_retry_is_published(self):
+        for existing in (None, {"isDraft": True}, {"isDraft": False}):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                notes = root / "notes.md"
+                assets = [root / name for name in ("candidate.json", "qualification.json", "release-evidence.tar.gz")]
+                events = []
+                def command(args, **kwargs):
+                    events.append(args)
+                    return subprocess.CompletedProcess(args, 0)
+                def verified(tag, uploaded):
+                    self.assertEqual(uploaded, assets)
+                    events.append(["verified"])
+                with patch.object(release, "existing_release", return_value=existing), \
+                        patch.object(release.subprocess, "run", side_effect=command), \
+                        patch.object(release, "verify_release_assets", side_effect=verified):
+                    release.publish_release("v0.9.0", notes, assets, False, True)
+                upload = next(i for i, event in enumerate(events) if event[:3] == ["gh", "release", "upload"])
+                verification = events.index(["verified"])
+                publication = next(i for i, event in enumerate(events) if "--draft=false" in event)
+                self.assertLess(upload, verification)
+                self.assertLess(verification, publication)
+                self.assertIn("--latest=true", events[publication])
+                if existing is None:
+                    self.assertIn("--draft", events[0])
+                elif not existing["isDraft"]:
+                    self.assertFalse(any("--draft=true" in event for event in events))
+
+    def test_upload_or_verification_failure_leaves_a_new_release_unpublished(self):
+        for failure in ("upload", "verify"):
+            with self.subTest(failure=failure):
+                events = []
+                def command(args, **kwargs):
+                    events.append(args)
+                    if failure == "upload" and args[:3] == ["gh", "release", "upload"]:
+                        raise subprocess.CalledProcessError(1, args)
+                    return subprocess.CompletedProcess(args, 0)
+                def verified(*args):
+                    if failure == "verify":
+                        raise ValueError("uploaded release evidence differs")
+                with patch.object(release, "existing_release", return_value=None), \
+                        patch.object(release.subprocess, "run", side_effect=command), \
+                        patch.object(release, "verify_release_assets", side_effect=verified):
+                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                        release.publish_release("v0.9.0", Path("notes"), [Path("candidate.json")], False, True)
+                self.assertFalse(any("--draft=false" in event or "--latest=true" in event for event in events))
+
+    def test_downloaded_asset_bytes_must_match_the_validated_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "candidate.json"
+            asset.write_bytes(b"validated evidence")
+            for altered in (False, True):
+                def download(*args):
+                    directory = Path(args[args.index("--dir") + 1])
+                    (directory / asset.name).write_bytes(b"different bytes" if altered else asset.read_bytes())
+                    return ""
+                with self.subTest(altered=altered), patch.object(release, "run", side_effect=download):
+                    if altered:
+                        with self.assertRaisesRegex(ValueError, "evidence differs"):
+                            release.verify_release_assets("v0.9.0", [asset])
+                    else:
+                        release.verify_release_assets("v0.9.0", [asset])
+
+    def test_published_assets_are_verified_without_clobbering_or_withdrawing_them(self):
+        asset = Path("candidate.json")
+        info = {"isDraft": False, "assets": [{"name": asset.name}]}
+        with patch.object(release, "existing_release", return_value=info), \
+                patch.object(release, "verify_release_assets", side_effect=ValueError("mismatched bytes")), \
+                patch.object(release.subprocess, "run") as commands:
+            with self.assertRaisesRegex(ValueError, "mismatched bytes"):
+                release.publish_release("v0.9.0", Path("notes"), [asset], False, True)
+            commands.assert_not_called()
+        with patch.object(release, "existing_release", return_value=info), \
+                patch.object(release, "verify_release_assets"), \
+                patch.object(release.subprocess, "run") as commands:
+            release.publish_release("v0.9.0", Path("notes"), [asset], False, True)
+            self.assertFalse(any("upload" in c.args[0] or "--draft=true" in c.args[0] for c in commands.call_args_list))
+
+    def test_evidence_archive_is_reproducible_across_extraction_timestamps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "candidate").mkdir()
+            asset = root / "candidate/candidate.json"
+            asset.write_text("same validated bytes")
+            before = release.evidence_archive(root, "").read_bytes()
+            os.utime(asset, (123456789, 123456789))
+            os.utime(root / "candidate", (987654321, 987654321))
+            self.assertEqual(release.evidence_archive(root, "").read_bytes(), before)
+
+    def test_release_lookup_failure_is_not_treated_as_an_absent_release(self):
+        failure = subprocess.CompletedProcess([], 1, "", "authentication failed (HTTP 401)")
+        with patch.object(release.subprocess, "run", return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, "cannot inspect"):
+                release.existing_release("v0.9.0")
+        missing = subprocess.CompletedProcess([], 1, "", "release not found")
+        with patch.object(release.subprocess, "run", return_value=missing):
+            self.assertIsNone(release.existing_release("v0.9.0"))
 
 
 class SmokeTests(unittest.TestCase):

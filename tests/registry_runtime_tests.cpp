@@ -51,6 +51,7 @@ int main() {
   auto writer = std::make_shared<RedisAdapter>("registry-runtime", writeOptions);
   RedisBackendRegistry backends{{"default", reader}, {"writer", writer}};
   swr::ConnectionOptions adminOptions;
+  adminOptions.host = "127.0.0.1";
   adminOptions.port = options.cxn.port;
   adminOptions.socket_timeout = 2s;
   swr::Redis admin(adminOptions);

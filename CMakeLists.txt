@@ -174,6 +174,7 @@ endif()
 add_library(redis-pvxs-ioc-core STATIC
   src/access_control.cpp
   src/config.cpp
+  src/secrets.cpp
   src/config_diff.cpp
   src/discovery.cpp
   src/util.cpp
@@ -246,6 +247,11 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_test(NAME config_cli_tests COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/tests/config_cli_tests.py $<TARGET_FILE:redis-pvxs-ioc>)
   set_tests_properties(config_cli_tests PROPERTIES TIMEOUT 60)
+  add_test(NAME secret_files_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/secret_files_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(secret_files_e2e PROPERTIES TIMEOUT 45)
   add_executable(runtime_tests tests/runtime_tests.cpp)
   target_link_libraries(runtime_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(runtime_tests PRIVATE -UNDEBUG)

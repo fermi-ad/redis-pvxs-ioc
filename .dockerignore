@@ -1,6 +1,13 @@
 build
 build.verify
 build-iota
+build-*
+build.*
+.env
+.env.*
+.secrets
+secrets
+**/*.secret
 .git
 **/.git
 .DS_Store

@@ -356,16 +356,18 @@ redis-pvxs-ioc --diff-config old.yaml new.yaml --json
 
 The command compares validated, normalized definitions without Redis, RPC
 reflection or PVA startup. It reports additions, removals, replacements,
-metadata/access changes, changed backends/services, alarm/catalog changes, and
+metadata/access/alias changes, changed backends/services, alarm/catalog changes, and
 settings requiring a restart. Credential values are never included. An omitted
 schema version and explicit version 1 compare equally. Alias ordering alone is
 not a change.
 
-A replacement includes type/route/confirmation changes, alias-set changes (which
-can reconnect clients), and affected PVs when a backend definition changes.
+A replacement includes type/route/confirmation changes and affected PVs when a
+backend definition changes. Alias-set changes are reported as `alias_changes`;
+they retain the canonical runtime and disconnect only removed alias channels.
 Metadata changes include metadata, alarm thresholds, transforms and initial
 fallback definitions. They retain the runtime's subscription topology; changing
-a transform can cancel pending commands. Access changes are listed separately.
+a transform can cancel pending commands. Access and alias changes are listed separately
+and may overlap retained metadata changes.
 External ACF file contents and environment variables are not inputs to this
 file-to-file diff. RPC service differences are shown offline; reflected endpoint
 names and availability still require staging-time discovery.

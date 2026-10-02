@@ -3,3 +3,4 @@ build.verify/
 .DS_Store
 *.swp
 *.swo
+__pycache__/

@@ -1,159 +1,78 @@
 name: Publish redis-pvxs-ioc release image
 
+# Tag pushes do not build or publish. Promotion explicitly names successful
+# evidence from the same merged commit and never rebuilds the tested artifact.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to publish, for example v0.5.0.
+        description: Existing release tag matching VERSION.
         required: true
         type: string
+      candidate_run:
+        description: Successful candidate-image workflow run for this exact commit.
+        required: true
+        type: string
+      qualification_run:
+        description: Successful qualification run; mandatory for stable 0.9.0 and later.
+        required: false
+        type: string
+
+defaults:
+  run:
+    shell: bash
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: redis-pvxs-ioc-release-promotion
+  cancel-in-progress: false
 
 jobs:
   publish-release:
+    if: github.ref == 'refs/heads/main'
     runs-on: adlinux3
+    timeout-minutes: 30
     env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      IMAGE_REPO: adregistry.fnal.gov/instrumentation/redis-pvxs-ioc
-
+      RELEASE_TAG: ${{ inputs.tag }}
+      CANDIDATE_RUN: ${{ inputs.candidate_run }}
+      QUALIFICATION_RUN: ${{ inputs.qualification_run }}
+      REDIS_IMAGE: redis:7.4.2@sha256:fbdbaea47b9ae4ecc2082ecdb4e1cea81e32176ffb1dcf643d422ad07427e5d9
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Check out release tag
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Verify release identity
-        id: meta
+      - name: Isolate registry credentials
         run: |
-          VERSION="$(tr -d '\n' < VERSION)"
-          EXPECTED_TAG="v${VERSION}"
-
-          if [ "${RELEASE_TAG}" != "${EXPECTED_TAG}" ]; then
-            echo "Release tag ${RELEASE_TAG} must match VERSION ${VERSION} (${EXPECTED_TAG})" >&2
-            exit 1
-          fi
-
+          DOCKER_CONFIG="$(mktemp -d "${RUNNER_TEMP}/redis-pvxs-docker.XXXXXXXX")"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+      - name: Check out trusted main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Verify tag ancestry before executing its release code
+        shell: bash
+        run: |
           git fetch origin main --tags
-          TAG_COMMIT="$(git rev-list -n 1 "${RELEASE_TAG}")"
-          HEAD_COMMIT="$(git rev-parse HEAD)"
-          if [ "${HEAD_COMMIT}" != "${TAG_COMMIT}" ]; then
-            echo "Checked-out commit ${HEAD_COMMIT} does not match ${RELEASE_TAG} commit ${TAG_COMMIT}" >&2
-            exit 1
-          fi
-
-          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
-            echo "Release tag ${RELEASE_TAG} commit ${TAG_COMMIT} is not contained in origin/main" >&2
-            exit 1
-          fi
-
-          REVISION="$(git rev-parse --short=12 "${TAG_COMMIT}")"
-          IMAGE="${IMAGE_REPO}:${RELEASE_TAG}"
-
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
-          echo "tag_commit=${TAG_COMMIT}" >> "${GITHUB_OUTPUT}"
-          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
-
-      # Keep Harbor robot credentials out of the generated shell script so Bash
-      # does not reinterpret characters such as '$' in the username.
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Expected a version tag" >&2; exit 1 ;;
+          esac
+          TAG_COMMIT="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          git merge-base --is-ancestor "$TAG_COMMIT" origin/main
+          git checkout --detach "$TAG_COMMIT"
       - name: Registry login
         env:
           REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
           REGISTRY_SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
         run: |
-          printf '%s' "${REGISTRY_SECRET}" \
-            | docker login adregistry.fnal.gov \
-                --username "${REGISTRY_USERNAME}" \
-                --password-stdin
-
-      - name: Build and push release image
-        id: publish
+          printf '%s' "$REGISTRY_SECRET" | docker login adregistry.fnal.gov \
+            --username "$REGISTRY_USERNAME" --password-stdin
+      - name: Validate evidence and promote the existing digest
         run: |
-          IMAGE="${{ steps.meta.outputs.image }}"
-          VERSION="${{ steps.meta.outputs.version }}"
-          REVISION="${{ steps.meta.outputs.revision }}"
-
-          docker build \
-            --platform linux/amd64 \
-            --build-arg REDIS_PVXS_IOC_VERSION="${VERSION}" \
-            --build-arg REDIS_PVXS_IOC_REVISION="${REVISION}" \
-            --build-arg REDIS_PVXS_IOC_SOURCE="https://github.com/fermi-ad/redis-pvxs-ioc" \
-            -t "${IMAGE}" \
-            -t "${IMAGE_REPO}:latest" \
-            .
-
-          docker push "${IMAGE}"
-          docker push "${IMAGE_REPO}:latest"
-
-          DIGEST_REF="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F "${IMAGE_REPO}@sha256:" | head -n 1)"
-          test -n "${DIGEST_REF}"
-          DIGEST="${DIGEST_REF#*@}"
-          IMMUTABLE_IMAGE="${IMAGE_REPO}@${DIGEST}"
-
-          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
-          echo "digest_ref=${DIGEST_REF}" >> "${GITHUB_OUTPUT}"
-          echo "immutable_image=${IMMUTABLE_IMAGE}" >> "${GITHUB_OUTPUT}"
-          {
-            echo "## redis-pvxs-ioc release image"
-            echo
-            echo "- Image: \`${IMAGE}\`"
-            echo "- Digest: \`${DIGEST_REF}\`"
-            echo "- Immutable image: \`${IMMUTABLE_IMAGE}\`"
-            echo "- Source revision: \`${REVISION}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Validate release image
-        run: |
-          IMAGE="${{ steps.publish.outputs.immutable_image }}"
-          VERSION="${{ steps.meta.outputs.version }}"
-          REVISION="${{ steps.meta.outputs.revision }}"
-
-          docker run --rm "${IMAGE}" --version | tee /tmp/redis-pvxs-ioc-version.txt
-          grep -F "redis-pvxs-ioc ${VERSION} (${REVISION})" /tmp/redis-pvxs-ioc-version.txt
-          docker run --rm "${IMAGE}" --check-config /etc/redis-pvxs-ioc/config.yaml
-          test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "BSD-3-Clause"
-          docker run --rm --entrypoint /bin/sh "${IMAGE}" -c \
-            'test -r /usr/share/doc/redis-pvxs-ioc/LICENSE && test -r /usr/share/doc/redis-pvxs-ioc/NOTICE && test -r /usr/share/doc/redis-pvxs-ioc/THIRD_PARTY_NOTICES.md'
-
-      - name: Create or update GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          NOTES_FILE="$(mktemp)"
-          cat > "${NOTES_FILE}" <<EOF
-          # ${RELEASE_TAG}
-
-          Release image for redis-pvxs-ioc.
-
-          ## Image
-
-          - \`${{ steps.meta.outputs.image }}@${{ steps.publish.outputs.digest }}\`
-          - Source revision: \`${{ steps.meta.outputs.tag_commit }}\`
-          - \`latest\` was updated to the same digest for development and smoke-test use only.
-
-          ## Validation
-
-          - Built on \`adlinux3\` from the checked-out \`${RELEASE_TAG}\` tag.
-          - Verified \`${RELEASE_TAG}\` matches \`VERSION=${{ steps.meta.outputs.version }}\`.
-          - Verified the tag commit is contained in \`origin/main\`.
-          - Verified \`redis-pvxs-ioc --version\` reports \`${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.revision }})\`.
-          - Verified the default runtime config with \`--check-config /etc/redis-pvxs-ioc/config.yaml\`.
-          - Verified the image carries the BSD-3-Clause label, project license, government-rights notice, and third-party notices.
-          EOF
-
-          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --title "${RELEASE_TAG}" --notes-file "${NOTES_FILE}"
-          else
-            gh release create "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --target "${{ steps.meta.outputs.tag_commit }}" --title "${RELEASE_TAG}" --notes-file "${NOTES_FILE}"
-          fi
-
+          python3 scripts/release-image.py promote --tag "$RELEASE_TAG" \
+            --candidate-run "$CANDIDATE_RUN" --qualification-run "$QUALIFICATION_RUN"
       - name: Docker logout
-        if: always()
+        if: always() && env.DOCKER_CONFIG != ''
         run: docker logout adregistry.fnal.gov

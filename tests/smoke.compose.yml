@@ -1,0 +1,17 @@
+# Smoke tests own this project and publish no host ports. Keep the discovery
+# listener inside the test network, independently of the operator demo.
+services:
+  redis:
+    image: ${REDIS_IMAGE}
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  ioc:
+    image: ${REDIS_PVXS_IOC_IMAGE}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ${REDIS_PVXS_IOC_CONFIG}:/etc/redis-pvxs-ioc/config.yaml:ro

@@ -13,7 +13,7 @@ checkout:
 ```sh
 docker build --progress=plain -t redis-pvxs-ioc:acf-local .
 REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:acf-local \
-  REDIS_IMAGE=redis:7-alpine ./scripts/smoke-test.sh
+  REDIS_IMAGE=redis:7-alpine REDIS_PVXS_IOC_PULL_POLICY=never ./scripts/smoke-test.sh
 ./scripts/access-e2e-test.sh
 ITERATIONS=20000 REPETITIONS=3 sh scripts/benchmark-access.sh
 ```

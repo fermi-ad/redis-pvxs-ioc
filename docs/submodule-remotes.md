@@ -26,10 +26,14 @@ gitlink, verify that its public remote contains the exact pinned commit.
 ### `third_party/redis-adapter`
 
 - Published `.gitmodules` URL: `https://github.com/fermi-ad/redis-adapter.git`
-- Pinned commit: `9193b21203104eeb28fff01fe391ff46a347e2e3`
-- Publish status: ready
-- Default branch: `main`
-- Upstream change: [merged redis-adapter #98](https://github.com/fermi-ad/redis-adapter/pull/98)
+- Pinned commit: `b6c442a04746d420742ca0640111a65286fd22e9`
+- Publish status: published development commit; merge and release qualification pending
+- Verified remote branch: `dev/subscription-lifecycle`
+- Upstream changes: [redis-adapter #108](https://github.com/fermi-ad/redis-adapter/pull/108),
+  dependent on [redis-adapter #127](https://github.com/fermi-ad/redis-adapter/pull/127)
+- Release gate: keep the correctness preparation in draft until both upstream
+  changes are merged, update this pin to the exact reviewed merged revision,
+  and complete strict CI with independent Instrumentation review.
 
 ### `third_party/yaml-cpp`
 

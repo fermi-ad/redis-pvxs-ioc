@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 #include <alarm.h>
 
@@ -57,6 +58,18 @@ int main() {
   const auto clear = evaluateNumericAlarm(pv, 6.4, warning.status);
   assert(clear.status == epicsAlarmNone);
   assert(clear.severity == epicsSevNone);
+
+  pv.alarms.highAlarm = 9.0;
+  pv.alarms.lowAlarm = 1.0;
+  for (const double hysteresis : {0.0, 0.5}) {
+    pv.alarms.hysteresis = hysteresis;
+    const auto risingWarning = evaluateNumericAlarm(pv, 8., epicsAlarmNone);
+    assert(evaluateNumericAlarm(pv, 10., risingWarning.status).severity == epicsSevMajor);
+    const auto fallingWarning = evaluateNumericAlarm(pv, 2., epicsAlarmNone);
+    assert(evaluateNumericAlarm(pv, 0., fallingWarning.status).severity == epicsSevMajor);
+  }
+  assert(evaluateNumericAlarm(pv, std::numeric_limits<double>::quiet_NaN(), epicsAlarmNone).severity == epicsSevInvalid);
+  assert(evaluateNumericAlarm(pv, std::numeric_limits<double>::infinity(), epicsAlarmHigh).severity == epicsSevInvalid);
 
   std::cout << "model tests passed\n";
   return 0;

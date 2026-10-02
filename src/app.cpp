@@ -743,6 +743,7 @@ bool Application::replaceAll(const AppConfig& config,
     impl_->runtimes.clear();
 
     for (auto& item : staged) {
+      item.second->activate();
       for (const auto& servedName : fullPVNames(config.server, item.second->config())) {
         impl_->addEndpoint(servedName,
                            item.second->sharedPV(),
@@ -901,10 +902,12 @@ bool Application::applyIncremental(const AppConfig& config,
       impl_->runtimes.at(name)->deactivate("pv replaced");
       impl_->runtimes.erase(name);
       impl_->runtimes.emplace(name, staged.at(name));
+      staged.at(name)->activate();
       staged.erase(name);
     }
 
     for (auto& item : staged) {
+      item.second->activate();
       impl_->runtimes.emplace(item.first, item.second);
     }
 

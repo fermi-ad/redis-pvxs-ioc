@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import struct
@@ -145,6 +146,23 @@ def main():
                 temporary.replace(path)
                 process.send_signal(signal.SIGHUP)
 
+            def wait_synchronized(generation):
+                # The heartbeat reply precedes worker state publication, and
+                # discovery diagnostics are posted by the one-second health poll.
+                deadline = time.monotonic() + 5
+                expected = dict(state="synchronized", desiredGeneration=generation,
+                                synchronizedGeneration=generation)
+                while True:
+                    last_status = get("SYS:discovery-test:discovery:status")
+                    fields = dict((name, json.loads(value)) for name, value in re.findall(
+                        r'^\s*\w+\s+(state|desiredGeneration|synchronizedGeneration)\s*=\s*(.+)$',
+                        last_status, re.MULTILINE))
+                    if fields == expected:
+                        return
+                    assert time.monotonic() < deadline, (
+                        f"discovery did not synchronize generation {generation}; last status:\n{last_status}")
+                    time.sleep(0.1)
+
             try:
                 first = receiver.connect()
                 records, identity = receiver.catalog(first)
@@ -155,8 +173,7 @@ def main():
                 assert identity["PVXS_PROTOCOL"] == "pva" and "RSRV_SERVER_PORT" not in identity
                 assert "SYS:discovery-test:discovery:status" in records
                 assert "ALIAS:old" in get("ALIAS:old")
-                time.sleep(1.1)
-                assert '"synchronized"' in get("SYS:discovery-test:discovery:status")
+                wait_synchronized(1)
 
                 # Rejected staging leaves the existing RecCeiver session intact.
                 invalid = copy.deepcopy(config)
@@ -193,6 +210,7 @@ def main():
                 assert records["DISC:value"]["properties"]["DESC"] == "Changed"
                 assert "DISC:removed" not in records
                 assert "ALIAS:new" in get("ALIAS:new")
+                wait_synchronized(2)
 
                 # A receiver restart gets a complete current-generation upload.
                 # Queue stale advertisements, then restart on a different TCP

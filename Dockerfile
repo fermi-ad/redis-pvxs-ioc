@@ -1,3 +1,4 @@
+ARG BUILDKIT_SBOM_SCAN_STAGE=builder
 # Update the base digest and package snapshot together in a reviewed PR.
 FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS pinned-base
 # The minimal base lacks HTTPS trust roots. BuildKit fetches this Ubuntu

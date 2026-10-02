@@ -4,10 +4,15 @@ on:
   pull_request:
     branches:
       - main
+      - 'dev/**'
   push:
     branches:
       - main
   workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
 
 permissions:
   contents: read
@@ -25,11 +30,14 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Validate release tooling
+        run: python3 -m unittest discover -s tests -p '*_tools_test.py' -v
+
       - name: Build validation image
         id: build
         run: |
           VERSION="$(tr -d '\n' < VERSION)"
-          REVISION="$(git rev-parse --short=12 HEAD)"
+          REVISION="$(git rev-parse HEAD)"
           IMAGE="redis-pvxs-ioc:ci-${GITHUB_SHA}"
 
           docker build \
@@ -82,3 +90,12 @@ jobs:
         env:
           IMAGE: ${{ steps.build.outputs.image }}
         run: python3 tests/container_runtime.py "$IMAGE"
+
+      - name: Validate isolated Redis/PVA and access behavior
+        env:
+          REDIS_PVXS_IOC_IMAGE: ${{ steps.build.outputs.image }}
+          REDIS_PVXS_IOC_PULL_POLICY: never
+          REDIS_IMAGE: redis:7.4.2@sha256:fbdbaea47b9ae4ecc2082ecdb4e1cea81e32176ffb1dcf643d422ad07427e5d9
+        run: |
+          ./scripts/smoke-test.sh
+          ./scripts/access-e2e-test.sh

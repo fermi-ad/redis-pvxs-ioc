@@ -160,7 +160,7 @@ docker build --platform linux/amd64 -t redis-pvxs-ioc:local .
 docker run --rm redis-pvxs-ioc:local --version
 docker run --rm redis-pvxs-ioc:local \
   --check-config /etc/redis-pvxs-ioc/config.yaml
-REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local ./scripts/smoke-test.sh
+REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local REDIS_PVXS_IOC_PULL_POLICY=never ./scripts/smoke-test.sh
 ```
 
 `Dockerfile` fixes the Ubuntu base by digest, and

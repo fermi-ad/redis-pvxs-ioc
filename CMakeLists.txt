@@ -324,6 +324,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     -- $<TARGET_FILE:operation_runtime_tests>)
   set_tests_properties(operation_runtime_tests PROPERTIES TIMEOUT 75)
 
+  add_executable(dispatch_denial_audit_tests tests/dispatch_denial_audit_tests.cpp)
+  target_link_libraries(dispatch_denial_audit_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(dispatch_denial_audit_tests PRIVATE -UNDEBUG)
+  add_test(NAME dispatch_denial_audit_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:dispatch_denial_audit_tests>)
+  set_tests_properties(dispatch_denial_audit_tests PROPERTIES TIMEOUT 60)
+
   add_executable(pv_registry_tests tests/pv_registry_tests.cpp)
   target_link_libraries(pv_registry_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(pv_registry_tests PRIVATE -UNDEBUG)

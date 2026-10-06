@@ -36,8 +36,9 @@ jobs:
     timeout-minutes: 1560
     env:
       GH_TOKEN: ${{ github.token }}
-      EVIDENCE: ${{ runner.temp }}/release-qualification-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Set qualification evidence directory
+        run: echo "EVIDENCE=${RUNNER_TEMP}/release-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}

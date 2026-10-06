@@ -1,6 +1,8 @@
 #include "redis_pvxs_ioc/rpc_pv.h"
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/pv_registry.h"
+#include "audit_trail.h"
+#include <asLib.h>
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
@@ -143,15 +145,39 @@ int main(int argc, char** argv) {
   assert(count("started") == 7);
   allowedOp->cancel(); revokedOp->cancel(); retiringOp->cancel(); neverOp->cancel();
 
+  // A TRAPWRITE call admitted before a rights change and refused at dispatch
+  // keeps its audit id. Revoking in Base clears cached rights without running
+  // the channel close that would otherwise cancel the queued call.
+  std::ofstream(policy) << "ASG(CONTROL) { RULE(1, WRITE, TRAPWRITE) }\n";
+  assert(access->reload("trap", error));
+  {
+    CapturedStderr captured;
+    Completion holding, refused;
+    auto holdingOp = call("RPC:secured", 300, "holding", holding);
+    eventually([&] { return count("started") == 8; });
+    auto refusedOp = call("RPC:secured", 0, "refused", refused);
+    eventually([&] { return queue->stats().queued == 1; });
+    assert(asInitMem("ASG(CONTROL) { RULE(1, READ) }\n", nullptr) == 0);
+    holding.wait(); refused.wait();
+    const auto records = auditRecords(captured.finish());
+    assert(holding.error.empty() && refused.error.find("no longer authorized") != std::string::npos);
+    assert(count("started") == 8);  // the refused call never reached gRPC
+    std::string admitted;
+    for (const auto& record : records)
+      if (record.phase == "authorization" && record.result == "allowed") admitted = record.id;
+    assert(deniedAtDispatch(records, admitted, "rpc"));
+    assert(access->status().operationsDenied == 1);
+  }
+
   Completion shuttingDown;
   auto shutdownOp = call("RPC:wait", 5000, "shutdown", shuttingDown);
-  eventually([&] { return count("started") == 8; });
+  eventually([&] { return count("started") == 9; });
   const auto shutdownStart = std::chrono::steady_clock::now();
   queue->shutdown(); shuttingDown.wait();
   assert(std::chrono::steady_clock::now() - shutdownStart < 1s);
   assert(queue->stats().residentBytes == 0);
   client.close(); access->clearBindings(); server.removeSource("secured"); registry->clear(); server.stop();
   std::filesystem::remove(policy);
-  assert(stats->succeeded > 0 && stats->failed >= 1);
+  assert(stats->succeeded > 0 && stats->failed >= 1 && stats->unauthorized >= 1);
   std::cout << "bounded asynchronous RPC, cancellation, retirement, ACF revocation, total deadlines and no replay passed\n";
 }

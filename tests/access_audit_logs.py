@@ -19,9 +19,17 @@ for line in result.stderr.splitlines():
     else:
         events.setdefault(identifier, []).append((phase, operation, outcome))
 outcomes = set()
-for pair in events.values():
-    assert len(pair) == 2 and pair[0][0] == "authorization" and pair[0][2] == "allowed", pair
-    assert pair[1][0] == "completion" and pair[0][1] == pair[1][1], pair
-    outcomes.add(pair[1][2])
-assert outcomes == {"success", "error", "cancelled", "abandoned"}, outcomes
+for trail in events.values():
+    assert trail[0][0] == "authorization" and trail[0][2] == "allowed", trail
+    if len(trail) == 3:
+        # Refused by the dispatch re-check after a rights change: the denial
+        # keeps the admitted id and the operation completes as denied.
+        assert trail[1] == ("authorization", trail[0][1], "denied"), trail
+        assert trail[2] == ("completion", trail[0][1], "denied"), trail
+    else:
+        assert len(trail) == 2, trail
+        assert trail[1][0] == "completion" and trail[1][1] == trail[0][1], trail
+        assert trail[1][2] != "denied", trail
+    outcomes.add(trail[-1][2])
+assert {"success", "error", "cancelled", "abandoned"} <= outcomes <= {"success", "error", "cancelled", "abandoned", "denied"}, outcomes
 print("authorization, distinct completion outcomes, exactly-once audit and RPC payload omission passed")

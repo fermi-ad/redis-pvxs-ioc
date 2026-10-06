@@ -538,7 +538,8 @@ struct AccessController::Impl : public std::enable_shared_from_this<AccessContro
   std::atomic<uint64_t> rightsChanges{0};
   std::atomic<uint64_t> authorizedOperations{0}, operationsInFlight{0};
   std::atomic<uint64_t> operationsSucceeded{0}, operationsFailed{0};
-  std::atomic<uint64_t> operationsCancelled{0}, operationsAbandoned{0}, denialLogsSuppressed{0};
+  std::atomic<uint64_t> operationsCancelled{0}, operationsAbandoned{0}, operationsDenied{0};
+  std::atomic<uint64_t> denialLogsSuppressed{0};
   std::string lastStatus = "initializing";
   std::string lastError;
   std::string policyFingerprint;
@@ -568,7 +569,10 @@ struct AccessController::Impl : public std::enable_shared_from_this<AccessContro
   void markDirty(const std::shared_ptr<ChannelState>& state);
   void drainDirty();
   void recomputeAllClients();
-  void recordDenied(const ChannelState& state, bool write, const pvxs::Value* value, const char* operation = "put");
+  // id is the admitted operation's audit id for a dispatch-time denial; zero
+  // for requests refused at admission, which were never assigned one.
+  void recordDenied(const ChannelState& state, bool write, const pvxs::Value* value,
+                    const char* operation = "put", uint64_t id = 0);
   void recordAudit(const ChannelState& state, uint64_t id, const char* operation,
                    const char* phase, const char* result, const pvxs::Value* value = nullptr) noexcept;
 };
@@ -749,6 +753,7 @@ struct AccessOperation {
     if (std::strcmp(outcome, "success") == 0) ++owner.operationsSucceeded;
     else if (std::strcmp(outcome, "error") == 0) ++owner.operationsFailed;
     else if (std::strcmp(outcome, "cancelled") == 0) ++owner.operationsCancelled;
+    else if (std::strcmp(outcome, "denied") == 0) ++owner.operationsDenied;
     else ++owner.operationsAbandoned;
     if (trap) owner.recordAudit(*state, id, operation, "completion", outcome);
   }
@@ -775,7 +780,12 @@ public:
   }
   bool authorized(const pvxs::Value& value) override {
     if ((state_->loadRights() & kWrite) != 0u) return authorizeWriteDispatch(*target_, value);
-    state_->owner.recordDenied(*state_, true, std::strcmp(audit_->operation, "rpc") == 0 ? nullptr : &value, audit_->operation);
+    // Rights changed after admission. Record the refusal under the admitted
+    // audit id so it is not mistaken for a later backend error, then close the
+    // operation as denied; the caller's PVA error reply cannot reclassify it.
+    state_->owner.recordDenied(*state_, true, std::strcmp(audit_->operation, "rpc") == 0 ? nullptr : &value,
+                               audit_->operation, audit_->trap ? audit_->id : 0);
+    audit_->finish("denied");
     return false;
   }
 private:
@@ -953,9 +963,10 @@ void AccessController::Impl::recomputeAllClients() {
 void AccessController::Impl::recordDenied(const ChannelState& state,
                                           const bool write,
                                           const pvxs::Value* value,
-                                          const char* operation) {
+                                          const char* operation,
+                                          const uint64_t id) {
   (write ? deniedWrites : deniedReads).fetch_add(1u, std::memory_order_relaxed);
-  if (write) recordAudit(state, 0, operation, "authorization", "denied", value);
+  if (write) recordAudit(state, id, operation, "authorization", "denied", value);
   const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count() + 1;
   auto& stamp = write ? state.lastDeniedWriteMs : state.lastDeniedReadMs;
@@ -1423,6 +1434,7 @@ AccessStatus AccessController::status() const {
   result.operationsInFlight = impl_->operationsInFlight;
   result.operationsSucceeded = impl_->operationsSucceeded; result.operationsFailed = impl_->operationsFailed;
   result.operationsCancelled = impl_->operationsCancelled; result.operationsAbandoned = impl_->operationsAbandoned;
+  result.operationsDenied = impl_->operationsDenied;
   result.denialLogsSuppressed = impl_->denialLogsSuppressed;
   std::lock_guard<std::mutex> guard(impl_->mutex);
   result.lastStatus = impl_->lastStatus;

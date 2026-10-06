@@ -263,6 +263,7 @@ public:
       Member(TypeCode::UInt64, "authorized"), Member(TypeCode::UInt64, "inFlight"),
       Member(TypeCode::UInt64, "succeeded"), Member(TypeCode::UInt64, "failed"),
       Member(TypeCode::UInt64, "cancelled"), Member(TypeCode::UInt64, "abandoned"),
+      Member(TypeCode::UInt64, "denied"),
       Member(TypeCode::UInt64, "denialLogsSuppressed"), Member(TypeCode::UInt64, "rateLimitChannels")}).create());
     auto reloadValue = makeAdminValue(pvxs::TypeCode::Int64, "Write any value to request a config reload");
     reloadValue["value"] = static_cast<int64_t>(0);
@@ -600,6 +601,7 @@ public:
     value["authorized"] = status.authorizedOperations; value["inFlight"] = status.operationsInFlight;
     value["succeeded"] = status.operationsSucceeded; value["failed"] = status.operationsFailed;
     value["cancelled"] = status.operationsCancelled; value["abandoned"] = status.operationsAbandoned;
+    value["denied"] = status.operationsDenied;
     value["denialLogsSuppressed"] = status.denialLogsSuppressed;
     value["rateLimitChannels"] = status.activeClients;
     accessOperations_.post(value);

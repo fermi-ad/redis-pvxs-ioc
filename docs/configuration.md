@@ -156,9 +156,19 @@ confirm:
 ```
 
 `confirm` requires `write`; `timeout_ms` defaults to `250`. A confirmed put
-completes only after the confirmation subscription sees the raw value written to
-Redis. The wait is bounded by `timeout_ms`, and reload deactivation fences puts
-from an older generation.
+completes only after the configured confirmation subscription sees the raw
+value written to Redis at a stream position newer than the snapshot taken
+before dispatch. Observations from a separate read route do not confirm a put;
+confirmation observations do not change displayed readback. This establishes
+observed readback, not causal acknowledgement by the command consumer. Repeated
+commands each require a new matching observation. The wait is bounded by
+`timeout_ms`, and reload deactivation fences puts from an older generation.
+
+Malformed scalar or array payloads retain the last good value and set an INVALID
+alarm. A missing source uses the configured `initial` fallback with an INVALID
+alarm and zero source timestamp until valid data arrives. Empty numeric arrays
+are valid. Legacy payload byte order and source timestamp interpretation are
+unchanged; the exact Redis stream cursor is tracked separately for ordering.
 
 ### Collision and route validation
 

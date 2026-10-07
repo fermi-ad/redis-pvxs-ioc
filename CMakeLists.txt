@@ -120,7 +120,9 @@ set(PVXS_EXTRA_INCLUDE_DIRS)
 set(PVXS_EXTRA_LINK_LIBS)
 if(EXISTS "${PVXS_BUNDLE_EVENT_LIB}")
   list(APPEND PVXS_EXTRA_INCLUDE_DIRS "${PVXS_USR}/include")
-  list(APPEND PVXS_EXTRA_LINK_LIBS "${PVXS_BUNDLE_EVENT_LIB}")
+  # PVXS already links event_core and event_pthreads. Linking monolithic
+  # libevent as well creates two copies of its global threading state on macOS
+  # and can deadlock server construction. Follow PVXS's transitive dependencies.
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR
     "Missing bundled libevent: ${PVXS_BUNDLE_EVENT_LIB}\n"
@@ -210,6 +212,15 @@ install(TARGETS redis-pvxs-ioc redis-pvxs-channelfinder-sync RUNTIME DESTINATION
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  add_executable(runtime_tests tests/runtime_tests.cpp)
+  target_link_libraries(runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:runtime_tests>)
+  set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
 
   add_executable(config_tests tests/config_tests.cpp)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)

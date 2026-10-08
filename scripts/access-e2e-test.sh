@@ -7,21 +7,43 @@ IMAGE="${REDIS_PVXS_IOC_IMAGE:-redis-pvxs-ioc:acf-local}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
 mkdir -p "$ROOT_DIR/build"
 RUN_DIR="$(mktemp -d "$ROOT_DIR/build/access-e2e-run.XXXXXX")"
+CONFIG_DIR="$RUN_DIR/config"
 RUN_ID="$(basename "$RUN_DIR" | tr '.[:upper:]' '-[:lower:]')"
 NETWORK="${RUN_ID}-network"
 REDIS_CONTAINER="${RUN_ID}-redis"
 IOC_CONTAINER="${RUN_ID}-ioc"
 MONITOR_PID=""
+NETWORK_ID=""
+REDIS_ID=""
+IOC_ID=""
 PVX_DIR=/opt/redis-pvxs-ioc/bin/pvxs
 
 cleanup() {
+  local result=$?
+  trap - EXIT
   if [ -n "$MONITOR_PID" ]; then
     kill "$MONITOR_PID" >/dev/null 2>&1 || true
   fi
-  docker logs "$IOC_CONTAINER" >"$RUN_DIR/ioc.log" 2>&1 || true
-  docker logs "$REDIS_CONTAINER" >"$RUN_DIR/redis.log" 2>&1 || true
-  docker rm -f "$IOC_CONTAINER" "$REDIS_CONTAINER" >/dev/null 2>&1 || true
-  docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  if [ -n "$IOC_ID" ]; then
+    docker logs "$IOC_ID" >"$RUN_DIR/ioc.log" 2>&1 || true
+    docker inspect --format '{{json .State}}' "$IOC_ID" >"$RUN_DIR/ioc-state.json" 2>&1 || true
+    docker rm -f "$IOC_ID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$REDIS_ID" ]; then
+    docker logs "$REDIS_ID" >"$RUN_DIR/redis.log" 2>&1 || true
+    docker rm -f "$REDIS_ID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$NETWORK_ID" ]; then
+    docker network rm "$NETWORK_ID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$MONITOR_PID" ]; then
+    wait "$MONITOR_PID" >/dev/null 2>&1 || true
+  fi
+  if [ "$result" -ne 0 ] && [ -f "$RUN_DIR/ioc.log" ]; then
+    cat "$RUN_DIR/ioc.log" >&2
+  fi
+  printf 'ACF evidence: %s\n' "$RUN_DIR"
+  exit "$result"
 }
 trap cleanup EXIT
 
@@ -60,6 +82,10 @@ wait_pv_contains() {
   local output=""
   local attempt
   for attempt in $(seq 1 60); do
+    if [ -n "$IOC_ID" ] && [ "$(docker inspect --format '{{.State.Running}}' "$IOC_ID")" != true ]; then
+      printf 'IOC exited before %s contained %s\n' "$pv" "$expected" >&2
+      return 1
+    fi
     if output="$(pvxget "$pv" 2>&1)" && printf '%s\n' "$output" | grep -Fq "$expected"; then
       return 0
     fi
@@ -141,17 +167,23 @@ replace_config_text() {
     truncate $config, 0 or die "truncate $path: $!\n";
     print {$config} $text or die "write $path: $!\n";
     close $config or die "close $path: $!\n";
-  ' "$RUN_DIR/config.yaml" "$from" "$to"
+  ' "$CONFIG_DIR/config.yaml" "$from" "$to"
 }
 
-cp "$FIXTURE_DIR/config.yaml" "$RUN_DIR/config.yaml"
-cp "$FIXTURE_DIR/allow.acf" "$RUN_DIR/access.acf"
+# Only these synthetic public fixture files are mounted into the non-root IOC.
+# Keep the enclosing evidence directory private, including under umask 077.
+mkdir "$CONFIG_DIR"
+chmod 0755 "$CONFIG_DIR"
+cp "$FIXTURE_DIR/config.yaml" "$CONFIG_DIR/config.yaml"
+cp "$FIXTURE_DIR/allow.acf" "$CONFIG_DIR/access.acf"
+chmod 0644 "$CONFIG_DIR/config.yaml" "$CONFIG_DIR/access.acf"
 
 docker image inspect "$IMAGE" >/dev/null
 docker image inspect "$REDIS_IMAGE" >/dev/null
-docker network create "$NETWORK" >/dev/null
-docker run -d --name "$REDIS_CONTAINER" --network "$NETWORK" \
-  --network-alias acf-e2e-redis "$REDIS_IMAGE" >/dev/null
+NETWORK_ID="$(docker network create "$NETWORK")"
+REDIS_ID="$(docker create --name "$REDIS_CONTAINER" --network "$NETWORK" \
+  --network-alias acf-e2e-redis "$REDIS_IMAGE")"
+docker start "$REDIS_ID" >/dev/null
 
 for _ in $(seq 1 40); do
   if docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -Fq PONG; then
@@ -161,8 +193,9 @@ for _ in $(seq 1 40); do
 done
 docker exec "$REDIS_CONTAINER" redis-cli ping | grep -Fq PONG
 
-docker run -d --name "$IOC_CONTAINER" --network "$NETWORK" \
-  -v "$RUN_DIR:/config" "$IMAGE" --config /config/config.yaml >/dev/null
+IOC_ID="$(docker create --name "$IOC_CONTAINER" --network "$NETWORK" \
+  --mount "type=bind,source=$CONFIG_DIR,target=/config" "$IMAGE" --config /config/config.yaml)"
+docker start "$IOC_ID" >/dev/null
 
 wait_pv_contains SYS:e2e:backend:health connected
 assert_pv_contains SYS:e2e:access:enabled 'value bool = true'
@@ -192,7 +225,7 @@ wait_file_contains "$RUN_DIR/monitor.log" Connected
 
 # In-place watcher update: active monitor must disconnect and future operations
 # must be rejected without reaching Redis.
-replace_in_place "$FIXTURE_DIR/deny.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/deny.acf" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:generation 'value int64_t = 2'
 wait_file_contains "$RUN_DIR/monitor.log" Disconnected
 expect_pv_failure pvxget E2E:value
@@ -206,7 +239,7 @@ expect_pv_failure pvxinfo E2E:value
 # The stock put client reads the current value before writing. Move to a
 # read-only policy so that setup succeeds and the WRITE denial itself is
 # exercised; the denied operation must not reach Redis.
-replace_in_place "$FIXTURE_DIR/read-only.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/read-only.acf" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
 assert_pv_contains E2E:value 'value double = 42'
 expect_pv_failure pvxput E2E:value 43
@@ -218,7 +251,7 @@ fi
 
 # Invalid watcher input retains the last good read-only policy and reports a
 # line-aware unsupported-construct error.
-replace_in_place "$FIXTURE_DIR/invalid.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/invalid.acf" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
 assert_pv_contains SYS:e2e:access:lastError 'ACF 6:19:'
@@ -228,18 +261,19 @@ assert_pv_contains E2E:value 'value double = 42'
 # Restoring the already-active last-good bytes clears watcher observability
 # without a duplicate activation. Reintroducing the same invalid bytes must be
 # attempted again rather than being hidden by the duplicate-attempt cache.
-replace_in_place "$FIXTURE_DIR/read-only.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/read-only.acf" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch active'
 assert_pv_contains SYS:e2e:access:lastError 'value string = ""'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
-replace_in_place "$FIXTURE_DIR/invalid.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/invalid.acf" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
 assert_pv_contains SYS:e2e:access:lastError 'CALC'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 3'
 
 # Atomic path replacement restores access.
-cp "$FIXTURE_DIR/allow.acf" "$RUN_DIR/access.acf.next"
-mv "$RUN_DIR/access.acf.next" "$RUN_DIR/access.acf"
+cp "$FIXTURE_DIR/allow.acf" "$CONFIG_DIR/access.acf.next"
+chmod 0644 "$CONFIG_DIR/access.acf.next"
+mv "$CONFIG_DIR/access.acf.next" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:generation 'value int64_t = 4'
 wait_pv_contains E2E:value 'value double = 42'
 
@@ -268,14 +302,14 @@ replace_config_text 'enabled: false' 'enabled: true'
 
 # A well-formed disabled configuration reaches the startup-immutability check;
 # its failed reload preserves both active generations and the allow policy.
-replace_in_place "$FIXTURE_DIR/config-disabled.yaml" "$RUN_DIR/config.yaml"
+replace_in_place "$FIXTURE_DIR/config-disabled.yaml" "$CONFIG_DIR/config.yaml"
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/immutable-clean-reload.txt"
 wait_pv_contains SYS:e2e:config:lastStatus 'reload rejected'
 assert_pv_contains SYS:e2e:config:lastError 'access.enabled is immutable after startup'
 assert_pv_contains SYS:e2e:config:generation 'value int64_t = 3'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 7'
 assert_pv_contains E2E:value 'value double = 42'
-replace_in_place "$FIXTURE_DIR/config.yaml" "$RUN_DIR/config.yaml"
+replace_in_place "$FIXTURE_DIR/config.yaml" "$CONFIG_DIR/config.yaml"
 
 # Disabling the watcher is hot-reloadable. A changed ACF remains inactive until
 # an explicit whole-config reload, which always rereads it.
@@ -284,7 +318,7 @@ pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/disable-watch.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 4'
 wait_pv_contains SYS:e2e:access:generation 'value int64_t = 8'
 assert_pv_contains SYS:e2e:access:watchStatus 'value string = "disabled"'
-replace_in_place "$FIXTURE_DIR/deny.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/deny.acf" "$CONFIG_DIR/access.acf"
 sleep 1
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 8'
 assert_pv_contains E2E:value 'value double = 42'
@@ -295,7 +329,7 @@ expect_pv_failure pvxget E2E:value
 
 # Restore the allow policy through whole-config reload while the watcher remains
 # disabled, then re-enable monitoring.
-replace_in_place "$FIXTURE_DIR/allow.acf" "$RUN_DIR/access.acf"
+replace_in_place "$FIXTURE_DIR/allow.acf" "$CONFIG_DIR/access.acf"
 pvxput SYS:e2e:config:reload 1 >"$RUN_DIR/restore-allow.txt"
 wait_pv_contains SYS:e2e:config:generation 'value int64_t = 6'
 wait_pv_contains SYS:e2e:access:generation 'value int64_t = 10'
@@ -307,12 +341,12 @@ wait_pv_contains SYS:e2e:access:generation 'value int64_t = 11'
 
 # File deletion retains the last good policy. Restoring identical content clears
 # the watcher error without spuriously activating a duplicate generation.
-mv "$RUN_DIR/access.acf" "$RUN_DIR/access.acf.missing"
+mv "$CONFIG_DIR/access.acf" "$CONFIG_DIR/access.acf.missing"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch reload failed'
 assert_pv_contains SYS:e2e:access:lastError 'cannot open ACF file'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 11'
 assert_pv_contains E2E:value 'value double = 42'
-mv "$RUN_DIR/access.acf.missing" "$RUN_DIR/access.acf"
+mv "$CONFIG_DIR/access.acf.missing" "$CONFIG_DIR/access.acf"
 wait_pv_contains SYS:e2e:access:lastStatus 'watch active'
 assert_pv_contains SYS:e2e:access:lastError 'value string = ""'
 assert_pv_contains SYS:e2e:access:generation 'value int64_t = 11'

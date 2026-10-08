@@ -3,6 +3,13 @@
 Native EPICS access security is optional and disabled by default. Enable it
 explicitly at process startup:
 
+For a policy with denied default access and separate observer, operator and admin
+identities, start with [the restrictive example](../demo/config.access.restrictive.yaml)
+and [its ACF](../demo/access.restrictive.acf). Replace its placeholder users before
+deployment. Operators can write only assigned process/RPC endpoints; only admins
+can read or invoke the diagnostic reload controls. The original demo below grants
+anonymous reads and is intended for demonstration.
+
 ```yaml
 access:
   enabled: true

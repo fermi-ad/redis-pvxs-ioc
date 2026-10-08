@@ -10,6 +10,8 @@
   and troubleshooting.
 - [Access control](access-control.md): opt-in native ACF policy, hot reload,
   watcher behavior, auditing, and diagnostics.
+- [Container runtime and secret files](container-runtime.md): non-root identity,
+  UID override, read-only mounts and credential rotation.
 - [Live ACF validation](access-live-validation.md): controlled acceptance and
   rollback procedure for a representative deployed IOC.
 - [PVAccess networking](pva-networking.md): container discovery and routable

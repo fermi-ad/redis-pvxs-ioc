@@ -1,0 +1,35 @@
+schema_version: 1
+server:
+  instance: restricted
+  namespace: DEMO
+
+access:
+  enabled: true
+  file: access.restrictive.acf
+  defaults:
+    pv: {asg: READERS, asl: 0}
+    rpc: {asg: OPERATORS, asl: 0}
+    admin_read: {asg: ADMINS, asl: 0}
+    admin_write: {asg: ADMINS, asl: 0}
+
+redis:
+  base_key: demo
+  host: redis
+  port: 6379
+  # Mount credentials separately, readable by the runtime UID/GID:
+  # user_file: /run/secrets/redis_user
+  # password_file: /run/secrets/redis_password
+
+pvs:
+  - name: temperature
+    type: float64
+    shape: scalar
+    read: {key: temperature:rb}
+    initial: 0.0
+  - name: setpoint
+    type: float64
+    shape: scalar
+    read: {key: setpoint:rb}
+    write: {key: setpoint:cmd}
+    access: {asg: OPERATORS, asl: 0}
+    initial: 0.0

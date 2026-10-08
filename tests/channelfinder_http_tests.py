@@ -50,10 +50,10 @@ def main():
         with tempfile.TemporaryDirectory(prefix="redis-pvxs-http-") as directory:
             path = Path(directory) / "config.json"
             environment = dict(os.environ, NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
-            for key in ("CHANNELFINDER_USERNAME", "CHANNELFINDER_PASSWORD"):
+            for key in ("CHANNELFINDER_USERNAME", "CHANNELFINDER_PASSWORD", "CHANNELFINDER_USERNAME_FILE", "CHANNELFINDER_PASSWORD_FILE"):
                 environment.pop(key, None)
 
-            def invoke(mode, *options, credentials=False, url=None):
+            def invoke(mode, *options, credentials=False, url=None, secrets=None):
                 config = dict(server=dict(instance="http", namespace="TEST"),
                               redis=dict(host="192.0.2.1", port=1, base_key="http"),
                               pvs=[dict(name="value", type="float64", shape="scalar", read=dict(key="value"))],
@@ -62,6 +62,8 @@ def main():
                 env = environment.copy()
                 if credentials:
                     env.update(CHANNELFINDER_USERNAME="test-user", CHANNELFINDER_PASSWORD="test-secret")
+                if secrets:
+                    env.update(secrets)
                 return subprocess.run([executable, "--config", str(path), *options], env=env,
                                       text=True, capture_output=True, timeout=4)
 
@@ -69,6 +71,25 @@ def main():
             assert result.returncode == 0, result.stderr
             assert "published 1 channels" in result.stdout
             assert server.seen[-1][1] == "Basic " + base64.b64encode(b"test-user:test-secret").decode()
+            username, password = Path(directory) / "user.secret", Path(directory) / "password.secret"
+            username.write_text("test-user\n")
+            password.write_bytes(b"test-secret\r\n")
+            secret_env = dict(CHANNELFINDER_USERNAME_FILE=str(username), CHANNELFINDER_PASSWORD_FILE=str(password))
+            result = invoke("success", secrets=secret_env)
+            assert result.returncode == 0, result.stderr
+            assert server.seen[-1][1] == "Basic " + base64.b64encode(b"test-user:test-secret").decode()
+            before = len(server.seen)
+            result = invoke("success", credentials=True, secrets=secret_env)
+            assert result.returncode != 0 and "mutually exclusive" in result.stderr
+            assert "test-secret" not in result.stderr and len(server.seen) == before
+            password.write_bytes(b"test-secret\x00")
+            result = invoke("success", secrets=secret_env)
+            assert result.returncode != 0 and "without NUL" in result.stderr
+            assert "test-secret" not in result.stderr and len(server.seen) == before
+            password.write_text("test-secret\n")
+            result = invoke("redirect", "--allow-redirects", secrets=secret_env)
+            assert result.returncode != 0 and "redirects with credentials" in result.stderr
+            assert len(server.seen) == before
 
             result = invoke("error")
             assert result.returncode != 0 and "HTTP 503" in result.stderr

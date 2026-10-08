@@ -1,5 +1,6 @@
 #include "redis_pvxs_ioc/config.h"
 #include "redis_pvxs_ioc/endpoints.h"
+#include "redis_pvxs_ioc/secrets.h"
 
 #include <algorithm>
 #include <cmath>
@@ -355,20 +356,28 @@ ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
   return confirm;
 }
 
-RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "workers", "readers"});
+RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path,
+                            const std::filesystem::path& directory) {
+  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "user_file", "password_file", "workers", "readers"});
   const auto redisNode = node;
 
   RedisConfig config;
   config.baseKey = parseString(requireNode(redisNode, "base_key", path), path + ".base_key");
   config.host = parseString(requireNode(redisNode, "host", path), path + ".host");
   config.port = parseNumeric<uint16_t>(requireNode(redisNode, "port", path), path + ".port");
-  if (redisNode["user"]) {
-    config.user = parseString(redisNode["user"], path + ".user");
-  }
-  if (redisNode["password"]) {
-    config.password = parseString(redisNode["password"], path + ".password");
-  }
+  const auto credential = [&](const std::string& name) {
+    const auto file = name + "_file";
+    if (redisNode[name] && redisNode[file]) fail(path, name + " and " + file + " are mutually exclusive");
+    if (redisNode[file]) {
+      const auto input = parseString(redisNode[file], path + "." + file);
+      if (input.empty()) fail(path + "." + file, "must not be empty");
+      const auto location = std::filesystem::path(input);
+      return readSecretFile((location.is_absolute() ? location : directory / location).string(), path + "." + file);
+    }
+    return redisNode[name] ? parseString(redisNode[name], path + "." + name) : std::string{};
+  };
+  config.user = credential("user");
+  config.password = credential("password");
   if (redisNode["workers"]) {
     config.workers = parseNumeric<uint16_t>(redisNode["workers"], path + ".workers");
   }
@@ -784,7 +793,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
   }
 
   if (hasLegacyRedis) {
-    config.redisBackends.emplace(kDefaultRedisBackendAlias, parseRedisConfig(requireNode(root, "redis", "root"), "root.redis"));
+    config.redisBackends.emplace(kDefaultRedisBackendAlias, parseRedisConfig(requireNode(root, "redis", "root"), "root.redis", configDirectory));
   } else {
     const auto redisBackendsNode = requireMap(requireNode(root, "redis_backends", "root"), "root.redis_backends");
     if (redisBackendsNode.size() == 0u) {
@@ -795,7 +804,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
       if (alias.empty()) {
         fail("root.redis_backends", "backend alias must not be empty");
       }
-      const auto [it, inserted] = config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias));
+      const auto [it, inserted] = config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias, configDirectory));
       if (!inserted) {
         fail("root.redis_backends." + alias, "duplicate redis backend alias '" + alias + "'");
       }

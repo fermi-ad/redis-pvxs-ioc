@@ -1,0 +1,16 @@
+# Replace the placeholder identities with site-owned users before deployment.
+# Unassigned/default endpoints grant no access. Operators cannot reload policy.
+UAG(READERS) { "replace-with-observer", "replace-with-operator", "replace-with-admin" }
+UAG(OPERATORS) { "replace-with-operator" }
+UAG(ADMINS) { "replace-with-admin" }
+
+ASG(DEFAULT) { RULE(0, NONE) }
+ASG(READERS) { RULE(0, READ) { UAG(READERS) } }
+ASG(OPERATORS) {
+  RULE(0, READ) { UAG(READERS) }
+  RULE(0, WRITE, TRAPWRITE) { UAG(OPERATORS) }
+}
+ASG(ADMINS) {
+  RULE(0, READ) { UAG(ADMINS) }
+  RULE(0, WRITE, TRAPWRITE) { UAG(ADMINS) }
+}

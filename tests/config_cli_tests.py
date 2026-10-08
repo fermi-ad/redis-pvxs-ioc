@@ -42,6 +42,20 @@ def main():
         versioned = dict(base, schema_version=1)
         assert check(versioned)["legacy_input"] is False
         unchanged(diff(versioned))
+        defaults = dict(write_workers=4, queued_writes_per_pv=16, queued_write_bytes=67108864,
+                        max_payload_bytes=33554432, alarm_queue_entries=1024, alarm_state_bytes=67108864)
+        unchanged(diff(dict(base, limits=defaults)))
+        check(dict(base, limits=defaults))
+        assert diff(dict(base, limits=dict(defaults, operation_timeout_ms=2000)))["restart_required"] == ["limits"]
+        assert diff(dict(base, limits=dict(defaults, alarm_queue_entries=8)))["restart_required"] == ["limits"]
+        assert diff(dict(base, limits=dict(defaults, alarm_state_bytes=8388608)))["restart_required"] == ["limits"]
+        check(dict(base, limits=dict(alarm_queue_entries=1, alarm_state_bytes=4096)))
+        for invalid in (dict(write_workers=0), dict(queued_writes_per_pv=0), dict(queued_write_bytes=1023),
+                        dict(max_payload_bytes=0), dict(operation_timeout_ms=0), dict(unknown=1),
+                        dict(alarm_queue_entries=0), dict(alarm_state_bytes=1023),
+                        dict(alarm_queue_entries=1, alarm_state_bytes=1024),
+                        dict(alarm_queue_entries=8, alarm_state_bytes=4096)):
+            check(dict(base, limits=invalid), False)
         reordered = copy.deepcopy(versioned)
         reordered["pvs"][0]["aliases"].reverse()
         unchanged(diff(reordered))
@@ -106,7 +120,11 @@ def main():
         assert diff(changed)["replacements"] == ["C:value"]
         changed = copy.deepcopy(base)
         changed["pvs"][0]["aliases"] = ["A:new"]
-        assert diff(changed)["replacements"] == ["C:value"]
+        report = diff(changed)
+        assert report["alias_changes"] == ["C:value"] and not report["replacements"]
+        changed["pvs"][0]["metadata"] = dict(description="retained metadata and alias change")
+        report = diff(changed)
+        assert report["metadata_changes"] == ["C:value"] and not report["replacements"]
         changed = copy.deepcopy(base)
         changed["pvs"][0]["name"] = "renamed"
         report = diff(changed)
@@ -120,6 +138,8 @@ def main():
         assert "secret-that-must-not-appear" not in json.dumps(check(changed))
         changed = copy.deepcopy(base)
         changed["pvs"][0]["aliases"] = ["SYS:offline:config:lastDiff"]
+        check(changed, False)
+        changed["pvs"][0]["aliases"] = ["SYS:offline:config:reloadStatus"]
         check(changed, False)
         changed = copy.deepcopy(base)
         changed["server"]["tcp_port"] = 5100

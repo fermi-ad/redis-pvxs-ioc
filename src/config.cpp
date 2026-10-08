@@ -586,7 +586,7 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
 }
 
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"name", "aliases", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access"});
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -608,8 +608,35 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
     }
   }
 
-  pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
-  pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
+  if (node["kind"]) {
+    const auto kind = lowerCopy(parseString(node["kind"], path + ".kind"));
+    if (kind == "ntndarray") {
+      pv.kind = PVKind::NTNDArray;
+    } else if (kind != "value" && kind != "scalar" && kind != "array") {
+      fail(path + ".kind", "unsupported PV kind '" + kind + "'");
+    }
+  }
+
+  if (pv.kind == PVKind::NTNDArray) {
+    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "max_frame_gap", "access"});
+    pv.type = PrimitiveType::UInt8;
+    pv.shape = Shape::Array;
+    if (node["max_frame_bytes"]) {
+      pv.maxFrameBytes = parseNumeric<uint64_t>(node["max_frame_bytes"], path + ".max_frame_bytes");
+    }
+    if (pv.maxFrameBytes == 0u || pv.maxFrameBytes > 1024ull * 1024u * 1024u) {
+      fail(path + ".max_frame_bytes", "must be 1..1073741824");
+    }
+    if (node["max_frame_gap"]) {
+      pv.maxFrameGap = parseNumeric<uint32_t>(node["max_frame_gap"], path + ".max_frame_gap");
+    }
+    if (pv.maxFrameGap > 2147483646u) fail(path + ".max_frame_gap", "must be 0..2147483646");
+  } else {
+    if (node["max_frame_bytes"]) fail(path + ".max_frame_bytes", "requires kind: ntndarray");
+    if (node["max_frame_gap"]) fail(path + ".max_frame_gap", "requires kind: ntndarray");
+    pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
+    pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
+  }
   pv.read = parseRoute(requireNode(node, "read", path), path + ".read");
 
   if (node["write"]) {
@@ -901,7 +928,14 @@ std::string summarizeConfig(const AppConfig& config) {
   }
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)
-           << " [" << toString(pv.shape) << " " << toString(pv.type) << "]"
+           << " [";
+    if (pv.kind == PVKind::NTNDArray) {
+      stream << toString(pv.kind) << " max_frame_bytes=" << pv.maxFrameBytes
+             << " max_frame_gap=" << pv.maxFrameGap;
+    } else {
+      stream << toString(pv.shape) << " " << toString(pv.type);
+    }
+    stream << "]"
            << " read=" << pv.read.backend << ":" << pv.read.key;
     if (pv.write) {
       stream << " write=" << pv.write->backend << ":" << pv.write->key;
@@ -963,6 +997,14 @@ std::string toString(const Shape shape) {
   return "unknown";
 }
 
+std::string toString(const PVKind kind) {
+  switch (kind) {
+  case PVKind::Value: return "value";
+  case PVKind::NTNDArray: return "ntndarray";
+  }
+  return "unknown";
+}
+
 std::string toString(const DisplayForm form) {
   switch (form) {
   case DisplayForm::Default: return "default";
@@ -995,8 +1037,10 @@ bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs) {
        lhs.confirm->timeoutMs == rhs.confirm->timeoutMs);
 
   return lhs.name == rhs.name &&
+         lhs.kind == rhs.kind &&
          lhs.type == rhs.type &&
          lhs.shape == rhs.shape &&
+         lhs.maxFrameBytes == rhs.maxFrameBytes &&
          lhs.read.backend == rhs.read.backend &&
          lhs.read.key == rhs.read.key &&
          sameOptionalRoute(lhs.write, rhs.write) &&
@@ -1108,6 +1152,9 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "config:lastDiff"),
     adminPVName(server, "config:reloadStatus"),
     adminPVName(server, "stats:pvCount"),
+    adminPVName(server, "stats:ndarrayInvalidFrames"),
+    adminPVName(server, "stats:ndarraySkippedFrames"),
+    adminPVName(server, "stats:ndarrayDiscontinuities"),
     adminPVName(server, "stats:operations"),
     adminPVName(server, "rpc:status"),
     adminPVName(server, "alarms:status"),

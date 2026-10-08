@@ -41,7 +41,30 @@ docker compose \
   --config /etc/redis-pvxs-ioc/config.yaml
 ```
 
-Credentials come only from `CHANNELFINDER_USERNAME` and `CHANNELFINDER_PASSWORD`.
+Credentials come from `CHANNELFINDER_USERNAME` and `CHANNELFINDER_PASSWORD`, or
+their `_FILE` alternatives. For example, set `CHANNELFINDER_PASSWORD_FILE` to a
+mounted secret's path inside the container. Nonempty inline and file inputs for
+the same credential are mutually exclusive; an empty inline environment variable
+counts as unset for Compose compatibility. Username and password must still be
+supplied together. File inputs use the same bounded text-file rules as Redis
+credentials. They are not loaded during `--dry-run`, since it does not authenticate.
+See [Container runtime and secret files](container-runtime.md) for mounts and UID
+permissions. Credential files retain the same prohibition on authenticated redirects.
+
+The publisher uses a 3-second connection timeout, a 10-second total request
+deadline, and a 1 MiB response limit. Override them with
+`--connect-timeout-ms`, `--timeout-ms`, and `--max-response-bytes`. Timeouts must
+be positive and at most 300000 ms; the response cap must be positive and at most
+64 MiB. A shorter total deadline also bounds connection establishment.
+
+Redirects are disabled by default. `--allow-redirects` permits at most three
+HTTPS redirects for unauthenticated publication and preserves the POST method
+and JSON payload. Authenticated publication must use the final URL; combining
+credentials and redirects is rejected before sending a request. URL-embedded
+credentials and non-HTTP(S) protocols are rejected. TLS verification remains
+enabled. Non-2xx responses report their status without echoing server bodies.
+
+`--dry-run` remains offline and does not contact either ChannelFinder or Redis.
 
 ## Published Fields
 

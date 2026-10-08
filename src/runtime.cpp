@@ -104,6 +104,11 @@ public:
   bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
   void activate() override { committed_ = true; }
 
+  void setAlarmPublisher(std::shared_ptr<AlarmPublisher> publisher) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    alarmPublisher_ = std::move(publisher);
+  }
+
   void reconfigure(const PVConfig& config, uint64_t generation) override {
     AlarmState state;
     bool transition = false;
@@ -183,8 +188,12 @@ private:
   }
 
   void publishAlarm(const AlarmState& state, bool changed) {
-    if (changed && alive_.load() && committed_.load() && alarmPublisher_)
-      alarmPublisher_->publishTransition(fullName_, state);
+    std::shared_ptr<AlarmPublisher> publisher;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (changed && alive_.load() && committed_.load()) publisher = alarmPublisher_;
+    }
+    if (publisher) publisher->publishTransition(fullName_, state);
   }
 
   void handleRead(const RedisAdapter::StreamBatch& data, bool updateValue, bool canConfirm) {

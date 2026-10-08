@@ -1,7 +1,30 @@
 # Changelog
 
+## v0.9.0 - unreleased
+
+### Upgrade notes
+
+These changes belong to the v0.9.0 feature stack and are not part of the
+preceding v0.8.2 correctness release.
+
+- Configuration now rejects unknown keys and malformed mappings (#104). Remove
+  ignored or misspelled settings and run `--check-config` before upgrading; see
+  [configuration validation](docs/configuration.md).
+- Configured RPC services are required by default (#117). An unavailable required
+  backend rejects startup or a changed service on reload. Set `optional: true`
+  only when the service may be absent; see [RPC forwarding](docs/rpc-forwarding.md).
+- The container runs as UID `10001` (#118). Ensure mounted configuration,
+  ACF policy, and secret files are readable by that identity, including traversal
+  permissions on parent directories; see [container operations](docs/operations.md)
+  and [access-policy files](docs/access-control.md).
+- RecCeiver discovery is enabled by default and listens on UDP `5049` (#102).
+  Allow the intended discovery traffic, choose a non-conflicting port, or set
+  `discovery.enabled: false`; see [discovery networking](docs/reccaster.md).
+
 ## v0.8.2 - unreleased
 
+- count NTNDArray rollover gaps with serial arithmetic and bound ambiguous ID
+  jumps with `max_frame_gap`; expose a separate discontinuity diagnostic
 - fix native macOS PVA startup by avoiding a second libevent threading state
 - use individually owned upstream redis-adapter subscriptions so replacing or
   rejecting a staged runtime cannot remove another runtime's reader

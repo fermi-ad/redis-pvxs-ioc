@@ -10,6 +10,7 @@
 #include <pvxs/sharedpv.h>
 
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/pv_registry.h"
 
 namespace redis_pvxs_ioc {
 
@@ -20,6 +21,10 @@ struct AccessStatus {
   uint64_t deniedReads = 0;
   uint64_t deniedWrites = 0;
   uint64_t rightsChanges = 0;
+  uint64_t authorizedOperations = 0, operationsInFlight = 0;
+  uint64_t operationsSucceeded = 0, operationsFailed = 0;
+  uint64_t operationsCancelled = 0, operationsAbandoned = 0, operationsDenied = 0;
+  uint64_t denialLogsSuppressed = 0;
   std::string lastStatus = "disabled";
   std::string lastError;
   std::string policyFingerprint;
@@ -39,6 +44,17 @@ public:
                    const std::set<std::string>& requiredAsgs,
                    std::string& error);
   bool restorePrevious(std::string& error);
+  struct PreparedConfiguration;
+  struct PreparedBindings;
+  std::shared_ptr<PreparedConfiguration> prepareConfiguration(
+      const AccessConfig& config, const std::set<std::string>& requiredAsgs);
+  bool activateConfiguration(const std::shared_ptr<PreparedConfiguration>& prepared, std::string& error);
+  void finishConfiguration();
+  std::shared_ptr<PreparedBindings> prepareBindings(const PVBindings& bindings);
+  bool publishBindings(const std::shared_ptr<PreparedBindings>& prepared,
+                       const std::function<bool(std::string&)>& beforeCommit, std::string& error);
+  void finishBindings(const std::shared_ptr<PreparedBindings>& prepared);
+  void clearBindings();
   bool reload(const std::string& trigger, std::string& error);
   void requestReload(const std::string& trigger);
   void pump();
@@ -55,7 +71,7 @@ public:
   struct Impl;
 
 private:
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<Impl> impl_;
 };
 
 // Parse/expand/inspect an ACF without starting a PVA server.  Used by
@@ -65,5 +81,13 @@ bool validateAccessPolicy(const AccessConfig& config,
                           const std::set<std::string>& requiredAsgs,
                           std::string& fingerprint,
                           std::string& error);
+
+// Recheck a queued write's current channel rights immediately before dispatch.
+class OperationAuthorization {
+public:
+  virtual ~OperationAuthorization() = default;
+  virtual bool authorized(const pvxs::Value& value) = 0;
+};
+bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value);
 
 }  // namespace redis_pvxs_ioc

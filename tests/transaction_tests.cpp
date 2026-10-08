@@ -69,7 +69,20 @@ int main() {
   clientConfig.autoAddrList = false;
   auto client = clientConfig.build();
   const auto get = [&](const std::string& name) { return client.get(name).exec()->wait(2.); };
+  const auto report = [&] { return get("SYS:transaction:config:reloadStatus"); };
+  const auto onlyBackend = [&](const pvxs::Value& value, const std::string& field) {
+    const auto result = value["backends." + field].as<pvxs::shared_array<const std::string>>();
+    assert(result.size() == 1);
+    return result[0];
+  };
   assert(get("TEST:old")["value"].as<double>() == 4.);
+  auto status = report();
+  assert(status["kind"].as<std::string>() == "startup" && status["committed"].as<bool>());
+  assert(status["attempt"].as<uint64_t>() == 1 && status["schemaVersion"].as<uint64_t>() == 1);
+  assert(status["added"].as<uint64_t>() == 2 && status["retained"].as<uint64_t>() == 0);
+  assert(status["durationMs"].as<double>() >= 0);
+  assert(onlyBackend(status, "action") == "created" && onlyBackend(status, "preconnect") == "connected");
+  assert(onlyBackend(status, "cutover") == "active");
   eventually([&] {
     app.pump();
     return get("SYS:transaction:alarms:status")["state"].as<std::string>() == "ready";
@@ -102,6 +115,15 @@ int main() {
   writeConfig(true); writePolicy(false);
   app.requestReload(); app.pump();
   assert(get("SYS:transaction:config:generation")["value"].as<int64_t>() == 1);
+  status = report();
+  assert(status["attempt"].as<uint64_t>() == 2 && status["state"].as<std::string>() == "rejected");
+  assert(status["phase"].as<std::string>() == "policy" && !status["committed"].as<bool>());
+  assert(status["activeGeneration"].as<uint64_t>() == 1 && status["candidateGeneration"].as<uint64_t>() == 2);
+  assert(status["diffKnown"].as<bool>() && !status["error"].as<std::string>().empty());
+  assert(status["added"].as<uint64_t>() == 1 && status["removed"].as<uint64_t>() == 1);
+  assert(status["recreated"].as<uint64_t>() == 0 && status["retained"].as<uint64_t>() == 1);
+  assert(status["metadataChanged"].as<uint64_t>() == 1 && status["aliasesChanged"].as<uint64_t>() == 1);
+  assert(onlyBackend(status, "action") == "retained" && onlyBackend(status, "cutover") == "previous-preserved");
   assert(get("SYS:transaction:access:policyFingerprint")["value"].as<std::string>() == fingerprint);
   assert(get("TEST:keep")["display.description"].as<std::string>() == "old");
   assert(get("TEST:old")["value"].as<double>() == 4.);
@@ -121,11 +143,35 @@ int main() {
   writePolicy(true);
   app.requestReload(); app.pump();
   assert(get("SYS:transaction:config:generation")["value"].as<int64_t>() == 2);
+  status = report();
+  assert(status["attempt"].as<uint64_t>() == 3 && status["state"].as<std::string>() == "committed");
+  assert(status["activeGeneration"].as<uint64_t>() == 2 && status["candidateGeneration"].as<uint64_t>() == 2);
+  assert(status["committed"].as<bool>() && status["error"].as<std::string>().empty());
+  assert(onlyBackend(status, "cutover") == "active");
   observe(10.); // canonical monitor survives alias removal and metadata cutover
   assert(get("TEST:new")["value"].as<double>() == 10.);
   assert(get("TEST:added")["value"].as<double>() == 9.);
   assert(get("TEST:keep")["display.description"].as<std::string>() == "new");
   assert(producer.addSingleDouble("read", 6.).ok()); observe(12.);
+  {
+    std::ofstream output(configFile); output << "server: [ invalid\n";
+  }
+  app.requestReload(); app.pump();
+  status = report();
+  assert(status["attempt"].as<uint64_t>() == 4 && status["state"].as<std::string>() == "failed");
+  assert(!status["diffKnown"].as<bool>() && status["phase"].as<std::string>() == "parse");
+  assert(status["activeGeneration"].as<uint64_t>() == 2 && !status["committed"].as<bool>());
+  assert(status["added"].as<uint64_t>() == 0 && status["metadataChanged"].as<uint64_t>() == 0);
+  assert(status["backends.name"].as<pvxs::shared_array<const std::string>>().empty());
+  assert(get("SYS:transaction:config:lastDiff")["value"].as<std::string>() == "{}");
+  assert(get("TEST:keep")["value"].as<double>() == 12.);
+  writeConfig(true);
+  app.requestReload(); app.pump();
+  status = report();
+  assert(status["attempt"].as<uint64_t>() == 5 && status["activeGeneration"].as<uint64_t>() == 3);
+  assert(status["state"].as<std::string>() == "committed" && status["error"].as<std::string>().empty());
+  assert(status["added"].as<uint64_t>() == 0 && status["retained"].as<uint64_t>() == 2);
+  assert(status["recreated"].as<uint64_t>() == 0 && status["metadataChanged"].as<uint64_t>() == 0);
   monitor.reset(); client.close(); app.stop();
   std::filesystem::remove(configFile); std::filesystem::remove(policyFile); std::filesystem::remove(directory);
 }

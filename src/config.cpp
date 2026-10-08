@@ -1080,6 +1080,7 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "config:lastStatus"),
     adminPVName(server, "config:lastError"),
     adminPVName(server, "config:lastDiff"),
+    adminPVName(server, "config:reloadStatus"),
     adminPVName(server, "stats:pvCount"),
     adminPVName(server, "stats:operations"),
     adminPVName(server, "alarms:status"),

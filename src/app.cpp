@@ -71,6 +71,19 @@ void openStringPV(pvxs::server::SharedPV& pv,
   pv.open(value);
 }
 
+struct BackendPreparation {
+  std::string name, action, preconnect = "not-tested", cutover = "pending";
+};
+struct ReloadStatus {
+  uint64_t attempt = 0, candidateGeneration = 0, activeGeneration = 0;
+  uint64_t schemaVersion = 0, added = 0, removed = 0, recreated = 0, retained = 0;
+  uint64_t metadataChanged = 0, aliasesChanged = 0, accessChanged = 0;
+  bool diffKnown = false, committed = false;
+  std::string kind, state = "idle", phase, error;
+  double durationMs = 0;
+  std::vector<BackendPreparation> backends;
+};
+
 class AdminNamespace : public std::enable_shared_from_this<AdminNamespace> {
 public:
   explicit AdminNamespace(const ServerConfig& serverConfig, const bool accessConfigured)
@@ -111,6 +124,20 @@ public:
     discoveryName_ = adminPVName(serverConfig, "discovery:status");
     using pvxs::TypeCode;
     using pvxs::Member;
+    reloadStatusName_ = adminPVName(serverConfig, "config:reloadStatus");
+    reloadStatus_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:reload:1.0", {
+      Member(TypeCode::UInt64, "attempt"), Member(TypeCode::UInt64, "candidateGeneration"),
+      Member(TypeCode::UInt64, "activeGeneration"), Member(TypeCode::UInt64, "schemaVersion"),
+      Member(TypeCode::String, "kind"), Member(TypeCode::String, "state"),
+      Member(TypeCode::String, "phase"), Member(TypeCode::String, "error"),
+      Member(TypeCode::Float64, "durationMs"), Member(TypeCode::Bool, "diffKnown"),
+      Member(TypeCode::Bool, "committed"), Member(TypeCode::UInt64, "added"),
+      Member(TypeCode::UInt64, "removed"), Member(TypeCode::UInt64, "recreated"),
+      Member(TypeCode::UInt64, "retained"), Member(TypeCode::UInt64, "metadataChanged"),
+      Member(TypeCode::UInt64, "aliasesChanged"), Member(TypeCode::UInt64, "accessChanged"),
+      Member(TypeCode::Struct, "backends", {
+        Member(TypeCode::StringA, "name"), Member(TypeCode::StringA, "action"),
+        Member(TypeCode::StringA, "preconnect"), Member(TypeCode::StringA, "cutover")})}).create());
     operationsName_ = adminPVName(serverConfig, "stats:operations");
     operations_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:operations:1.0", {
       Member(TypeCode::UInt64, "accepted"), Member(TypeCode::UInt64, "finished"),
@@ -235,6 +262,28 @@ public:
 
   void setLastDiff(const std::string& diff) { setAdminScalar(lastDiff_, diff); }
 
+  void setReloadStatus(const ReloadStatus& status) {
+    auto value = reloadStatus_.fetch();
+    value["attempt"] = status.attempt; value["candidateGeneration"] = status.candidateGeneration;
+    value["activeGeneration"] = status.activeGeneration; value["schemaVersion"] = status.schemaVersion;
+    value["kind"] = status.kind; value["state"] = status.state; value["phase"] = status.phase;
+    value["error"] = status.error; value["durationMs"] = status.durationMs;
+    value["diffKnown"] = status.diffKnown; value["committed"] = status.committed;
+    value["added"] = status.added; value["removed"] = status.removed;
+    value["recreated"] = status.recreated; value["retained"] = status.retained;
+    value["metadataChanged"] = status.metadataChanged; value["aliasesChanged"] = status.aliasesChanged;
+    value["accessChanged"] = status.accessChanged;
+    pvxs::shared_array<std::string> names(status.backends.size()), actions(status.backends.size());
+    pvxs::shared_array<std::string> preconnect(status.backends.size()), cutover(status.backends.size());
+    for (size_t i = 0; i < status.backends.size(); ++i) {
+      names[i] = status.backends[i].name; actions[i] = status.backends[i].action;
+      preconnect[i] = status.backends[i].preconnect; cutover[i] = status.backends[i].cutover;
+    }
+    value["backends.name"] = names.freeze(); value["backends.action"] = actions.freeze();
+    value["backends.preconnect"] = preconnect.freeze(); value["backends.cutover"] = cutover.freeze();
+    reloadStatus_.post(value);
+  }
+
   void setOperations(const OperationQueueStats& stats, const OperationLimitsConfig& limits) {
     auto value = operations_.fetch();
     value["accepted"] = stats.accepted; value["finished"] = stats.completed;
@@ -280,6 +329,7 @@ public:
       bindings.emplace(name, PVBinding{pv, shared_from_this(), assignment});
     };
     add(lastDiffName_, lastDiff_, defaults.adminRead);
+    add(reloadStatusName_, reloadStatus_, defaults.adminRead);
     add(operationsName_, operations_, defaults.adminRead);
     add(alarmName_, alarms_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
@@ -361,6 +411,8 @@ private:
   std::atomic<bool> accessReloadRequested_{false};
   pvxs::server::SharedPV lastDiff_ = pvxs::server::SharedPV::buildReadonly();
   std::string lastDiffName_;
+  pvxs::server::SharedPV reloadStatus_ = pvxs::server::SharedPV::buildReadonly();
+  std::string reloadStatusName_;
   pvxs::server::SharedPV operations_ = pvxs::server::SharedPV::buildReadonly();
   std::string operationsName_;
   pvxs::server::SharedPV alarms_ = pvxs::server::SharedPV::buildReadonly();
@@ -428,17 +480,24 @@ std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {
 
 RedisBackendRegistry buildRedisBackends(const AppConfig& config,
                                        const AppConfig& previous,
-                                       const RedisBackendRegistry& existing) {
+                                       const RedisBackendRegistry& existing,
+                                       std::vector<BackendPreparation>& outcomes) {
   RedisBackendRegistry backends;
   for (const auto& entry : config.redisBackends) {
     const auto old = previous.redisBackends.find(entry.first);
     const auto runtime = existing.find(entry.first);
-    if (old != previous.redisBackends.end() && runtime != existing.end() &&
-        sameRedisConfig(entry.second, old->second))
-      backends.emplace(entry.first, runtime->second);
-    else
-      backends.emplace(entry.first, buildRedisAdapter(entry.second));
+    const bool retained = old != previous.redisBackends.end() && runtime != existing.end() &&
+        sameRedisConfig(entry.second, old->second);
+    outcomes.push_back({entry.first, retained ? "retained" : "created"});
+    auto& outcome = outcomes.back();
+    try {
+      const auto backend = retained ? runtime->second : buildRedisAdapter(entry.second);
+      outcome.preconnect = backend->connected() ? "connected" : "disconnected";
+      backends.emplace(entry.first, backend);
+    } catch (...) { outcome.preconnect = "failed"; throw; }
   }
+  for (const auto& entry : existing)
+    if (!config.redisBackends.count(entry.first)) outcomes.push_back({entry.first, "removed", "not-applicable"});
   return backends;
 }
 
@@ -647,6 +706,65 @@ struct Application::Impl {
   AssignmentMap rpcAssignments;
   RpcServices rpcServices;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
+  ReloadStatus reload;
+  std::chrono::steady_clock::time_point reloadStarted;
+
+  void publishReload() {
+    reload.durationMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - reloadStarted).count();
+    if (admin) admin->setReloadStatus(reload);
+  }
+  void beginReload(const std::string& kind) {
+    const auto attempt = reload.attempt + 1;
+    reload = ReloadStatus{};
+    reload.attempt = attempt; reload.kind = kind; reload.state = "running"; reload.phase = "parse";
+    reload.activeGeneration = generation; reload.candidateGeneration = generation + 1;
+    reloadStarted = std::chrono::steady_clock::now();
+    if (admin) admin->setLastDiff("{}");
+    publishReload();
+  }
+  void reloadPhase(const std::string& phase) { reload.phase = phase; publishReload(); }
+  void describeReload(const AppConfig& config) {
+    const auto diff = diffConfigs(currentConfig, config);
+    reload.diffKnown = true; reload.schemaVersion = config.schemaVersion;
+    reload.added = diff.added.size(); reload.removed = diff.removed.size();
+    reload.recreated = diff.replaced.size();
+    reload.retained = config.pvs.size() - reload.added - reload.recreated;
+    reload.metadataChanged = diff.metadataChanged.size(); reload.aliasesChanged = diff.aliasesChanged.size();
+    reload.accessChanged = diff.accessChanged.size();
+    if (admin) admin->setLastDiff(formatConfigDiff(diff, true));
+    reloadPhase("validate");
+  }
+  void finishReload(bool accepted, const std::string& error) {
+    if (!error.empty()) reload.error = error;
+    reload.committed = accepted; reload.activeGeneration = generation;
+    reload.state = accepted ? (reload.error.empty() ? "committed" : "committed-with-error")
+                            : (reload.diffKnown ? "rejected" : "failed");
+    if (accepted && reload.error.empty()) reload.phase = "complete";
+    for (auto& outcome : reload.backends) {
+      if (accepted) outcome.cutover = outcome.action == "removed" ? "removed" : "active";
+      else outcome.cutover = redisBackends.count(outcome.name) ? "previous-preserved" : "not-activated";
+    }
+    publishReload();
+    std::ostringstream log;
+    log << "{\"event\":\"configuration\",\"attempt\":" << reload.attempt
+        << ",\"kind\":" << quoteJson(reload.kind) << ",\"state\":" << quoteJson(reload.state)
+        << ",\"phase\":" << quoteJson(reload.phase) << ",\"schema_version\":" << reload.schemaVersion
+        << ",\"active_generation\":" << reload.activeGeneration << ",\"candidate_generation\":" << reload.candidateGeneration
+        << ",\"duration_ms\":" << reload.durationMs << ",\"diff_known\":" << (reload.diffKnown ? "true" : "false")
+        << ",\"added\":" << reload.added << ",\"removed\":" << reload.removed
+        << ",\"recreated\":" << reload.recreated << ",\"retained\":" << reload.retained
+        << ",\"metadata_changes\":" << reload.metadataChanged << ",\"alias_changes\":" << reload.aliasesChanged
+        << ",\"access_changes\":" << reload.accessChanged << ",\"error\":" << quoteJson(reload.error) << ",\"backends\":[";
+    bool first = true;
+    for (const auto& backend : reload.backends) {
+      if (!first) log << ',';
+      first = false;
+      log << "{\"name\":" << quoteJson(backend.name) << ",\"action\":" << quoteJson(backend.action)
+          << ",\"preconnect\":" << quoteJson(backend.preconnect) << ",\"cutover\":" << quoteJson(backend.cutover) << '}';
+    }
+    std::fprintf(stderr, "[redis-pvxs-ioc] %s]}\n", log.str().c_str());
+  }
 };
 
 Application::Application(std::string configPath)
@@ -684,20 +802,27 @@ bool Application::validateOnly(std::string& summary, std::string& error, AppConf
 }
 
 bool Application::start(std::string& error) {
+  impl_->beginReload("startup");
   try {
     const auto config = loadConfigFile(configPath_);
+    impl_->describeReload(config);
     impl_->operations = std::make_shared<OperationQueue>(OperationQueueLimits{
         config.limits.writeWorkers, config.limits.queuedWritesPerPV, static_cast<size_t>(config.limits.queuedWriteBytes)});
     impl_->server = buildServerConfig(config).build();
     if (config.access.enabled) {
+      impl_->reloadPhase("policy");
       impl_->access = std::make_shared<AccessController>(config.access);
-      if (!impl_->access->start(requiredAccessAsgs(config), error)) return false;
+      if (!impl_->access->start(requiredAccessAsgs(config), error)) {
+        impl_->finishReload(false, error);
+        return false;
+      }
       impl_->server.addSource("access", impl_->access->source());
     }
     impl_->admin = std::make_shared<AdminNamespace>(config.server, config.access.enabled);
     if (!impl_->access) impl_->server.addSource("registry", impl_->registry);
     impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     if (!applyConfig(config, true, error)) {
+      impl_->finishReload(false, error);
       return false;
     }
     impl_->server.start();
@@ -707,9 +832,11 @@ bool Application::start(std::string& error) {
       impl_->admin->setDiscoveryStatus(impl_->discovery->status());
     }
     started_ = true;
+    impl_->finishReload(true, {});
     return true;
   } catch (const std::exception& ex) {
     error = ex.what();
+    impl_->finishReload(impl_->hasConfig, error);
     return false;
   }
 }
@@ -731,18 +858,22 @@ void Application::pump() {
   }
 
   if (reloadRequested_.exchange(false)) {
+    impl_->beginReload("reload");
     try {
       auto config = loadConfigFile(configPath_);
       std::string error;
-      if (!applyConfig(config, false, error) && impl_->admin) {
+      const bool accepted = applyConfig(config, false, error);
+      if (!accepted && impl_->admin) {
         impl_->admin->setStatus("reload rejected");
         impl_->admin->setError(error);
       }
+      impl_->finishReload(accepted, error);
     } catch (const std::exception& ex) {
       if (impl_->admin) {
         impl_->admin->setStatus("reload failed");
         impl_->admin->setError(ex.what());
       }
+      impl_->finishReload(impl_->generation == impl_->reload.candidateGeneration, ex.what());
     }
   }
 
@@ -786,8 +917,7 @@ void Application::stop() {
 }
 
 bool Application::applyConfig(const AppConfig& config, const bool initialLoad, std::string& error) {
-  if (!initialLoad && impl_->hasConfig && impl_->admin)
-    impl_->admin->setLastDiff(formatConfigDiff(diffConfigs(impl_->currentConfig, config), true));
+  impl_->describeReload(config);
   if (!initialLoad && !sameOperationLimits(impl_->currentConfig.limits, config.limits)) {
     error = "operation limits are immutable after startup; restart is required";
     return false;
@@ -815,7 +945,9 @@ bool Application::applyGeneration(const AppConfig& config,
   bool committed = false;
   try {
     AppConfig nextConfig = config;
-    auto nextBackends = buildRedisBackends(config, impl_->currentConfig, impl_->redisBackends);
+    impl_->reloadPhase("backends");
+    auto nextBackends = buildRedisBackends(config, impl_->currentConfig, impl_->redisBackends, impl_->reload.backends);
+    impl_->reloadPhase("runtimes");
     const auto priorAlarm = impl_->currentConfig.redisBackends.find(config.alarms.backend);
     const bool reuseAlarm = impl_->hasConfig &&
         sameAlarmStreamConfig(impl_->currentConfig.alarms, config.alarms) &&
@@ -846,6 +978,7 @@ bool Application::applyGeneration(const AppConfig& config,
     }
     AssignmentMap nextRpcAssignments;
     RpcServices nextRpcServices;
+    impl_->reloadPhase("rpc");
     auto nextRpcs = buildRpcPVs(config, nextRpcAssignments, impl_->rpcServices, nextRpcServices);
     auto nextCatalog = buildDiscoveryCatalog(config, nextRpcs, impl_->server.config().tcp_port, generation);
 
@@ -866,6 +999,7 @@ bool Application::applyGeneration(const AppConfig& config,
     std::shared_ptr<AccessController::PreparedConfiguration> policy;
     std::shared_ptr<AccessController::PreparedBindings> secured;
     std::shared_ptr<PVRegistry::Prepared> plain;
+    impl_->reloadPhase("policy");
     if (impl_->access) {
       if (impl_->hasConfig) policy = impl_->access->prepareConfiguration(config.access, requiredAccessAsgs(config));
       secured = impl_->access->prepareBindings(bindings);
@@ -901,6 +1035,7 @@ bool Application::applyGeneration(const AppConfig& config,
     impl_->generation = generation;
     impl_->hasConfig = true;
     try {
+      impl_->reloadPhase("refresh");
       if (secured) impl_->access->finishBindings(secured);
       else impl_->registry->finish(plain);
       for (const auto& runtime : retired) runtime->deactivate("generation retired");
@@ -923,6 +1058,7 @@ bool Application::applyGeneration(const AppConfig& config,
       impl_->admin->setGeneration(generation);
       impl_->admin->setStatus("generation active; refresh failed");
       impl_->admin->setError(ex.what());
+      impl_->reload.error = ex.what();
     }
     error.clear();
     return true;

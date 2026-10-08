@@ -76,8 +76,11 @@ def main():
                 ioc = subprocess.Popen([args.ioc, "--config", str(path)], stdout=log, stderr=subprocess.STDOUT)
 
                 def get(name):
-                    return subprocess.check_output([args.pvxget, "-w", "1", name], env=environment,
-                                                   text=True, stderr=subprocess.STDOUT, timeout=3)
+                    result = subprocess.run([args.pvxget, "-w", "1", name], env=environment,
+                                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3)
+                    if result.returncode:
+                        raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout)
+                    return result.stdout
 
                 def wait_for(predicate, description, timeout=6):
                     deadline = time.monotonic() + timeout
@@ -121,12 +124,20 @@ def main():
                     assert "value double = 4" in get("TEST:keep")
                     assert "value double = 4" in get("TEST:keepAlias")
                     assert "value double = 42" in get("TEST:other")
+                    report = get("SYS:reload:config:reloadStatus")
+                    assert 'state string = "committed"' in report, report
+                    assert f"recreated uint64_t = {1 if generation == 2 else 0}" in report, report
+                    assert f"retained uint64_t = {1 if generation == 2 else 2}" in report, report
+                    if generation == 2:
+                        assert '"created"' in report and '"retained"' in report, report
                     config = changed
                 publish("reload-stable", "read", 9.)
                 wait_for(lambda: "value double = 9" in get("TEST:keep"), "reader still receives updates")
                 print("backend and alarm reloads preserve unchanged cached values, alias puts and readers")
-            except Exception:
+            except Exception as error:
                 print((directory / "ioc.log").read_text(), file=sys.stderr)
+                if isinstance(error, subprocess.CalledProcessError):
+                    print(error.output, file=sys.stderr)
                 raise
             finally:
                 stop(pending)

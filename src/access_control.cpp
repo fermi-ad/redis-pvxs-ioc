@@ -747,7 +747,11 @@ struct AccessOperation {
   }
   ~AccessOperation() { finish("abandoned"); }
   void finish(const char* outcome) noexcept {
-    if (done.exchange(true)) return;
+    if (claim()) complete(outcome);
+  }
+  // Exactly one caller wins the right to record this operation's completion.
+  bool claim() noexcept { return !done.exchange(true); }
+  void complete(const char* outcome) noexcept {
     auto& owner = state->owner;
     --owner.operationsInFlight;
     if (std::strcmp(outcome, "success") == 0) ++owner.operationsSucceeded;
@@ -783,9 +787,13 @@ public:
     // Rights changed after admission. Record the refusal under the admitted
     // audit id so it is not mistaken for a later backend error, then close the
     // operation as denied; the caller's PVA error reply cannot reclassify it.
+    // If a cancellation completed the operation first, the denial did not
+    // decide its outcome, so record it like an admission denial instead of
+    // appending a record after that operation's completion.
+    const bool open = audit_->claim();
     state_->owner.recordDenied(*state_, true, std::strcmp(audit_->operation, "rpc") == 0 ? nullptr : &value,
-                               audit_->operation, audit_->trap ? audit_->id : 0);
-    audit_->finish("denied");
+                               audit_->operation, open && audit_->trap ? audit_->id : 0);
+    if (open) audit_->complete("denied");
     return false;
   }
 private:

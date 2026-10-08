@@ -21,6 +21,10 @@ struct AccessStatus {
   uint64_t deniedReads = 0;
   uint64_t deniedWrites = 0;
   uint64_t rightsChanges = 0;
+  uint64_t authorizedOperations = 0, operationsInFlight = 0;
+  uint64_t operationsSucceeded = 0, operationsFailed = 0;
+  uint64_t operationsCancelled = 0, operationsAbandoned = 0, operationsDenied = 0;
+  uint64_t denialLogsSuppressed = 0;
   std::string lastStatus = "disabled";
   std::string lastError;
   std::string policyFingerprint;

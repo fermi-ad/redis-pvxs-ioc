@@ -51,6 +51,9 @@ offline difference command.
 | `write_workers` | `4` | 1–64 |
 | `queued_writes_per_pv` | `16` | 1–4096, shared by canonical name and aliases |
 | `queued_write_bytes` | `67108864` | 1024–1073741824 bytes, including active reservations |
+| `rpc_workers` | `4` | 1–64 workers, separate from write workers |
+| `queued_rpc_per_method` | `16` | 1–4096 waiting calls per served RPC name, in addition to one active call |
+| `queued_rpc_bytes` | `67108864` | 1024–1073741824 bytes, including active argument/bookkeeping reservations |
 | `max_payload_bytes` | `33554432` | 1–1073741824 bytes per scalar/array payload |
 | `operation_timeout_ms` | derived | 1–300000; omitted uses max(5000, confirmation timeout + 2000) |
 | `alarm_queue_entries` | `1024` | 1–1000000 transitions; each reserves 1024 bytes |
@@ -322,13 +325,34 @@ rpc_services:
   - endpoint: query-server:50051
     service: example.query.v1.Query
     suffix: _RPC
+    optional: false
+    discovery_timeout_ms: 3000
+    timeout_ms: 10000
+    retry_interval_ms: 5000
     defaults:
       window_ns: 1000000000
+    method_defaults:
+      Average:
+        window_ns: 2000000000
 ```
 
-`endpoint` and fully qualified `service` are required and non-empty. `suffix`
-and string-valued `defaults` are optional. The backend must expose gRPC server
-reflection. See [`rpc-forwarding.md`](rpc-forwarding.md).
+`endpoint` and fully qualified `service` are required and non-empty. The backend
+must expose gRPC server reflection. Services are required unless `optional: true`
+is explicit: unavailable required services reject startup or a changed service
+on reload. Unchanged discovered services keep their endpoints during an outage.
+
+`discovery_timeout_ms` and `timeout_ms` accept 1–300000 ms; the latter is the total
+call budget, including queue time. An unavailable optional service retries
+reflection in the background after `retry_interval_ms` (100–300000 ms). Invalid
+schemas, defaults or name collisions require correction and a configuration
+reload. Optional does not suppress validation errors.
+
+Shared `defaults` must match at least one method and apply to methods containing
+that field. `method_defaults` uses exact protobuf method names and overrides the
+shared defaults. Per-call arguments then override defaults by canonical field
+path. Unknown or ambiguous fields and invalid values are errors. Offline checks
+validate the configuration shape; reflected-schema validation needs the backend.
+See [`rpc-forwarding.md`](rpc-forwarding.md) for supported shapes and limits.
 
 ## Reserved names
 

@@ -40,6 +40,10 @@ jobs:
       - name: Install macOS build tools
         if: runner.os == 'macOS'
         run: brew install cmake readline redis
+      - name: Install optional integrations for sanitizer coverage
+        if: matrix.sanitizer != 'none'
+        run: |
+          sudo apt-get install -y libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc libcurl4-openssl-dev
       - name: Build pinned EPICS dependencies
         run: |
           make -C third_party/epics-base configure.install src.install -j4
@@ -47,14 +51,15 @@ jobs:
           printf 'EPICS_BASE=%s/third_party/epics-base\n' "$PWD" > third_party/pvxs/configure/RELEASE.local
           make -C third_party/pvxs/bundle libevent
           make -C third_party/pvxs configure.install setup.install src.install tools.install -j4
-      - name: Configure and build minimal service
+      - name: Configure and build service
         env:
           SANITIZERS: ${{ matrix.sanitizer }}
+          INTEGRATIONS: ${{ matrix.sanitizer == 'none' && 'OFF' || 'ON' }}
         run: |
           flags=""
           if test "$SANITIZERS" != none; then flags="-fsanitize=$SANITIZERS -fno-omit-frame-pointer"; fi
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
-            -DREDIS_PVXS_IOC_ENABLE_GRPC=OFF -DREDIS_PVXS_IOC_ENABLE_CHANNELFINDER=OFF \
+            -DREDIS_PVXS_IOC_ENABLE_GRPC="$INTEGRATIONS" -DREDIS_PVXS_IOC_ENABLE_CHANNELFINDER="$INTEGRATIONS" \
             -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_C_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="$flags"
           cmake --build build -j4
       - name: Test native runtime and access control

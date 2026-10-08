@@ -95,8 +95,13 @@ bool AlarmPublisher::ensureConnected() {
     return true;
   }
   resetConnection();
-  context_ = redisConnect(host_.c_str(), port_);
+  const timeval timeout{0, 500000};
+  context_ = redisConnectWithTimeout(host_.c_str(), port_, timeout);
   if (context_ == nullptr || context_->err != 0) {
+    resetConnection();
+    return false;
+  }
+  if (redisSetTimeout(context_, timeout) != REDIS_OK) {
     resetConnection();
     return false;
   }

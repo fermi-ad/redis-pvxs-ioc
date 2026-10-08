@@ -1,3 +1,7 @@
+// ExecOp forwarding requires the complete Timer type from the pinned PVXS API.
+#ifndef PVXS_ENABLE_EXPERT_API
+#define PVXS_ENABLE_EXPERT_API
+#endif
 #include "redis_pvxs_ioc/access_control.h"
 
 #include <algorithm>
@@ -705,6 +709,34 @@ std::vector<std::shared_ptr<ChannelState>> AccessMember::liveClients() {
   return live;
 }
 
+class AuthorizedExecOp final : public pvxs::server::ExecOp {
+public:
+  AuthorizedExecOp(std::unique_ptr<pvxs::server::ExecOp> target, std::shared_ptr<ChannelState> state)
+      : ExecOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
+        target_(std::move(target)), state_(std::move(state)) {}
+  void reply() override { target_->reply(); }
+  void reply(const pvxs::Value& value) override { target_->reply(value); }
+  void error(const std::string& message) override { target_->error(message); }
+  void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
+  void onCancel(std::function<void()>&& fn) override { target_->onCancel(std::move(fn)); }
+  bool authorize(const pvxs::Value& value) {
+    if ((state_->loadRights() & kWrite) != 0u) return true;
+    state_->owner.recordDenied(*state_, true, &value);
+    return false;
+  }
+private:
+  pvxs::Timer _timerOneShot(double delay, std::function<void()>&& fn) override {
+#ifdef PVXS_EXPERT_API_ENABLED
+    return target_->timerOneShot(delay, std::move(fn));
+#else
+    (void)delay; (void)fn;
+    throw std::logic_error("PVXS expert timer API is unavailable");
+#endif
+  }
+  std::unique_ptr<pvxs::server::ExecOp> target_;
+  std::shared_ptr<ChannelState> state_;
+};
+
 class AuthorizedConnectOp final : public pvxs::server::ConnectOp {
 public:
   AuthorizedConnectOp(std::unique_ptr<pvxs::server::ConnectOp> target,
@@ -751,7 +783,7 @@ public:
         return;
       }
       if ((rights & kTrapWrite) != 0u) state->owner.recordAudit(*state, value);
-      fn(std::move(op), std::move(value));
+      fn(std::make_unique<AuthorizedExecOp>(std::move(op), state), std::move(value));
     });
   }
 
@@ -793,7 +825,7 @@ public:
         return;
       }
       if ((rights & kTrapWrite) != 0u) state->owner.recordAudit(*state, value);
-      fn(std::move(op), std::move(value));
+      fn(std::make_unique<AuthorizedExecOp>(std::move(op), state), std::move(value));
     });
   }
 
@@ -861,6 +893,11 @@ private:
 };
 
 }  // namespace
+
+bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value) {
+  auto* authorized = dynamic_cast<AuthorizedExecOp*>(&operation);
+  return !authorized || authorized->authorize(value);
+}
 
 void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& state) {
   std::lock_guard<std::mutex> guard(mutex);

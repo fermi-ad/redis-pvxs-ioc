@@ -16,6 +16,7 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:config:lastStatus` | string/read | Active/rejected/failed status |
 | `SYS:<instance>:config:lastError` | string/read | Last reload error; empty after success |
 | `SYS:<instance>:stats:pvCount` | int64/read | Configured Redis-backed and RPC PV count |
+| `SYS:<instance>:stats:operations` | structure/read | Write queue counts, reservations, peaks and configured limits |
 | `SYS:<instance>:backend:health` | string/read | `<connected>/<total> connected`, with disconnected aliases when applicable |
 | `SYS:<instance>:access:reload` | int64/write | Request an ACF-only reload |
 | `SYS:<instance>:access:enabled` | bool/read | Startup access-control state |
@@ -68,6 +69,30 @@ When access control is enabled, whole-config reload also rereads and activates
 the ACF. `SYS:<instance>:access:reload` reloads only that policy, and an optional
 settled file watcher can do the same automatically. Access enablement cannot
 change through reload. See [Access control](access-control.md).
+
+## Write operations
+
+Write operations run on a bounded worker pool. Canonical PVs and their aliases
+share one serial queue. The default is one active write plus at most 16 queued
+writes per canonical PV, a 64 MiB aggregate payload reservation and a 32 MiB
+payload limit. Reservations include active operations and charge at least 256
+bytes per operation. They measure payload/bookkeeping reservations, not total
+process RSS. `stats:operations` reports accepted and finished executor tasks,
+overloads, deadline expirations, cancellations, current queue/running counts and
+reservation peaks; a finished task is not necessarily a successful backend write.
+
+Cancellation before dispatch prevents the Redis write. Rights are checked again
+at dispatch. A cancellation or deadline after dispatch cannot undo a command
+Redis may have accepted. The IOC does not replay it, and the next write for that
+PV waits for the underlying worker to finish. Readback confirmation still uses
+the configured wait (250 ms by default); value matching establishes an observed
+readback rather than command causality.
+
+The total operation deadline includes queue time. If omitted, it is the larger
+of five seconds and the configured confirmation wait plus two seconds. See
+[`limits`](configuration.md#operation-limits) for overrides. PVA callbacks do not
+wait for Redis or confirmation. Alarm socket connection and I/O waits are bounded
+to 500 ms; asynchronous alarm reconciliation remains a separate #4 requirement.
 
 ## Container verification
 

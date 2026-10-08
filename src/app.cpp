@@ -32,6 +32,7 @@
 #include "redis_pvxs_ioc/rpc_pv.h"
 #endif
 #include "redis_pvxs_ioc/runtime.h"
+#include "redis_pvxs_ioc/operation_queue.h"
 #include "redis_pvxs_ioc/util.h"
 #include "redis_pvxs_ioc/version.h"
 
@@ -110,6 +111,15 @@ public:
     discoveryName_ = adminPVName(serverConfig, "discovery:status");
     using pvxs::TypeCode;
     using pvxs::Member;
+    operationsName_ = adminPVName(serverConfig, "stats:operations");
+    operations_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:operations:1.0", {
+      Member(TypeCode::UInt64, "accepted"), Member(TypeCode::UInt64, "finished"),
+      Member(TypeCode::UInt64, "overloaded"), Member(TypeCode::UInt64, "expired"),
+      Member(TypeCode::UInt64, "cancelled"), Member(TypeCode::UInt64, "queued"),
+      Member(TypeCode::UInt64, "running"), Member(TypeCode::UInt64, "residentBytes"),
+      Member(TypeCode::UInt64, "peakBytes"), Member(TypeCode::UInt64, "byteLimit"),
+      Member(TypeCode::UInt64, "payloadLimit"), Member(TypeCode::UInt32, "workers"),
+      Member(TypeCode::UInt32, "queuedPerPV")}).create());
     auto discoveryValue = pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:discovery:1.0", {
       Member(TypeCode::String, "state"), Member(TypeCode::String, "peer"), Member(TypeCode::String, "lastError"),
       Member(TypeCode::UInt64, "desiredGeneration"), Member(TypeCode::UInt64, "synchronizedGeneration"),
@@ -214,6 +224,19 @@ public:
 
   void setLastDiff(const std::string& diff) { setAdminScalar(lastDiff_, diff); }
 
+  void setOperations(const OperationQueueStats& stats, const OperationLimitsConfig& limits) {
+    auto value = operations_.fetch();
+    value["accepted"] = stats.accepted; value["finished"] = stats.completed;
+    value["overloaded"] = stats.overloaded; value["expired"] = stats.expired;
+    value["cancelled"] = stats.cancelled; value["queued"] = static_cast<uint64_t>(stats.queued);
+    value["running"] = static_cast<uint64_t>(stats.running);
+    value["residentBytes"] = static_cast<uint64_t>(stats.residentBytes);
+    value["peakBytes"] = static_cast<uint64_t>(stats.peakBytes);
+    value["byteLimit"] = limits.queuedWriteBytes; value["payloadLimit"] = limits.maxPayloadBytes;
+    value["workers"] = limits.writeWorkers; value["queuedPerPV"] = limits.queuedWritesPerPV;
+    operations_.post(value);
+  }
+
   void setDiscoveryStatus(const DiscoveryStatus& status) {
     auto value = discovery_.fetch();
     value["state"] = status.state; value["peer"] = status.peer; value["lastError"] = status.lastError;
@@ -235,6 +258,7 @@ public:
       bindings.emplace(name, std::make_pair(pv, assignment));
     };
     add(lastDiffName_, lastDiff_, defaults.adminRead);
+    add(operationsName_, operations_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
     add(reloadName_, reloadCommand_, defaults.adminWrite);
     add(versionName_, version_, defaults.adminRead);
@@ -275,6 +299,7 @@ public:
       else server.removePV(name);
     };
     remove(lastDiffName_);
+    remove(operationsName_);
     remove(discoveryName_);
     remove(reloadName_);
     remove(versionName_);
@@ -303,7 +328,7 @@ public:
     access.setAssignment(reloadName_, defaults.adminWrite);
     access.setAssignment(accessReloadName_, defaults.adminWrite);
     const std::vector<std::string> readNames{
-      lastDiffName_, discoveryName_, versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
+      lastDiffName_, operationsName_, discoveryName_, versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
       lastStatusName_, lastErrorName_, pvCountName_, backendHealthName_, accessEnabledName_,
       accessGenerationName_, accessLastStatusName_, accessLastErrorName_,
       accessPolicyFingerprintName_, accessWatchStatusName_, accessActiveClientsName_,
@@ -360,6 +385,8 @@ private:
   std::atomic<bool> accessReloadRequested_{false};
   pvxs::server::SharedPV lastDiff_ = pvxs::server::SharedPV::buildReadonly();
   std::string lastDiffName_;
+  pvxs::server::SharedPV operations_ = pvxs::server::SharedPV::buildReadonly();
+  std::string operationsName_;
   pvxs::server::SharedPV discovery_ = pvxs::server::SharedPV::buildReadonly();
   std::string discoveryName_;
   pvxs::server::SharedPV reloadCommand_;
@@ -634,6 +661,7 @@ std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
 }  // namespace
 
 struct Application::Impl {
+  std::shared_ptr<OperationQueue> operations;
   pvxs::server::Server server;
   std::unique_ptr<DiscoveryPublisher> discovery;
   std::shared_ptr<const DiscoveryCatalog> catalog;
@@ -671,7 +699,10 @@ Application::Application(std::string configPath)
     : configPath_(std::move(configPath)),
       impl_(std::make_unique<Impl>()) {}
 
-Application::~Application() = default;
+Application::~Application() {
+  stop();
+  if (impl_->operations) impl_->operations->shutdown();
+}
 
 bool Application::validateOnly(std::string& summary, std::string& error, AppConfig* normalized) const {
   try {
@@ -701,6 +732,8 @@ bool Application::validateOnly(std::string& summary, std::string& error, AppConf
 bool Application::start(std::string& error) {
   try {
     const auto config = loadConfigFile(configPath_);
+    impl_->operations = std::make_shared<OperationQueue>(OperationQueueLimits{
+        config.limits.writeWorkers, config.limits.queuedWritesPerPV, static_cast<size_t>(config.limits.queuedWriteBytes)});
     impl_->server = buildServerConfig(config).build();
     if (config.access.enabled) {
       impl_->access = std::make_shared<AccessController>(config.access);
@@ -766,6 +799,7 @@ void Application::pump() {
     impl_->lastHealthUpdate = now;
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
+      impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
       impl_->admin->setDiscoveryStatus(impl_->discovery ? impl_->discovery->status() : DiscoveryStatus{});
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     }
@@ -785,6 +819,7 @@ void Application::stop() {
   for (auto& item : impl_->runtimes) {
     item.second->deactivate("application stopping");
   }
+  if (impl_->operations) impl_->operations->shutdown();
   impl_->runtimes.clear();
   for (auto& item : impl_->rpcPVs) {
     impl_->removeEndpoint(item.first);
@@ -808,6 +843,10 @@ void Application::stop() {
 bool Application::applyConfig(const AppConfig& config, const bool initialLoad, std::string& error) {
   if (!initialLoad && impl_->hasConfig && impl_->admin)
     impl_->admin->setLastDiff(formatConfigDiff(diffConfigs(impl_->currentConfig, config), true));
+  if (!initialLoad && !sameOperationLimits(impl_->currentConfig.limits, config.limits)) {
+    error = "operation limits are immutable after startup; restart is required";
+    return false;
+  }
   if (!initialLoad && impl_->hasConfig && !sameServerConfig(impl_->currentConfig.server, config.server)) {
     error = "server namespace/bind settings are immutable after startup";
     return false;
@@ -909,9 +948,9 @@ bool Application::applyIncremental(const AppConfig& config,
     // Owned subscriptions let staged runtimes attach independently. Do not
     // suspend every live reader while constructing an unrelated runtime.
     for (const auto& name : replaceNames)
-      staged.emplace(name, makeRuntime(config.server, desired.at(name), newRedisBackends, newAlarmPublisher, generation));
+      staged.emplace(name, makeRuntime(config.server, desired.at(name), newRedisBackends, newAlarmPublisher, generation, impl_->operations, config.limits));
     for (const auto& item : addNames)
-      staged.emplace(item.first, makeRuntime(config.server, item.second, newRedisBackends, newAlarmPublisher, generation));
+      staged.emplace(item.first, makeRuntime(config.server, item.second, newRedisBackends, newAlarmPublisher, generation, impl_->operations, config.limits));
 
     const std::set<std::string> replaced(replaceNames.begin(), replaceNames.end());
     std::map<std::string, pvxs::Value> reopenValues;

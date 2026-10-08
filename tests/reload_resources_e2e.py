@@ -109,11 +109,9 @@ def main():
                         changed["alarms"]["stream"] = "reload-alarms-next"
                     path.write_text(json.dumps(changed))
                     ioc.send_signal(signal.SIGHUP)
-                    # Current synchronous confirmation callbacks block PVA GETs.
-                    # Hold this command across the reload request, then release
-                    # confirmation before querying the committed generation.
-                    # Concurrent responsiveness belongs to the executor gate.
-                    time.sleep(.75)
+                    # The asynchronous executor permits PVA diagnostics while
+                    # this operation is still waiting for confirmation.
+                    wait_for(lambda: f"value int64_t = {generation}" in get("SYS:reload:config:generation"), "reload committed")
                     assert pending.poll() is None, "reload canceled the unchanged runtime's pending put"
                     publish("reload-stable", "ack", value)
                     output = pending.communicate(timeout=4)[0]

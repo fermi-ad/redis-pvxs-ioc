@@ -43,12 +43,18 @@ def main():
         assert check(versioned)["legacy_input"] is False
         unchanged(diff(versioned))
         defaults = dict(write_workers=4, queued_writes_per_pv=16, queued_write_bytes=67108864,
-                        max_payload_bytes=33554432)
+                        max_payload_bytes=33554432, alarm_queue_entries=1024, alarm_state_bytes=67108864)
         unchanged(diff(dict(base, limits=defaults)))
         check(dict(base, limits=defaults))
         assert diff(dict(base, limits=dict(defaults, operation_timeout_ms=2000)))["restart_required"] == ["limits"]
+        assert diff(dict(base, limits=dict(defaults, alarm_queue_entries=8)))["restart_required"] == ["limits"]
+        assert diff(dict(base, limits=dict(defaults, alarm_state_bytes=8388608)))["restart_required"] == ["limits"]
+        check(dict(base, limits=dict(alarm_queue_entries=1, alarm_state_bytes=4096)))
         for invalid in (dict(write_workers=0), dict(queued_writes_per_pv=0), dict(queued_write_bytes=1023),
-                        dict(max_payload_bytes=0), dict(operation_timeout_ms=0), dict(unknown=1)):
+                        dict(max_payload_bytes=0), dict(operation_timeout_ms=0), dict(unknown=1),
+                        dict(alarm_queue_entries=0), dict(alarm_state_bytes=1023),
+                        dict(alarm_queue_entries=1, alarm_state_bytes=1024),
+                        dict(alarm_queue_entries=8, alarm_state_bytes=4096)):
             check(dict(base, limits=invalid), False)
         reordered = copy.deepcopy(versioned)
         reordered["pvs"][0]["aliases"].reverse()

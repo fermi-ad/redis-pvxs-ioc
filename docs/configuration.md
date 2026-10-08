@@ -41,8 +41,8 @@ At least one `pvs` or `rpc_services` entry is required. The old `PVList`,
 
 ## Operation limits
 
-The optional top-level `limits` mapping controls write admission and scalar/array
-payload validation. Its defaults apply to omitted-version configurations as well
+The optional top-level `limits` mapping controls write admission, alarm delivery
+and scalar/array payload validation. Its defaults apply to omitted-version configurations as well
 as schema version 1. Changing limits requires a restart and is reported by the
 offline difference command.
 
@@ -53,10 +53,20 @@ offline difference command.
 | `queued_write_bytes` | `67108864` | 1024–1073741824 bytes, including active reservations |
 | `max_payload_bytes` | `33554432` | 1–1073741824 bytes per scalar/array payload |
 | `operation_timeout_ms` | derived | 1–300000; omitted uses max(5000, confirmation timeout + 2000) |
+| `alarm_queue_entries` | `1024` | 1–1000000 transitions; each reserves 1024 bytes |
+| `alarm_state_bytes` | `67108864` | 1024–1073741824 bytes for the alarm queue and registered current states |
 
 Oversized writes and full queues return explicit PVA errors. Oversized source
 payloads preserve the last good value and set an invalid alarm. Existing control
 limits remain advisory; this mapping does not enable value-range enforcement.
+
+The alarm reservation must cover the queue plus 1024 bytes and twice the canonical
+PV-name length per registered state. Aliases do not consume another state.
+Configuration checks reject a budget that cannot hold the configured generation.
+Preparing a replacement on the same publisher also charges any old registrations
+still retained during cutover; insufficient headroom rejects the reload without
+changing the live generation. Reservations measure bounded bookkeeping and
+payload storage, not total process RSS.
 
 
 ## `server`

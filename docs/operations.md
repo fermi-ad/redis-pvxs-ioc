@@ -17,6 +17,7 @@ prefixed by `server.namespace`.
 | `SYS:<instance>:config:lastError` | string/read | Last reload error; empty after success |
 | `SYS:<instance>:stats:pvCount` | int64/read | Configured Redis-backed and RPC PV count |
 | `SYS:<instance>:stats:operations` | structure/read | Write queue counts, reservations, peaks and configured limits |
+| `SYS:<instance>:alarms:status` | structure/read | Alarm delivery state, outcomes, reconciliation and reservations |
 | `SYS:<instance>:backend:health` | string/read | `<connected>/<total> connected`, with disconnected aliases when applicable |
 | `SYS:<instance>:access:reload` | int64/write | Request an ACF-only reload |
 | `SYS:<instance>:access:enabled` | bool/read | Startup access-control state |
@@ -99,8 +100,40 @@ readback rather than command causality.
 The total operation deadline includes queue time. If omitted, it is the larger
 of five seconds and the configured confirmation wait plus two seconds. See
 [`limits`](configuration.md#operation-limits) for overrides. PVA callbacks do not
-wait for Redis or confirmation. Alarm socket connection and I/O waits are bounded
-to 500 ms; asynchronous alarm reconciliation remains a separate #4 requirement.
+wait for Redis or confirmation.
+
+## Alarm delivery
+
+A dedicated worker delivers alarms. Runtime callbacks update fixed-size current
+state and a bounded transition queue without waiting for Redis. Healthy delivery
+preserves queued transitions in order. After overload, rejection or a transport
+failure, pending history is coalesced and the worker reconciles each active PV's
+current alarm state, including clears, without requiring another source update.
+A one-second heartbeat detects a disconnected idle connection; retries wait one
+second, with 500 ms socket connection and I/O timeouts.
+
+This is current-state recovery, not durable delivery of every transition. An
+interrupted reply may mean Redis accepted an earlier record; reconciliation can
+therefore repeat a state. The stream keeps its existing fields and alarm/clear
+representation. Healthy events retain their observation time; recovery snapshots
+use the reconciliation time (Unix seconds). Messages are capped at 512 bytes,
+with UTF-8 boundary truncation and a trailing `...` when necessary.
+
+Preparation reserves state without publishing. Registrations become active only
+at commit, and retired runtimes cannot enqueue new alarms. When the alarm backend
+or stream changes, the old worker drains its in-flight call and stops before the
+new publisher is enabled. Unchanged runtimes retain their readback and subscriptions.
+
+`alarms:status` is updated once per second and on successful reload, under the
+admin-read access assignment. It reports `staged`, `idle`, `disconnected`,
+`recovering`, `ready` or `stopped`; accepted deliveries (`sent`), server rejections
+and transport failures are counted separately. `reconciled` counts accepted
+current-state snapshots. `coalescedUpdates`, `discardedTransitions` (queued
+history discarded) and `messagesTruncated` expose lossy recovery or bounds.
+`registrations` includes prepared/retained owners; `active` counts canonical
+current owners and `pending` counts states needing delivery. Queue depth, reserved
+bytes, peaks and configured limits are reported separately. Counters belong to
+the publisher and reset when its backend or stream is replaced.
 
 ## Container verification
 

@@ -1,4 +1,5 @@
 #include "redis_pvxs_ioc/runtime.h"
+#include "redis_pvxs_ioc/alarm_publisher.h"
 #include "RedisAdapter.hpp"
 #include <alarm.h>
 #include <pvxs/client.h>
@@ -57,8 +58,12 @@ int main() {
   config.write = RouteConfig{"default", "command"};
   config.confirm = ConfirmConfig{"default", "ack", 1500};
   assert(producer.addSingleDouble("readback", 0.).ok());
-  auto runtime = makeRuntime(serverConfig, config, backends, {}, 1);
+  auto alarms = std::make_shared<AlarmPublisher>("127.0.0.1", options.cxn.port, "runtime-test-alarms");
+  alarms->activate();
+  auto runtime = makeRuntime(serverConfig, config, backends, alarms, 1);
+  assert(alarms->status().active == 0 && alarms->status().sent == 0);
   runtime->activate();
+  eventually([&] { return alarms->status().state == "ready"; });
   server.addPV(runtime->fullName(), runtime->sharedPV()).start();
   auto client = server.clientConfig().build();
   assert(client.get("TEST:value").exec()->wait(3.)["value"].as<double>() == 0.);
@@ -131,11 +136,19 @@ int main() {
 
   auto stagedMetadata = metadata;
   stagedMetadata.metadata.description = "prepared before the newest source sample";
-  auto stagedUpdate = runtime->prepareReconfigure(stagedMetadata, 4);
+  stagedMetadata.alarms.highWarning = 7.25;
+  auto nextAlarms = std::make_shared<AlarmPublisher>("127.0.0.1", options.cxn.port, "{runtime-tests}:alarm-next");
+  auto stagedUpdate = runtime->prepareReconfigure(stagedMetadata, 4, nextAlarms);
   assert(producer.addSingleDouble("readback", 7.5).ok());
   eventually([&] { return runtime->sharedPV().fetch()["value"].as<double>() == 7.5; });
+  assert(nextAlarms->status().active == 0 && nextAlarms->status().sent == 0);
   stagedUpdate->commit();
+  alarms->stop();
   stagedUpdate->refresh();
+  nextAlarms->activate();
+  eventually([&] { return nextAlarms->status().state == "ready"; });
+  assert(nextAlarms->status().active == 1 && nextAlarms->status().sent == 1);
+  assert(producer.getStreamSnapshot("alarm-next").fields.at("severity") == "MINOR");
   assert(runtime->sharedPV().fetch()["value"].as<double>() == 7.5);
 
   observer.reset();

@@ -31,12 +31,46 @@ redis: {}                 # or redis_backends, exactly one form
 alarms: {}                # optional
 channelfinder: {}         # optional
 discovery: {}             # optional; automatic RecCeiver registration enabled
+limits: {}                # optional; bounded write queues, deadlines and payloads
 pvs: []                   # optional when rpc_services is non-empty
 rpc_services: []          # optional when pvs is non-empty
 ```
 
 At least one `pvs` or `rpc_services` entry is required. The old `PVList`,
 `PVBase`, and `RedisBase` prototype keys are rejected.
+
+## Operation limits
+
+The optional top-level `limits` mapping controls write admission, alarm delivery
+and scalar/array payload validation. Its defaults apply to omitted-version configurations as well
+as schema version 1. Changing limits requires a restart and is reported by the
+offline difference command.
+
+| Field | Default | Supported values |
+| --- | --- | --- |
+| `write_workers` | `4` | 1–64 |
+| `queued_writes_per_pv` | `16` | 1–4096, shared by canonical name and aliases |
+| `queued_write_bytes` | `67108864` | 1024–1073741824 bytes, including active reservations |
+| `rpc_workers` | `4` | 1–64 workers, separate from write workers |
+| `queued_rpc_per_method` | `16` | 1–4096 waiting calls per served RPC name, in addition to one active call |
+| `queued_rpc_bytes` | `67108864` | 1024–1073741824 bytes, including active argument/bookkeeping reservations |
+| `max_payload_bytes` | `33554432` | 1–1073741824 bytes per scalar/array payload |
+| `operation_timeout_ms` | derived | 1–300000; omitted uses max(5000, confirmation timeout + 2000) |
+| `alarm_queue_entries` | `1024` | 1–1000000 transitions; each reserves 1024 bytes |
+| `alarm_state_bytes` | `67108864` | 1024–1073741824 bytes for the alarm queue and registered current states |
+
+Oversized writes and full queues return explicit PVA errors. Oversized source
+payloads preserve the last good value and set an invalid alarm. Existing control
+limits remain advisory; this mapping does not enable value-range enforcement.
+
+The alarm reservation must cover the queue plus 1024 bytes and twice the canonical
+PV-name length per registered state. Aliases do not consume another state.
+Configuration checks reject a budget that cannot hold the configured generation.
+Preparing a replacement on the same publisher also charges any old registrations
+still retained during cutover; insufficient headroom rejects the reload without
+changing the live generation. Reservations measure bounded bookkeeping and
+payload storage, not total process RSS.
+
 
 ## `server`
 
@@ -175,6 +209,20 @@ Every PV requires:
 Boolean and string values are scalar-only. Numeric types support scalar or
 array shapes.
 
+For a read-only image, use `kind: ntndarray` instead of `type` and `shape`:
+
+```yaml
+- name: GE1350:Image
+  aliases: [SPIKE:CAM2:Pva1:Image]
+  kind: ntndarray
+  read: {backend: default, key: ge1350}
+  max_frame_bytes: 33554432
+```
+
+NTNDArray configuration rejects scalar-only fields and write routes. See
+[Redis-backed NTNDArray](ntndarray.md) for its versioned Redis Stream contract,
+acquisition timestamp rules, validation, and alarm behavior.
+
 Aliases are additional names for the same PVXS `SharedPV`; they do not create
 another Redis reader, writer, confirmation route, alarm state, or configured
 runtime. This permits cross-namespace names while retaining a concise canonical
@@ -188,6 +236,13 @@ name:
 
 With `server.namespace: DEMO`, this serves both `DEMO:magnet:current` and the
 exact alias `FACILITY:AREA_GROUP_MAGNET01:I`.
+
+Canonical names, aliases, diagnostic PVs and reflected RPC methods share one
+reserved namespace. Collisions reject startup or the staged reload before live
+endpoints or access policy change, including when discovery is disabled.
+`--check-config` checks the statically known names offline; RPC names are also
+checked after reflection during startup or reload. Installed diagnostics must
+match the same reserved name set.
 
 Adding, renaming, or removing aliases during a successful reload retains the
 logical runtime and all Redis routes. Because the PVXS static registry closes a
@@ -299,13 +354,34 @@ rpc_services:
   - endpoint: query-server:50051
     service: example.query.v1.Query
     suffix: _RPC
+    optional: false
+    discovery_timeout_ms: 3000
+    timeout_ms: 10000
+    retry_interval_ms: 5000
     defaults:
       window_ns: 1000000000
+    method_defaults:
+      Average:
+        window_ns: 2000000000
 ```
 
-`endpoint` and fully qualified `service` are required and non-empty. `suffix`
-and string-valued `defaults` are optional. The backend must expose gRPC server
-reflection. See [`rpc-forwarding.md`](rpc-forwarding.md).
+`endpoint` and fully qualified `service` are required and non-empty. The backend
+must expose gRPC server reflection. Services are required unless `optional: true`
+is explicit: unavailable required services reject startup or a changed service
+on reload. Unchanged discovered services keep their endpoints during an outage.
+
+`discovery_timeout_ms` and `timeout_ms` accept 1–300000 ms; the latter is the total
+call budget, including queue time. An unavailable optional service retries
+reflection in the background after `retry_interval_ms` (100–300000 ms). Invalid
+schemas, defaults or name collisions require correction and a configuration
+reload. Optional does not suppress validation errors.
+
+Shared `defaults` must match at least one method and apply to methods containing
+that field. `method_defaults` uses exact protobuf method names and overrides the
+shared defaults. Per-call arguments then override defaults by canonical field
+path. Unknown or ambiguous fields and invalid values are errors. Offline checks
+validate the configuration shape; reflected-schema validation needs the backend.
+See [`rpc-forwarding.md`](rpc-forwarding.md) for supported shapes and limits.
 
 ## Reserved names
 
@@ -333,16 +409,18 @@ redis-pvxs-ioc --diff-config old.yaml new.yaml --json
 
 The command compares validated, normalized definitions without Redis, RPC
 reflection or PVA startup. It reports additions, removals, replacements,
-metadata/access changes, changed backends/services, alarm/catalog changes, and
+metadata/access/alias changes, changed backends/services, alarm/catalog changes, and
 settings requiring a restart. Credential values are never included. An omitted
 schema version and explicit version 1 compare equally. Alias ordering alone is
 not a change.
 
-A replacement includes type/route/confirmation changes, alias-set changes (which
-can reconnect clients), and affected PVs when a backend definition changes.
+A replacement includes type/route/confirmation changes and affected PVs when a
+backend definition changes. Alias-set changes are reported as `alias_changes`;
+they retain the canonical runtime and disconnect only removed alias channels.
 Metadata changes include metadata, alarm thresholds, transforms and initial
 fallback definitions. They retain the runtime's subscription topology; changing
-a transform can cancel pending commands. Access changes are listed separately.
+a transform can cancel pending commands. Access and alias changes are listed separately
+and may overlap retained metadata changes.
 External ACF file contents and environment variables are not inputs to this
 file-to-file diff. RPC service differences are shown offline; reflected endpoint
 names and availability still require staging-time discovery.

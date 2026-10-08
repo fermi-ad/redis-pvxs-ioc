@@ -1,9 +1,14 @@
+// ExecOp forwarding requires the complete Timer type from the pinned PVXS API.
+#ifndef PVXS_ENABLE_EXPERT_API
+#define PVXS_ENABLE_EXPERT_API
+#endif
 #include "redis_pvxs_ioc/access_control.h"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <functional>
@@ -489,6 +494,13 @@ std::string auditTimestamp() {
   return stream.str();
 }
 
+std::string auditField(const std::string& input) {
+  auto result = input.substr(0, 256);
+  for (auto& ch : result) if (static_cast<unsigned char>(ch) < 32 || ch == 127 || ch == '"' || ch == '\\') ch = '?';
+  if (input.size() > 256) result += "...";
+  return result;
+}
+
 class AccessMember;
 class ChannelState;
 
@@ -508,22 +520,26 @@ struct CloseHandle {
 
 }  // namespace
 
-struct AccessController::Impl {
+struct AccessController::Impl : public std::enable_shared_from_this<AccessController::Impl> {
   explicit Impl(AccessConfig initial)
-      : config(std::move(initial)), staticSource(pvxs::server::StaticSource::build()) {}
+      : config(std::move(initial)), registry(std::make_shared<PVRegistry>()) {}
 
   AccessConfig config;
   mutable std::mutex mutex;
   std::mutex reloadMutex;
-  pvxs::server::StaticSource staticSource;
-  std::shared_ptr<pvxs::server::Source> securedSource;
+  std::shared_ptr<PVRegistry> registry;
   std::unordered_map<std::string, std::shared_ptr<AccessMember>> members;
   std::vector<std::weak_ptr<ChannelState>> dirty;
+  std::atomic<bool> recomputeNeeded{false};
   std::atomic<uint64_t> generation{0};
   std::atomic<uint64_t> activeClients{0};
   std::atomic<uint64_t> deniedReads{0};
   std::atomic<uint64_t> deniedWrites{0};
   std::atomic<uint64_t> rightsChanges{0};
+  std::atomic<uint64_t> authorizedOperations{0}, operationsInFlight{0};
+  std::atomic<uint64_t> operationsSucceeded{0}, operationsFailed{0};
+  std::atomic<uint64_t> operationsCancelled{0}, operationsAbandoned{0}, operationsDenied{0};
+  std::atomic<uint64_t> denialLogsSuppressed{0};
   std::string lastStatus = "initializing";
   std::string lastError;
   std::string policyFingerprint;
@@ -545,7 +561,6 @@ struct AccessController::Impl {
   std::string watchLastAttemptRaw;
   bool watchMissingReported = false;
   std::set<std::string> configuredAsgs;
-  std::map<std::string, std::chrono::steady_clock::time_point> denialLogTimes;
 
   bool reloadLocked(const std::string& trigger,
                     const AccessConfig& configSnapshot,
@@ -554,8 +569,12 @@ struct AccessController::Impl {
   void markDirty(const std::shared_ptr<ChannelState>& state);
   void drainDirty();
   void recomputeAllClients();
-  void recordDenied(const ChannelState& state, bool write, const pvxs::Value* value);
-  void recordAudit(const ChannelState& state, const pvxs::Value& value);
+  // id is the admitted operation's audit id for a dispatch-time denial; zero
+  // for requests refused at admission, which were never assigned one.
+  void recordDenied(const ChannelState& state, bool write, const pvxs::Value* value,
+                    const char* operation = "put", uint64_t id = 0);
+  void recordAudit(const ChannelState& state, uint64_t id, const char* operation,
+                   const char* phase, const char* result, const pvxs::Value* value = nullptr) noexcept;
 };
 
 namespace {
@@ -580,6 +599,8 @@ public:
 
   void addClient(const std::shared_ptr<ChannelState>& state) {
     std::lock_guard<std::mutex> guard(mutex);
+    clients.erase(std::remove_if(clients.begin(), clients.end(),
+                                 [](const auto& prior) { return prior.expired(); }), clients.end());
     clients.emplace_back(state);
   }
 
@@ -598,7 +619,7 @@ public:
                std::shared_ptr<AccessMember> accessMember,
                std::string channelName,
                const pvxs::server::ClientCredentials& credentials)
-      : owner(owner), member(std::move(accessMember)), name(std::move(channelName)), peer(credentials.peer),
+      : lifetime(owner.shared_from_this()), owner(owner), member(std::move(accessMember)), name(std::move(channelName)), peer(credentials.peer),
         host(clientHost(credentials.peer)), method(credentials.method), account(credentials.account),
         users(clientUsers(credentials)), closer(std::make_shared<CloseHandle>()) {}
 
@@ -662,11 +683,14 @@ public:
     if (!self->dirty.exchange(true, std::memory_order_acq_rel)) {
       try {
         self->owner.markDirty(self->shared_from_this());
-      } catch (const std::bad_weak_ptr&) {
+      } catch (...) {
+        // Never unwind a C access-library callback after policy activation.
+        self->owner.recomputeNeeded = true;
       }
     }
   }
 
+  std::shared_ptr<AccessController::Impl> lifetime;
   AccessController::Impl& owner;
   std::shared_ptr<AccessMember> member;
   std::string name;
@@ -678,6 +702,9 @@ public:
   std::vector<ASCLIENTPVT> clients;
   std::shared_ptr<CloseHandle> closer;
   std::atomic<uint8_t> rights{0u};
+  // Fixed-size throttling state expires with this live channel. Never retain
+  // historical PV/peer keys (a new TCP port used to grow that map indefinitely).
+  mutable std::atomic<int64_t> lastDeniedReadMs{0}, lastDeniedWriteMs{0};
   std::atomic<uint8_t> rightsBeforeChange{0u};
   std::atomic<bool> dirty{false};
   std::atomic<bool> initialized{false};
@@ -704,6 +731,84 @@ std::vector<std::shared_ptr<ChannelState>> AccessMember::liveClients() {
   }
   return live;
 }
+
+struct AccessOperation {
+  std::shared_ptr<ChannelState> state;
+  const char* operation;
+  const bool trap;
+  uint64_t id;
+  std::atomic<bool> done{false};
+  AccessOperation(std::shared_ptr<ChannelState> channel, const char* kind, bool audited,
+                   const pvxs::Value& value)
+      : state(std::move(channel)), operation(kind), trap(audited), id(++state->owner.authorizedOperations) {
+    ++state->owner.operationsInFlight;
+    if (trap) state->owner.recordAudit(*state, id, operation, "authorization", "allowed",
+                                      std::strcmp(operation, "rpc") == 0 ? nullptr : &value);
+  }
+  ~AccessOperation() { finish("abandoned"); }
+  void finish(const char* outcome) noexcept {
+    if (claim()) complete(outcome);
+  }
+  // Exactly one caller wins the right to record this operation's completion.
+  bool claim() noexcept { return !done.exchange(true); }
+  void complete(const char* outcome) noexcept {
+    auto& owner = state->owner;
+    --owner.operationsInFlight;
+    if (std::strcmp(outcome, "success") == 0) ++owner.operationsSucceeded;
+    else if (std::strcmp(outcome, "error") == 0) ++owner.operationsFailed;
+    else if (std::strcmp(outcome, "cancelled") == 0) ++owner.operationsCancelled;
+    else if (std::strcmp(outcome, "denied") == 0) ++owner.operationsDenied;
+    else ++owner.operationsAbandoned;
+    if (trap) owner.recordAudit(*state, id, operation, "completion", outcome);
+  }
+};
+
+class AuthorizedExecOp final : public pvxs::server::ExecOp, public OperationAuthorization {
+public:
+  AuthorizedExecOp(std::unique_ptr<pvxs::server::ExecOp> target, std::shared_ptr<ChannelState> state,
+                   const char* operation, bool trap, const pvxs::Value& value)
+      : ExecOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
+        target_(std::move(target)), state_(std::move(state)),
+        audit_(std::make_shared<AccessOperation>(state_, operation, trap, value)) {
+    auto audit = audit_;
+    target_->onCancel([audit] { audit->finish("cancelled"); });
+  }
+  ~AuthorizedExecOp() override { audit_->finish("abandoned"); }
+  void reply() override { target_->reply(); audit_->finish("success"); }
+  void reply(const pvxs::Value& value) override { target_->reply(value); audit_->finish("success"); }
+  void error(const std::string& message) override { target_->error(message); audit_->finish("error"); }
+  void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
+  void onCancel(std::function<void()>&& fn) override {
+    auto audit = audit_;
+    target_->onCancel([audit, fn = std::move(fn)] { audit->finish("cancelled"); if (fn) fn(); });
+  }
+  bool authorized(const pvxs::Value& value) override {
+    if ((state_->loadRights() & kWrite) != 0u) return authorizeWriteDispatch(*target_, value);
+    // Rights changed after admission. Record the refusal under the admitted
+    // audit id so it is not mistaken for a later backend error, then close the
+    // operation as denied; the caller's PVA error reply cannot reclassify it.
+    // If a cancellation completed the operation first, the denial did not
+    // decide its outcome, so record it like an admission denial instead of
+    // appending a record after that operation's completion.
+    const bool open = audit_->claim();
+    state_->owner.recordDenied(*state_, true, std::strcmp(audit_->operation, "rpc") == 0 ? nullptr : &value,
+                               audit_->operation, open && audit_->trap ? audit_->id : 0);
+    if (open) audit_->complete("denied");
+    return false;
+  }
+private:
+  pvxs::Timer _timerOneShot(double delay, std::function<void()>&& fn) override {
+#ifdef PVXS_EXPERT_API_ENABLED
+    return target_->timerOneShot(delay, std::move(fn));
+#else
+    (void)delay; (void)fn;
+    throw std::logic_error("PVXS expert timer API is unavailable");
+#endif
+  }
+  std::unique_ptr<pvxs::server::ExecOp> target_;
+  std::shared_ptr<ChannelState> state_;
+  std::shared_ptr<AccessOperation> audit_;
+};
 
 class AuthorizedConnectOp final : public pvxs::server::ConnectOp {
 public:
@@ -750,8 +855,8 @@ public:
         op->error("access denied");
         return;
       }
-      if ((rights & kTrapWrite) != 0u) state->owner.recordAudit(*state, value);
-      fn(std::move(op), std::move(value));
+      auto secured = std::make_unique<AuthorizedExecOp>(std::move(op), state, "put", (rights & kTrapWrite) != 0u, value);
+      fn(std::move(secured), std::move(value));
     });
   }
 
@@ -788,12 +893,12 @@ public:
                                                pvxs::Value&& value) mutable {
       const auto rights = state->loadRights();
       if ((rights & kWrite) == 0u) {
-        state->owner.recordDenied(*state, true, &value);
+        state->owner.recordDenied(*state, true, nullptr, "rpc");
         op->error("access denied");
         return;
       }
-      if ((rights & kTrapWrite) != 0u) state->owner.recordAudit(*state, value);
-      fn(std::move(op), std::move(value));
+      auto secured = std::make_unique<AuthorizedExecOp>(std::move(op), state, "rpc", (rights & kTrapWrite) != 0u, value);
+      fn(std::move(secured), std::move(value));
     });
   }
 
@@ -825,42 +930,13 @@ private:
   std::shared_ptr<ChannelState> state_;
 };
 
-class AuthorizedSource final : public pvxs::server::Source {
-public:
-  AuthorizedSource(AccessController::Impl& owner, std::shared_ptr<pvxs::server::Source> target)
-      : owner_(owner), target_(std::move(target)) {}
-
-  void onSearch(Search& search) override { target_->onSearch(search); }
-
-  void onCreate(std::unique_ptr<pvxs::server::ChannelControl>&& op) override {
-    const auto name = op->name();
-    std::shared_ptr<AccessMember> member;
-    {
-      std::lock_guard<std::mutex> guard(owner_.mutex);
-      const auto found = owner_.members.find(op->name());
-      if (found == owner_.members.end()) return;
-      member = found->second;
-    }
-    try {
-      auto state = std::make_shared<ChannelState>(owner_, std::move(member), name, *op->credentials());
-      state->initialize();
-      target_->onCreate(std::make_unique<AuthorizedChannelControl>(std::move(op), std::move(state)));
-    } catch (const std::exception& ex) {
-      std::fprintf(stderr, "[redis-pvxs-ioc] access channel setup failed for %s: %s\n",
-                   name.c_str(), ex.what());
-      if (op) op->close();
-    }
-  }
-
-  List onList() override { return target_->onList(); }
-  void show(std::ostream& stream) override { target_->show(stream); }
-
-private:
-  AccessController::Impl& owner_;
-  std::shared_ptr<pvxs::server::Source> target_;
-};
 
 }  // namespace
+
+bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value) {
+  auto* authorized = dynamic_cast<OperationAuthorization*>(&operation);
+  return !authorized || authorized->authorized(value);
+}
 
 void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& state) {
   std::lock_guard<std::mutex> guard(mutex);
@@ -868,6 +944,7 @@ void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& stat
 }
 
 void AccessController::Impl::drainDirty() {
+  if (recomputeNeeded.exchange(false)) { recomputeAllClients(); return; }
   std::vector<std::weak_ptr<ChannelState>> pending;
   {
     std::lock_guard<std::mutex> guard(mutex);
@@ -893,54 +970,115 @@ void AccessController::Impl::recomputeAllClients() {
 
 void AccessController::Impl::recordDenied(const ChannelState& state,
                                           const bool write,
-                                          const pvxs::Value* value) {
+                                          const pvxs::Value* value,
+                                          const char* operation,
+                                          const uint64_t id) {
   (write ? deniedWrites : deniedReads).fetch_add(1u, std::memory_order_relaxed);
-  const auto preview = value ? valuePreview(*value) : std::string{};
-  if (write) {
-    const auto timestamp = auditTimestamp();
-    std::fprintf(stderr,
-                 "[redis-pvxs-ioc] access audit timestamp=%s operation=write pv=%s result=denied "
-                 "asg=%s asl=%d user=%s peer=%s auth=%s value=%s\n",
-                 timestamp.c_str(), state.name.c_str(), state.member->assignment.asg.c_str(),
-                 state.member->assignment.asl, state.account.c_str(), state.peer.c_str(),
-                 state.method.c_str(), preview.c_str());
-  }
-  const auto now = std::chrono::steady_clock::now();
-  const auto key = state.name + "\n" + state.peer + "\n" + (write ? "write" : "read");
-  bool emit = false;
-  {
-    std::lock_guard<std::mutex> guard(mutex);
-    auto& prior = denialLogTimes[key];
-    if (prior.time_since_epoch().count() == 0 || now - prior >= std::chrono::seconds(5)) {
-      prior = now;
-      emit = true;
-    }
-  }
-  if (!emit) return;
+  if (write) recordAudit(state, id, operation, "authorization", "denied", value);
+  const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count() + 1;
+  auto& stamp = write ? state.lastDeniedWriteMs : state.lastDeniedReadMs;
+  auto prior = stamp.load(std::memory_order_relaxed);
+  const bool emit = (prior == 0 || now - prior >= 5000) &&
+                    stamp.compare_exchange_strong(prior, now, std::memory_order_relaxed);
+  if (!emit) { ++denialLogsSuppressed; return; }
+  const auto preview = value ? auditField(valuePreview(*value)) : std::string{};
   std::fprintf(stderr,
-               "[redis-pvxs-ioc] access denied operation=%s pv=%s result=denied asg=%s asl=%d user=%s peer=%s auth=%s%s%s\n",
-               write ? "write" : "read", state.name.c_str(), state.member->assignment.asg.c_str(),
+               "[redis-pvxs-ioc] access denied phase=authorization operation=%s pv=\"%s\" result=denied asg=\"%s\" asl=%d user=\"%s\" peer=\"%s\" auth=\"%s\"%s%s\n",
+               write ? operation : "read", auditField(state.name).c_str(), auditField(state.member->assignment.asg).c_str(),
                state.member->assignment.asl,
-               state.account.c_str(), state.peer.c_str(), state.method.c_str(),
+               auditField(state.account).c_str(), auditField(state.peer).c_str(), auditField(state.method).c_str(),
                value ? " value=" : "", value ? preview.c_str() : "");
 }
 
-void AccessController::Impl::recordAudit(const ChannelState& state, const pvxs::Value& value) {
-  const auto preview = valuePreview(value);
-  const auto timestamp = auditTimestamp();
-  std::fprintf(stderr,
-               "[redis-pvxs-ioc] access audit timestamp=%s operation=write pv=%s result=allowed asg=%s asl=%d user=%s peer=%s auth=%s value=%s\n",
-               timestamp.c_str(), state.name.c_str(), state.member->assignment.asg.c_str(),
-               state.member->assignment.asl,
-               state.account.c_str(), state.peer.c_str(), state.method.c_str(), preview.c_str());
+void AccessController::Impl::recordAudit(const ChannelState& state, uint64_t id, const char* operation,
+    const char* phase, const char* result, const pvxs::Value* value) noexcept {
+  try {
+    const auto preview = value ? auditField(valuePreview(*value)) : "<omitted>";
+    const auto timestamp = auditTimestamp();
+    std::fprintf(stderr,
+        "[redis-pvxs-ioc] access audit timestamp=%s id=%llu phase=%s operation=%s pv=\"%s\" result=%s "
+        "asg=\"%s\" asl=%d user=\"%s\" peer=\"%s\" auth=\"%s\" value=\"%s\"\n",
+        timestamp.c_str(), static_cast<unsigned long long>(id), phase, operation,
+        auditField(state.name).c_str(), result, auditField(state.member->assignment.asg).c_str(),
+        state.member->assignment.asl, auditField(state.account).c_str(), auditField(state.peer).c_str(),
+        auditField(state.method).c_str(), preview.c_str());
+  } catch (...) { /* logging allocation failures must not change authorization/completion */ }
 }
 
 AccessController::AccessController(AccessConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {
-  impl_->securedSource = std::make_shared<AuthorizedSource>(*impl_, impl_->staticSource.source());
+    : impl_(std::make_shared<Impl>(std::move(config))) {}
+
+AccessController::~AccessController() {
+  try { clearBindings(); }
+  catch (const std::exception& ex) {
+    std::fprintf(stderr, "[redis-pvxs-ioc] access endpoint cleanup failed: %s\n", ex.what());
+  }
 }
 
-AccessController::~AccessController() = default;
+struct AccessController::PreparedConfiguration {
+  std::shared_ptr<AccessController::Impl> owner;
+  std::unique_lock<std::mutex> serialized;
+  AccessConfig config;
+  std::set<std::string> requiredAsgs;
+  PreparedPolicy policy;
+  std::string status = "config reload active";
+  std::string watchStatus;
+  bool policyChanged = false;
+  explicit PreparedConfiguration(AccessController::Impl& impl)
+      : owner(impl.shared_from_this()), serialized(impl.reloadMutex) {}
+};
+
+std::shared_ptr<AccessController::PreparedConfiguration> AccessController::prepareConfiguration(
+    const AccessConfig& config, const std::set<std::string>& requiredAsgs) {
+  auto result = std::make_shared<PreparedConfiguration>(*impl_);
+  result->config = config;
+  result->requiredAsgs = requiredAsgs;
+  result->policy = preparePolicy(config, requiredAsgs);
+  result->watchStatus = config.watch.enabled ? "watching " + config.file : "disabled";
+  std::lock_guard<std::mutex> guard(impl_->mutex);
+  if (config.enabled != impl_->config.enabled)
+    throw std::runtime_error("access.enabled is immutable after startup");
+  result->policyChanged = result->policy.expanded != impl_->activePolicy;
+  return result;
+}
+
+bool AccessController::activateConfiguration(const std::shared_ptr<PreparedConfiguration>& prepared,
+                                             std::string& error) {
+  if (!prepared || prepared->owner.get() != impl_.get() || !prepared->serialized.owns_lock()) {
+    error = "invalid prepared access configuration";
+    return false;
+  }
+  if (prepared->policyChanged) {
+    const auto status = asInitMem(prepared->policy.expanded.c_str(), nullptr);
+    if (status != 0) {
+      error = std::string("ACF parse failed: ") + errSymMsg(status);
+      return false;
+    }
+  }
+  // Everything after the library's successful activation is a prepared swap.
+  // Client revocation is deferred until the complete endpoint set is published.
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    std::swap(impl_->config, prepared->config);
+    impl_->configuredAsgs.swap(prepared->requiredAsgs);
+    impl_->activePolicy.swap(prepared->policy.expanded);
+    impl_->policyFingerprint.swap(prepared->policy.fingerprint);
+    impl_->observedRaw.swap(prepared->policy.raw);
+    impl_->lastStatus.swap(prepared->status);
+    impl_->watchStatus.swap(prepared->watchStatus);
+    impl_->lastError.clear();
+    impl_->watchLastAttemptRaw.clear();
+    impl_->watchCandidateRaw.clear();
+    impl_->watchMissingReported = false;
+    impl_->hasPreviousPolicy = false;
+  }
+  ++impl_->generation;
+  error.clear();
+  return true;
+}
+
+void AccessController::finishConfiguration() { impl_->recomputeAllClients(); }
 
 bool AccessController::start(const std::set<std::string>& requiredAsgs, std::string& error) {
   {
@@ -1197,44 +1335,100 @@ void AccessController::pump() {
   }
 }
 
+struct AccessController::PreparedBindings {
+  std::shared_ptr<PVRegistry::Prepared> publication;
+  std::unordered_map<std::string, std::shared_ptr<AccessMember>> members;
+};
+
+std::shared_ptr<AccessController::PreparedBindings> AccessController::prepareBindings(const PVBindings& bindings) {
+  auto result = std::make_shared<PreparedBindings>();
+  const auto existing = impl_->registry->bindings();
+  decltype(result->members) previous;
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    previous = impl_->members;
+  }
+  PVRegistry::Wrappers wrappers;
+  for (const auto& entry : bindings) {
+    const auto before = existing.find(entry.first);
+    const auto member = previous.find(entry.first);
+    std::shared_ptr<AccessMember> prepared;
+    if (before != existing.end() && member != previous.end() &&
+        before->second.owner == entry.second.owner &&
+        sameAccessAssignment(before->second.access, entry.second.access))
+      prepared = member->second;
+    else
+      prepared = std::make_shared<AccessMember>(entry.second.access);
+    result->members.emplace(entry.first, prepared);
+    wrappers.emplace(entry.first, [weak = std::weak_ptr<Impl>(impl_), prepared, name = entry.first](PVRegistry::Channel channel) -> PVRegistry::Channel {
+      const auto owner = weak.lock();
+      if (!owner) { channel->close(); return {}; }
+      auto state = std::make_shared<ChannelState>(*owner, prepared, name, *channel->credentials());
+      state->initialize();
+      return std::make_unique<AuthorizedChannelControl>(std::move(channel), std::move(state));
+    });
+  }
+  result->publication = impl_->registry->prepare(bindings, wrappers);
+  return result;
+}
+
+bool AccessController::publishBindings(const std::shared_ptr<PreparedBindings>& prepared,
+    const std::function<bool(std::string&)>& beforeCommit, std::string& error) {
+  if (!prepared) { error = "invalid prepared endpoints"; return false; }
+  return impl_->registry->publish(prepared->publication, [&](std::string& failure) {
+    if (beforeCommit && !beforeCommit(failure)) return false;
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    impl_->members.swap(prepared->members);
+    return true;
+  }, error);
+}
+
+void AccessController::finishBindings(const std::shared_ptr<PreparedBindings>& prepared) {
+  impl_->registry->finish(prepared->publication);
+}
+
+void AccessController::clearBindings() {
+  std::string error;
+  const auto prepared = prepareBindings({});
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
+}
+
 void AccessController::addPV(const std::string& name,
                              const pvxs::server::SharedPV& pv,
                              const AccessAssignment& assignment) {
-  auto member = std::make_shared<AccessMember>(assignment);
-  std::lock_guard<std::mutex> guard(impl_->mutex);
-  impl_->staticSource.add(name, pv);
-  impl_->members[name] = std::move(member);
+  auto desired = impl_->registry->bindings();
+  auto owner = std::make_shared<pvxs::server::SharedPV>(pv);
+  if (!desired.emplace(name, PVBinding{pv, std::move(owner), assignment}).second)
+    throw std::runtime_error("duplicate secured PV '" + name + "'");
+  std::string error;
+  const auto prepared = prepareBindings(desired);
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
 }
 
 void AccessController::removePV(const std::string& name) {
-  std::shared_ptr<AccessMember> member;
-  {
-    std::lock_guard<std::mutex> guard(impl_->mutex);
-    const auto found = impl_->members.find(name);
-    if (found != impl_->members.end()) {
-      member = std::move(found->second);
-      impl_->members.erase(found);
-    }
-  }
-  impl_->staticSource.remove(name);
-  if (member) member->closeClients();
+  auto desired = impl_->registry->bindings();
+  if (!desired.erase(name)) return;
+  std::string error;
+  const auto prepared = prepareBindings(desired);
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
 }
 
 void AccessController::setAssignment(const std::string& name, const AccessAssignment& assignment) {
-  std::shared_ptr<AccessMember> old;
-  {
-    std::lock_guard<std::mutex> guard(impl_->mutex);
-    const auto found = impl_->members.find(name);
-    if (found == impl_->members.end()) throw std::runtime_error("unknown secured PV '" + name + "'");
-    if (sameAccessAssignment(found->second->assignment, assignment)) return;
-    auto replacement = std::make_shared<AccessMember>(assignment);
-    old = std::move(found->second);
-    found->second = std::move(replacement);
-  }
-  old->closeClients();
+  auto desired = impl_->registry->bindings();
+  const auto found = desired.find(name);
+  if (found == desired.end()) throw std::runtime_error("unknown secured PV '" + name + "'");
+  if (sameAccessAssignment(found->second.access, assignment)) return;
+  found->second.access = assignment;
+  std::string error;
+  const auto prepared = prepareBindings(desired);
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
 }
 
-std::shared_ptr<pvxs::server::Source> AccessController::source() const { return impl_->securedSource; }
+std::shared_ptr<pvxs::server::Source> AccessController::source() const { return impl_->registry; }
 
 AccessStatus AccessController::status() const {
   AccessStatus result;
@@ -1244,6 +1438,12 @@ AccessStatus AccessController::status() const {
   result.deniedReads = impl_->deniedReads.load(std::memory_order_relaxed);
   result.deniedWrites = impl_->deniedWrites.load(std::memory_order_relaxed);
   result.rightsChanges = impl_->rightsChanges.load(std::memory_order_relaxed);
+  result.authorizedOperations = impl_->authorizedOperations;
+  result.operationsInFlight = impl_->operationsInFlight;
+  result.operationsSucceeded = impl_->operationsSucceeded; result.operationsFailed = impl_->operationsFailed;
+  result.operationsCancelled = impl_->operationsCancelled; result.operationsAbandoned = impl_->operationsAbandoned;
+  result.operationsDenied = impl_->operationsDenied;
+  result.denialLogsSuppressed = impl_->denialLogsSuppressed;
   std::lock_guard<std::mutex> guard(impl_->mutex);
   result.lastStatus = impl_->lastStatus;
   result.lastError = impl_->lastError;

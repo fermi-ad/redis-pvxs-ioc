@@ -24,7 +24,10 @@ bool sameAssignment(const std::optional<AccessAssignment>& a, const std::optiona
   return (!a && !b) || (a && b && sameAccessAssignment(*a, *b));
 }
 bool sameRpc(const RpcServiceConfig& a, const RpcServiceConfig& b) {
-  return std::tie(a.service, a.endpoint, a.suffix, a.defaults) == std::tie(b.service, b.endpoint, b.suffix, b.defaults)
+  return std::tie(a.service, a.endpoint, a.suffix, a.defaults, a.methodDefaults, a.optional,
+                  a.discoveryTimeoutMs, a.timeoutMs, a.retryIntervalMs) ==
+         std::tie(b.service, b.endpoint, b.suffix, b.defaults, b.methodDefaults, b.optional,
+                  b.discoveryTimeoutMs, b.timeoutMs, b.retryIntervalMs)
       && sameAssignment(a.access, b.access);
 }
 std::set<std::string> aliasSet(const PVConfig& pv) { return {pv.aliases.begin(), pv.aliases.end()}; }
@@ -32,6 +35,7 @@ std::set<std::string> aliasSet(const PVConfig& pv) { return {pv.aliases.begin(),
 
 ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
   ConfigDiff diff;
+  if (!sameOperationLimits(before.limits, after.limits)) diff.restartRequired.push_back("limits");
   if (before.server.instance != after.server.instance) diff.restartRequired.push_back("server.instance");
   if (before.server.nameSpace != after.server.nameSpace) diff.restartRequired.push_back("server.namespace");
   if (before.server.interfaces != after.server.interfaces) diff.restartRequired.push_back("server.interfaces");
@@ -50,9 +54,11 @@ ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
     if (next == newPVs.end()) { diff.removed.push_back(item.first); continue; }
     const auto& a = *item.second;
     const auto& b = *next->second;
-    if (!sameReaderTopology(a, b) || aliasSet(a) != aliasSet(b)) diff.replaced.push_back(item.first);
+    if (aliasSet(a) != aliasSet(b)) diff.aliasesChanged.push_back(item.first);
+    if (!sameReaderTopology(a, b)) diff.replaced.push_back(item.first);
     else if (!sameMetadata(a.metadata, b.metadata) || !sameAlarms(a.alarms, b.alarms)
-             || !sameTransform(a.transform, b.transform) || a.initialValue != b.initialValue)
+             || !sameTransform(a.transform, b.transform) || a.initialValue != b.initialValue
+             || a.maxFrameGap != b.maxFrameGap)
       diff.metadataChanged.push_back(item.first);
     if (!sameAssignment(a.access, b.access)) diff.accessChanged.push_back(item.first);
   }
@@ -131,6 +137,7 @@ std::string formatConfigDiff(const ConfigDiff& diff, bool json) {
   };
   list("additions", diff.added); list("removals", diff.removed); list("replacements", diff.replaced);
   list("metadata_changes", diff.metadataChanged); list("access_changes", diff.accessChanged);
+  list("alias_changes", diff.aliasesChanged);
   list("backend_changes", diff.backendsChanged); list("rpc_service_changes", diff.rpcServicesChanged);
   list("restart_required", diff.restartRequired);
   if (json) out << ",\"alarm_stream_changed\":" << (diff.alarmStreamChanged ? "true" : "false")

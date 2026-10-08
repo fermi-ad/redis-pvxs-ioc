@@ -605,6 +605,49 @@ int main(int argc, char** argv) {
   assert(adminPVName(legacy.server, "version") == "SYS:test:version");
   assert(adminPVName(legacy.server, "revision") == "SYS:test:revision");
 
+  const auto ndarray = loadConfigString(R"YAML(
+server: {instance: spike, namespace: "SPIKE:REDIS"}
+redis: {base_key: spike, host: localhost, port: 6385}
+pvs:
+  - name: Image
+    kind: ntndarray
+    read: {backend: default, key: image}
+    max_frame_bytes: 33554432
+)YAML");
+  assert(ndarray.pvs.size() == 1u);
+  assert(ndarray.pvs[0].kind == PVKind::NTNDArray);
+  assert(ndarray.pvs[0].maxFrameBytes == 33554432u);
+  assert(ndarray.pvs[0].maxFrameGap == kDefaultNDArrayMaxFrameGap);
+  assert(ndarray.pvs[0].write == std::nullopt);
+  assert(summarizeConfig(ndarray).find("ntndarray max_frame_bytes=33554432") != std::string::npos);
+  const std::string gapConfig = "server: {instance: gap}\nredis: {base_key: gap, host: localhost, port: 6385}\npvs:\n"
+      "  - name: Image\n    kind: ntndarray\n    read: {key: image}\n    max_frame_gap: ";
+  assert(loadConfigString(gapConfig + "0\n").pvs[0].maxFrameGap == 0u);
+  assert(loadConfigString(gapConfig + "2147483646\n").pvs[0].maxFrameGap == 2147483646u);
+  for (const auto* invalidGap : {"-1", "2147483647", "true"}) {
+    assert(throwsConfig((gapConfig + invalidGap + "\n").c_str()));
+  }
+  assert(throwsConfig("server: {instance: gap}\nredis: {base_key: gap, host: localhost, port: 6385}\npvs:\n"
+      "  - name: scalar\n    type: uint32\n    shape: scalar\n    read: {key: value}\n    max_frame_gap: 1\n"));
+  assert(throwsConfig(R"YAML(
+server: {instance: spike}
+redis: {base_key: spike, host: localhost, port: 6385}
+pvs:
+  - name: Image
+    kind: ntndarray
+    type: uint8
+    read: {key: image}
+)YAML"));
+  assert(throwsConfig(R"YAML(
+server: {instance: spike}
+redis: {base_key: spike, host: localhost, port: 6385}
+pvs:
+  - name: Image
+    kind: ntndarray
+    read: {key: image}
+    write: {key: image:set}
+)YAML"));
+
   const auto multi = loadConfigString(kMultiBackendConfig);
   assert(multi.server.instance == "multi");
   assert(multi.redisBackends.size() == 2u);
@@ -677,6 +720,27 @@ int main(int argc, char** argv) {
   assert(rpc.rpcServices[0].suffix == "_RPC");
   assert(rpc.rpcServices[0].defaults.at("digitizer") == "MTCA1-1");
   assert(rpc.rpcServices[0].defaults.at("length_ns") == "1000000000");
+  assert(!rpc.rpcServices[0].optional && rpc.rpcServices[0].discoveryTimeoutMs == 3000);
+  assert(rpc.rpcServices[0].timeoutMs == 10000 && rpc.rpcServices[0].retryIntervalMs == 5000);
+  const auto rpcLimits = loadConfigString(std::string(kLegacyConfig) +
+      "\nlimits: {rpc_workers: 2, queued_rpc_per_method: 3, queued_rpc_bytes: 4096}\n");
+  assert(rpcLimits.limits.rpcWorkers == 2 && rpcLimits.limits.queuedRpcPerMethod == 3 && rpcLimits.limits.queuedRpcBytes == 4096);
+  assert(!sameOperationLimits(rpcLimits.limits, rpc.limits));
+  for (const auto* setting : {"rpc_workers: 0", "rpc_workers: 65", "queued_rpc_per_method: 0", "queued_rpc_bytes: 1023"}) {
+    const auto invalidLimits = std::string(kLegacyConfig) + "\nlimits: {" + setting + "}\n";
+    assert(throwsConfig(invalidLimits.c_str()));
+  }
+  const auto configuredRpc = loadConfigString(std::string(kRpcOnly) +
+      "    optional: true\n    discovery_timeout_ms: 200\n    timeout_ms: 1500\n"
+      "    retry_interval_ms: 500\n    method_defaults: {Value: {number: 4}}\n");
+  assert(configuredRpc.rpcServices[0].optional && configuredRpc.rpcServices[0].discoveryTimeoutMs == 200);
+  assert(configuredRpc.rpcServices[0].methodDefaults.at("Value").at("number") == "4");
+  for (const auto* setting : {"optional: maybe", "discovery_timeout_ms: 0", "timeout_ms: 300001",
+                             "retry_interval_ms: 99", "method_defaults: {Value: [1]}",
+                             "method_defaults: {'': {number: 1}}", "defaults: {'': 1}"}) {
+    const auto text = std::string(kRpcOnly) + "    " + setting + "\n";
+    assert(throwsConfig(text.c_str()));
+  }
 
   const auto rpcOnly = loadConfigString(kRpcOnly);  // no pvs is allowed
   assert(rpcOnly.pvs.empty());

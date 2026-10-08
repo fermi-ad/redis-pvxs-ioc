@@ -685,6 +685,15 @@ int main(int argc, char** argv) {
   assert(throwsConfig(kRpcMissingEndpoint));     // service without endpoint
   assert(throwsConfig(kNoPvsNoRpc));             // neither pvs nor rpc_services
 
+  assert(loadConfigString(kLegacyConfig).discovery.enabled);
+  for (const auto* setting : {"udp_port: 65536", "timeout_ms: 0", "max_records: 0", "max_bytes: 1023",
+                             "bind_address: localhost", "unknown: true", "enabled: true, enabled: false"}) {
+    const auto text = std::string(kLegacyConfig) + "\ndiscovery: {" + setting + "}\n";
+    assert(throwsConfig(text.c_str()));
+  }
+  const auto disabled = loadConfigString(std::string(kLegacyConfig) + "\ndiscovery: {enabled: false}\n");
+  assert(!disabled.discovery.enabled);
+
   if (argc > 1) {
     const auto fileConfig = loadConfigFile(argv[1]);
     assert(fileConfig.access.enabled);

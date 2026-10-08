@@ -240,6 +240,8 @@ endif()
 
 add_executable(redis-pvxs-access-benchmark tools/access_benchmark.cpp)
 target_link_libraries(redis-pvxs-access-benchmark PRIVATE redis-pvxs-ioc-core)
+add_executable(stream_capacity tools/stream_capacity.cpp)
+target_link_libraries(stream_capacity PRIVATE redis-pvxs-ioc-core)
 
 install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
 
@@ -407,6 +409,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/ndarray_transfer_e2e.py
     --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:ndarray_transfer>)
   set_tests_properties(ndarray_transfer_e2e PROPERTIES TIMEOUT 30)
+  add_test(NAME stream_capacity_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/stream_capacity_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:stream_capacity>)
+  set_tests_properties(stream_capacity_e2e PROPERTIES TIMEOUT 40)
+  add_test(NAME stream_capacity_report_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/stream_capacity_report_test.py)
+  set_tests_properties(stream_capacity_report_tests PROPERTIES TIMEOUT 15)
 
   add_executable(alarm_publisher_tests tests/alarm_publisher_tests.cpp)
   target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)

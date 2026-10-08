@@ -17,12 +17,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(REDIS_PVXS_IOC_BUILD_TESTS "Build redis-pvxs-ioc unit tests" ON)
+option(REDIS_PVXS_IOC_ENABLE_GRPC "Build reflected PVA RPC to gRPC forwarding" ON)
+option(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER "Build the one-shot ChannelFinder publication tool" ON)
 
 set(EPICS_BASE "${CMAKE_SOURCE_DIR}/third_party/epics-base" CACHE PATH "Path to built epics-base")
 set(PVXS_ROOT "${CMAKE_SOURCE_DIR}/third_party/pvxs" CACHE PATH "Path to built pvxs")
 
 find_package(Perl REQUIRED)
-find_package(CURL REQUIRED)
+if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
+  find_package(CURL REQUIRED)
+endif()
 
 # ---- gRPC + protobuf for the RPC->gRPC forwarding feature ------------------
 # Provided by the dev packages installed in the Dockerfile
@@ -30,8 +34,10 @@ find_package(CURL REQUIRED)
 # source build. Protobuf in MODULE mode (Ubuntu ships no ProtobufConfig.cmake;
 # CMake's FindProtobuf provides Protobuf_PROTOC_EXECUTABLE + protobuf::libprotobuf).
 # gRPC ships gRPCConfig.cmake (gRPC::grpc++ + gRPC::grpc_cpp_plugin).
-find_package(Protobuf REQUIRED)
-find_package(gRPC CONFIG REQUIRED)
+if(REDIS_PVXS_IOC_ENABLE_GRPC)
+  find_package(Protobuf REQUIRED)
+  find_package(gRPC CONFIG REQUIRED)
+endif()
 
 set(
   REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE
@@ -120,7 +126,9 @@ set(PVXS_EXTRA_INCLUDE_DIRS)
 set(PVXS_EXTRA_LINK_LIBS)
 if(EXISTS "${PVXS_BUNDLE_EVENT_LIB}")
   list(APPEND PVXS_EXTRA_INCLUDE_DIRS "${PVXS_USR}/include")
-  list(APPEND PVXS_EXTRA_LINK_LIBS "${PVXS_BUNDLE_EVENT_LIB}")
+  # PVXS already links event_core and event_pthreads. Linking monolithic
+  # libevent as well creates two copies of its global threading state on macOS
+  # and can deadlock server construction. Follow PVXS's transitive dependencies.
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR
     "Missing bundled libevent: ${PVXS_BUNDLE_EVENT_LIB}\n"
@@ -134,6 +142,7 @@ add_subdirectory(third_party/redis-adapter)
 # ---- Generated gRPC server-reflection stubs --------------------------------
 # The IOC compiles in only the standard gRPC reflection proto; it discovers any
 # backend service's schema at runtime, so it carries no application proto.
+if(REDIS_PVXS_IOC_ENABLE_GRPC)
 set(REFLECTION_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/reflection.proto")
 set(BRIDGE_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
 file(MAKE_DIRECTORY "${BRIDGE_GEN_DIR}")
@@ -160,16 +169,23 @@ target_link_libraries(bpm-query-proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
 target_include_directories(bpm-query-proto PUBLIC "${BRIDGE_GEN_DIR}" ${Protobuf_INCLUDE_DIRS})
 set_target_properties(bpm-query-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+endif()
+
 add_library(redis-pvxs-ioc-core STATIC
+  src/source_health.cpp
   src/access_control.cpp
   src/config.cpp
-  src/channelfinder.cpp
+  src/secrets.cpp
+  src/config_diff.cpp
+  src/discovery.cpp
   src/util.cpp
   src/alarm_publisher.cpp
+  src/alarm_worker.cpp
+  src/ntndarray.cpp
   src/runtime.cpp
-  src/grpc_bridge.cpp
-  src/rpc_pv.cpp
+  src/operation_queue.cpp
   src/app.cpp
+  src/pv_registry.cpp
   ${REDIS_ADAPTER_SOURCES}
 )
 
@@ -188,32 +204,69 @@ target_include_directories(redis-pvxs-ioc-core
 target_link_libraries(redis-pvxs-ioc-core
   PUBLIC
     yaml-cpp
-    bpm-query-proto
-    gRPC::grpc++
-    protobuf::libprotobuf
     ${REDIS_ADAPTER_LIBRARIES}
     ${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}
     ${PVXS_LIB}/libpvxs${SHARED_LIB_EXT}
     ${PVXS_EXTRA_LINK_LIBS}
 )
 
+target_compile_definitions(redis-pvxs-ioc-core PUBLIC
+  REDIS_PVXS_IOC_ENABLE_GRPC=$<BOOL:${REDIS_PVXS_IOC_ENABLE_GRPC}>
+  REDIS_PVXS_IOC_ENABLE_CHANNELFINDER=$<BOOL:${REDIS_PVXS_IOC_ENABLE_CHANNELFINDER}>)
+if(REDIS_PVXS_IOC_ENABLE_GRPC)
+  target_sources(redis-pvxs-ioc-core PRIVATE src/grpc_bridge.cpp src/rpc_pv.cpp)
+  target_link_libraries(redis-pvxs-ioc-core PUBLIC bpm-query-proto)
+endif()
+
+# Require the narrow Base extension used to refresh live HAG membership.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES "${EPICS_BASE}/include" "${EPICS_BASE}/include/${EPICS_COMPILER_DIR}" "${EPICS_BASE}/include/${EPICS_OS_DIR}")
+set(CMAKE_REQUIRED_LIBRARIES "${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}")
+check_cxx_source_compiles("#include <asLib.h>\nint main() { unsigned changed = 0; return asRefreshHag(&changed); }" REDIS_PVXS_IOC_HAS_HAG_REFRESH)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if(NOT REDIS_PVXS_IOC_HAS_HAG_REFRESH)
+  message(FATAL_ERROR "EPICS Base must provide asRefreshHag(). Build the pinned Base extension; see docs/access-control.md.")
+endif()
+
 add_executable(redis-pvxs-ioc src/main.cpp)
 target_link_libraries(redis-pvxs-ioc PRIVATE redis-pvxs-ioc-core)
 
-add_executable(redis-pvxs-channelfinder-sync tools/channelfinder_sync.cpp)
-target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-ioc-core CURL::libcurl)
+if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
+  add_library(redis-pvxs-channelfinder STATIC src/channelfinder.cpp)
+  target_link_libraries(redis-pvxs-channelfinder PUBLIC redis-pvxs-ioc-core)
+  add_executable(redis-pvxs-channelfinder-sync tools/channelfinder_sync.cpp)
+  target_link_libraries(redis-pvxs-channelfinder-sync PRIVATE redis-pvxs-channelfinder CURL::libcurl)
+  install(TARGETS redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
+endif()
 
 add_executable(redis-pvxs-access-benchmark tools/access_benchmark.cpp)
 target_link_libraries(redis-pvxs-access-benchmark PRIVATE redis-pvxs-ioc-core)
+add_executable(stream_capacity tools/stream_capacity.cpp)
+target_link_libraries(stream_capacity PRIVATE redis-pvxs-ioc-core)
 
 # Qualification helpers stay in the builder, not the published runtime image.
 add_executable(qualification_probe tools/qualification_probe.cpp)
 target_link_libraries(qualification_probe PRIVATE redis-pvxs-ioc-core)
 
-install(TARGETS redis-pvxs-ioc redis-pvxs-channelfinder-sync RUNTIME DESTINATION bin)
+install(TARGETS redis-pvxs-ioc RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_BUILD_TESTS)
   enable_testing()
+  find_package(Threads REQUIRED)
+
+  add_executable(operation_queue_tests tests/operation_queue_tests.cpp src/operation_queue.cpp)
+  target_include_directories(operation_queue_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(operation_queue_tests PRIVATE Threads::Threads)
+  target_compile_options(operation_queue_tests PRIVATE -UNDEBUG)
+  add_test(NAME operation_queue_tests COMMAND operation_queue_tests)
+  set_tests_properties(operation_queue_tests PROPERTIES TIMEOUT 15)
+
+  add_executable(endpoint_tests tests/endpoint_tests.cpp)
+  target_link_libraries(endpoint_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(endpoint_tests PRIVATE -UNDEBUG)
+  add_test(NAME endpoint_tests COMMAND endpoint_tests)
+  set_tests_properties(endpoint_tests PROPERTIES TIMEOUT 15)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_executable(qualification_probe_fixture tests/qualification_probe_fixture.cpp)
   target_link_libraries(qualification_probe_fixture PRIVATE redis-pvxs-ioc-core)
@@ -221,6 +274,139 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/tests/qualification_probe_e2e.py
     --fixture $<TARGET_FILE:qualification_probe_fixture> --probe $<TARGET_FILE:qualification_probe>)
   set_tests_properties(qualification_probe_e2e PROPERTIES TIMEOUT 25)
+  find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  if(REDIS_PVXS_IOC_ENABLE_GRPC)
+    set(RPC_FIXTURE_PROTO "${CMAKE_SOURCE_DIR}/tests/rpc_fixture.proto")
+    set(RPC_FIXTURE_DIR "${CMAKE_BINARY_DIR}/rpc-fixture")
+    file(MAKE_DIRECTORY "${RPC_FIXTURE_DIR}")
+    add_custom_command(
+      OUTPUT "${RPC_FIXTURE_DIR}/rpc_fixture.pb.cc" "${RPC_FIXTURE_DIR}/rpc_fixture.pb.h"
+             "${RPC_FIXTURE_DIR}/rpc_fixture.grpc.pb.cc" "${RPC_FIXTURE_DIR}/rpc_fixture.grpc.pb.h"
+      COMMAND ${Protobuf_PROTOC_EXECUTABLE} --proto_path=${CMAKE_SOURCE_DIR}/tests
+              --cpp_out=${RPC_FIXTURE_DIR} --grpc_out=${RPC_FIXTURE_DIR}
+              --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin> ${RPC_FIXTURE_PROTO}
+      DEPENDS "${RPC_FIXTURE_PROTO}")
+    add_executable(rpc_fixture tests/rpc_fixture.cpp
+      "${RPC_FIXTURE_DIR}/rpc_fixture.pb.cc" "${RPC_FIXTURE_DIR}/rpc_fixture.grpc.pb.cc")
+    target_include_directories(rpc_fixture PRIVATE "${RPC_FIXTURE_DIR}")
+    target_link_libraries(rpc_fixture PRIVATE protobuf::libprotobuf gRPC::grpc++ gRPC::grpc++_reflection)
+    add_test(NAME endpoint_rpc_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+      ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/endpoint_rpc_e2e.py
+      --ioc $<TARGET_FILE:redis-pvxs-ioc> --fixture $<TARGET_FILE:rpc_fixture>
+      --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+      --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
+    set_tests_properties(endpoint_rpc_e2e PROPERTIES TIMEOUT 75)
+    add_executable(rpc_argument_tests tests/rpc_argument_tests.cpp)
+    target_compile_options(rpc_argument_tests PRIVATE -UNDEBUG)
+    target_link_libraries(rpc_argument_tests PRIVATE redis-pvxs-ioc-core)
+    add_executable(rpc_runtime_tests tests/rpc_runtime_tests.cpp)
+    target_compile_options(rpc_runtime_tests PRIVATE -UNDEBUG)
+    target_link_libraries(rpc_runtime_tests PRIVATE redis-pvxs-ioc-core)
+    add_test(NAME rpc_hardening_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+      ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/rpc_hardening_e2e.py
+      --ioc $<TARGET_FILE:redis-pvxs-ioc> --fixture $<TARGET_FILE:rpc_fixture>
+      --arguments-fixture $<TARGET_FILE:rpc_argument_tests>
+      --runtime-fixture $<TARGET_FILE:rpc_runtime_tests>
+      --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+      --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
+    set_tests_properties(rpc_hardening_e2e PROPERTIES TIMEOUT 75)
+    add_test(NAME rpc_recovery_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+      ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/rpc_recovery_e2e.py
+      --ioc $<TARGET_FILE:redis-pvxs-ioc> --fixture $<TARGET_FILE:rpc_fixture>
+      --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+      --pvxcall ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxcall)
+    set_tests_properties(rpc_recovery_e2e PROPERTIES TIMEOUT 60)
+  endif()
+  add_test(NAME config_cli_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/config_cli_tests.py $<TARGET_FILE:redis-pvxs-ioc>)
+  set_tests_properties(config_cli_tests PROPERTIES TIMEOUT 60)
+  add_test(NAME secret_files_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/secret_files_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(secret_files_e2e PROPERTIES TIMEOUT 45)
+  add_executable(runtime_tests tests/runtime_tests.cpp)
+  target_link_libraries(runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:runtime_tests>)
+  set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
+
+  add_executable(source_health_tests tests/source_health_tests.cpp)
+  target_link_libraries(source_health_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(source_health_tests PRIVATE -UNDEBUG)
+  add_test(NAME source_health_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:source_health_tests>)
+  set_tests_properties(source_health_tests PROPERTIES TIMEOUT 75)
+  add_executable(source_health_pva_tests tests/source_health_pva_tests.cpp)
+  target_link_libraries(source_health_pva_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(source_health_pva_tests PRIVATE -UNDEBUG)
+  add_test(NAME source_health_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/source_health_e2e.py
+    --redis-server ${REDIS_SERVER_EXECUTABLE} --fixture $<TARGET_FILE:source_health_pva_tests>)
+  set_tests_properties(source_health_e2e PROPERTIES TIMEOUT 75)
+
+  add_executable(operation_runtime_tests tests/operation_runtime_tests.cpp)
+  target_link_libraries(operation_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(operation_runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME operation_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:operation_runtime_tests>)
+  set_tests_properties(operation_runtime_tests PROPERTIES TIMEOUT 75)
+
+  add_executable(dispatch_denial_audit_tests tests/dispatch_denial_audit_tests.cpp)
+  target_link_libraries(dispatch_denial_audit_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(dispatch_denial_audit_tests PRIVATE -UNDEBUG)
+  add_test(NAME dispatch_denial_audit_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:dispatch_denial_audit_tests>)
+  set_tests_properties(dispatch_denial_audit_tests PROPERTIES TIMEOUT 60)
+
+  add_executable(pv_registry_tests tests/pv_registry_tests.cpp)
+  target_link_libraries(pv_registry_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(pv_registry_tests PRIVATE -UNDEBUG)
+  add_test(NAME pv_registry_tests COMMAND pv_registry_tests)
+  set_tests_properties(pv_registry_tests PROPERTIES TIMEOUT 20)
+  add_executable(registry_runtime_tests tests/registry_runtime_tests.cpp)
+  target_link_libraries(registry_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(registry_runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME registry_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:registry_runtime_tests>)
+  set_tests_properties(registry_runtime_tests PROPERTIES TIMEOUT 75)
+  add_executable(transaction_tests tests/transaction_tests.cpp)
+  target_link_libraries(transaction_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(transaction_tests PRIVATE -UNDEBUG)
+  add_test(NAME transaction_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:transaction_tests>)
+  set_tests_properties(transaction_tests PROPERTIES TIMEOUT 75)
+
+  add_test(NAME reload_resources_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/reload_resources_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
+    --pvxput ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxput)
+  set_tests_properties(reload_resources_e2e PROPERTIES TIMEOUT 75)
+
+  add_test(NAME discovery_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/discovery_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(discovery_e2e PROPERTIES TIMEOUT 75)
+
+  add_executable(discovery_tests tests/discovery_tests.cpp)
+  target_link_libraries(discovery_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(discovery_tests PRIVATE -UNDEBUG)
+  add_test(NAME discovery_tests COMMAND discovery_tests)
+  set_tests_properties(discovery_tests PROPERTIES TIMEOUT 15)
 
   add_executable(config_tests tests/config_tests.cpp)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)
@@ -232,19 +418,66 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
 
   add_executable(access_runtime_tests tests/access_runtime_tests.cpp)
   target_link_libraries(access_runtime_tests PRIVATE redis-pvxs-ioc-core)
-  add_test(NAME access_runtime_tests COMMAND access_runtime_tests)
+  add_test(NAME access_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/access_audit_logs.py $<TARGET_FILE:access_runtime_tests>)
 
   add_executable(model_tests tests/model_tests.cpp)
   target_link_libraries(model_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME model_tests COMMAND model_tests)
 
+  add_executable(ntndarray_tests tests/ntndarray_tests.cpp)
+  target_link_libraries(ntndarray_tests PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME ntndarray_tests COMMAND ntndarray_tests)
+  add_executable(ntndarray_runtime_tests tests/ntndarray_runtime_tests.cpp)
+  target_link_libraries(ntndarray_runtime_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(ntndarray_runtime_tests PRIVATE -UNDEBUG)
+  add_test(NAME ntndarray_runtime_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:ntndarray_runtime_tests>)
+  set_tests_properties(ntndarray_runtime_tests PROPERTIES TIMEOUT 45)
+  add_executable(ndarray_transfer tests/ndarray_transfer.cpp)
+  target_link_libraries(ndarray_transfer PRIVATE redis-pvxs-ioc-core)
+  add_test(NAME ndarray_transfer_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/ndarray_transfer_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:ndarray_transfer>)
+  set_tests_properties(ndarray_transfer_e2e PROPERTIES TIMEOUT 30)
+  add_test(NAME stream_capacity_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/stream_capacity_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:stream_capacity>)
+  set_tests_properties(stream_capacity_e2e PROPERTIES TIMEOUT 40)
+  add_test(NAME stream_capacity_report_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/stream_capacity_report_test.py)
+  set_tests_properties(stream_capacity_report_tests PROPERTIES TIMEOUT 15)
+
   add_executable(alarm_publisher_tests tests/alarm_publisher_tests.cpp)
   target_link_libraries(alarm_publisher_tests PRIVATE redis-pvxs-ioc-core)
   add_test(NAME alarm_publisher_tests COMMAND alarm_publisher_tests)
 
-  add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
-  target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-ioc-core)
-  add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
+  add_executable(alarm_delivery_tests tests/alarm_delivery_tests.cpp)
+  target_link_libraries(alarm_delivery_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(alarm_delivery_tests PRIVATE -UNDEBUG)
+  add_test(NAME alarm_delivery_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:alarm_delivery_tests>)
+  set_tests_properties(alarm_delivery_tests PROPERTIES TIMEOUT 30)
+  add_test(NAME alarm_recovery_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/alarm_recovery_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(alarm_recovery_e2e PROPERTIES TIMEOUT 30)
+
+  if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
+    add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
+    target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-channelfinder)
+    target_compile_options(channelfinder_tests PRIVATE -UNDEBUG)
+    add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
+    add_test(NAME channelfinder_http_tests COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/tests/channelfinder_http_tests.py $<TARGET_FILE:redis-pvxs-channelfinder-sync>)
+    set_tests_properties(channelfinder_http_tests PROPERTIES TIMEOUT 30)
+  endif()
 
   # redis-plus-plus supplies a default Release build type when callers don't
   # specify one.  These small test executables use assert() as their test
@@ -254,8 +487,9 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
       access_control_tests
       access_runtime_tests
       model_tests
-      alarm_publisher_tests
-      channelfinder_tests)
+      ntndarray_tests
+      alarm_publisher_tests)
     target_compile_options(${_test_target} PRIVATE -UNDEBUG)
+    set_tests_properties(${_test_target} PROPERTIES TIMEOUT 60)
   endforeach()
 endif()

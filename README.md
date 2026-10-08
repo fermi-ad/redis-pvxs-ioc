@@ -9,6 +9,10 @@ Redis-backed EPICS process variables defined by YAML.
 
 ## Key features
 
+- **Automatic discovery:** PVA search stays native, and the service registers
+  its PVs, aliases, diagnostics, and reflected RPCs with RecCeiver automatically.
+  Catalog updates follow successful reloads and recover after receiver restarts.
+  See [Discovery](docs/reccaster.md).
 - **Generation-based hot reload:** reload through `SIGHUP` or a PVA command;
   compatible Redis subscriptions stay live, changed PVs are staged, and invalid
   replacements are rejected while the active generation keeps serving.
@@ -28,6 +32,9 @@ Redis-backed EPICS process variables defined by YAML.
 - **Snapshot-plus-stream reads:** each PV opens from the latest Redis value, or
   its YAML `initial` fallback, before live subscription updates take over; Redis
   source timestamps are carried into PVA.
+- **Redis-backed NTNDArray:** read-only image PVs validate a versioned
+  RedisAdapter stream envelope, use the Stream ID as acquisition time, and
+  preserve the last good frame across malformed input.
 - **Confirmed Redis writes:** scalar and array routes may use independent read,
   write, and confirmation keys across multiple backends; readback matching has a
   bounded timeout, and stale-generation operations are fenced during reload.
@@ -121,6 +128,7 @@ immutable digest. `:latest` is only a development convenience. See the
 
 - [Documentation index](docs/README.md)
 - [Configuration reference](docs/configuration.md)
+- [Redis-backed NTNDArray](docs/ntndarray.md)
 - [Operations and diagnostics](docs/operations.md)
 - [Access control](docs/access-control.md)
 - [Performance measurement](docs/performance.md)
@@ -129,14 +137,6 @@ immutable digest. `:latest` is only a development convenience. See the
 - [Building from source](docs/building-from-source.md)
 - [Contributor development guide](docs/development.md)
 - [Release process](docs/releasing.md)
-
-## Optional legacy sidecar
-
-An independently versioned conventional IOC sidecar is available for `.db`
-records, RecCaster, and selected support modules. It is experimental and is not
-part of the core quick start while its long-term product boundary is decided in
-[issue #68](https://github.com/fermi-ad/redis-pvxs-ioc/issues/68). See the
-[legacy sidecar guide](docs/legacy-sidecar.md) for the current image and limits.
 
 ## License
 

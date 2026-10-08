@@ -1,8 +1,15 @@
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/endpoints.h"
+#include "redis_pvxs_ioc/secrets.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <type_traits>
 #include <cctype>
 #include <filesystem>
+#include <arpa/inet.h>
+#include <tuple>
 #include <map>
 #include <set>
 #include <sstream>
@@ -56,23 +63,59 @@ void rejectUnknownKeys(const YAML::Node& node,
   }
 }
 
+void validateTree(const YAML::Node& node, const std::string& path,
+                  std::vector<YAML::Node>& ancestors, size_t& visited) {
+  if (++visited > 1000000 || ancestors.size() >= 64) fail(path, "configuration structure exceeds validation bounds");
+  for (const auto& ancestor : ancestors)
+    if (node.is(ancestor)) fail(path, "recursive YAML aliases are unsupported");
+  if (node.IsMap()) {
+    ancestors.push_back(node);
+    std::set<std::string> keys;
+    for (const auto& entry : node) {
+      if (!entry.first.IsScalar()) fail(path, "mapping keys must be scalar strings");
+      const auto key = entry.first.as<std::string>();
+      if (!keys.insert(key).second) fail(path + "." + key, "duplicate key");
+      validateTree(entry.second, path + "." + key, ancestors, visited);
+    }
+    ancestors.pop_back();
+  } else if (node.IsSequence()) {
+    ancestors.push_back(node);
+    for (size_t i = 0; i < node.size(); ++i) validateTree(node[i], path + "[" + std::to_string(i) + "]", ancestors, visited);
+    ancestors.pop_back();
+  }
+}
+
 template <typename T>
 T parseNumeric(const YAML::Node& node, const std::string& path) {
+  if constexpr (std::is_unsigned_v<T> && !std::is_same_v<T, bool>) {
+    const auto text = node.Scalar();
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first != std::string::npos && text[first] == '-') fail(path, "negative unsigned value");
+  }
+  T value{};
   try {
-    return node.as<T>();
+    value = node.as<T>();
   } catch (const std::exception& ex) {
     fail(path, ex.what());
   }
+  if constexpr (std::is_floating_point_v<T>) {
+    if (!std::isfinite(value)) fail(path, "must be finite");
+  }
+  return value;
 }
 
 template <>
 int8_t parseNumeric<int8_t>(const YAML::Node& node, const std::string& path) {
-  return static_cast<int8_t>(parseNumeric<int>(node, path));
+  const auto value = parseNumeric<int>(node, path);
+  if (value < -128 || value > 127) fail(path, "outside int8 range");
+  return static_cast<int8_t>(value);
 }
 
 template <>
 uint8_t parseNumeric<uint8_t>(const YAML::Node& node, const std::string& path) {
-  return static_cast<uint8_t>(parseNumeric<unsigned int>(node, path));
+  const auto value = parseNumeric<unsigned int>(node, path);
+  if (value > 255) fail(path, "outside uint8 range");
+  return static_cast<uint8_t>(value);
 }
 
 std::string parseString(const YAML::Node& node, const std::string& path) {
@@ -284,7 +327,7 @@ TypedValue parseInitialValue(const YAML::Node& node,
 }
 
 RouteConfig parseRoute(const YAML::Node& node, const std::string& path) {
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"backend", "key"});
   RouteConfig route;
   if (node["backend"]) {
     route.backend = parseString(node["backend"], path + ".backend");
@@ -297,7 +340,7 @@ RouteConfig parseRoute(const YAML::Node& node, const std::string& path) {
 }
 
 ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"backend", "key", "timeout_ms"});
   ConfirmConfig confirm;
   if (node["backend"]) {
     confirm.backend = parseString(node["backend"], path + ".backend");
@@ -309,29 +352,47 @@ ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
   if (confirm.key.empty()) {
     fail(path + ".key", "must not be empty");
   }
+  if (confirm.timeoutMs <= 0 || confirm.timeoutMs > 300000) fail(path + ".timeout_ms", "must be 1..300000");
   return confirm;
 }
 
-RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path) {
-  const auto redisNode = requireMap(node, path);
+RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path,
+                            const std::filesystem::path& directory) {
+  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "user_file", "password_file", "workers", "readers", "reader_probe_ms"});
+  const auto redisNode = node;
 
   RedisConfig config;
   config.baseKey = parseString(requireNode(redisNode, "base_key", path), path + ".base_key");
   config.host = parseString(requireNode(redisNode, "host", path), path + ".host");
   config.port = parseNumeric<uint16_t>(requireNode(redisNode, "port", path), path + ".port");
-  if (redisNode["user"]) {
-    config.user = parseString(redisNode["user"], path + ".user");
-  }
-  if (redisNode["password"]) {
-    config.password = parseString(redisNode["password"], path + ".password");
-  }
+  const auto credential = [&](const std::string& name) {
+    const auto file = name + "_file";
+    if (redisNode[name] && redisNode[file]) fail(path, name + " and " + file + " are mutually exclusive");
+    if (redisNode[file]) {
+      const auto input = parseString(redisNode[file], path + "." + file);
+      if (input.empty()) fail(path + "." + file, "must not be empty");
+      const auto location = std::filesystem::path(input);
+      return readSecretFile((location.is_absolute() ? location : directory / location).string(), path + "." + file);
+    }
+    return redisNode[name] ? parseString(redisNode[name], path + "." + name) : std::string{};
+  };
+  config.user = credential("user");
+  config.password = credential("password");
   if (redisNode["workers"]) {
     config.workers = parseNumeric<uint16_t>(redisNode["workers"], path + ".workers");
   }
   if (redisNode["readers"]) {
     config.readers = parseNumeric<uint16_t>(redisNode["readers"], path + ".readers");
   }
+  if (redisNode["reader_probe_ms"])
+    config.readerProbeMs = parseNumeric<uint32_t>(redisNode["reader_probe_ms"], path + ".reader_probe_ms");
+  if (config.readerProbeMs && (config.readerProbeMs < 100 || config.readerProbeMs > 60000))
+    fail(path + ".reader_probe_ms", "must be zero (disabled) or 100..60000");
 
+  if (config.host.empty()) fail(path + ".host", "must not be empty");
+  if (!config.port) fail(path + ".port", "must be 1..65535");
+  if (!config.workers || config.workers > 256) fail(path + ".workers", "must be 1..256");
+  if (!config.readers || config.readers > 256) fail(path + ".readers", "must be 1..256");
   return config;
 }
 
@@ -341,7 +402,8 @@ ChannelFinderConfig parseChannelFinderConfig(const YAML::Node& node, const std::
     return config;
   }
 
-  const auto channelFinderNode = requireMap(node, path);
+  rejectUnknownKeys(node, path, {"url", "owner", "tags", "properties"});
+  const auto channelFinderNode = node;
   if (channelFinderNode["url"]) {
     config.url = parseString(channelFinderNode["url"], path + ".url");
   }
@@ -396,17 +458,18 @@ void resolveBackendAlias(std::string& alias,
   }
 }
 
-void parseLimitConfig(const YAML::Node& node, LimitConfig& config, const std::string& path) {
+void parseLimitConfig(const YAML::Node& node, LimitConfig& config, const std::string& path, bool control = false) {
   if (!node) {
     return;
   }
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, control ? std::set<std::string>{"low", "high", "min_step"} : std::set<std::string>{"low", "high"});
   if (node["low"]) {
     config.low = parseNumeric<double>(node["low"], path + ".low");
   }
   if (node["high"]) {
     config.high = parseNumeric<double>(node["high"], path + ".high");
   }
+  if (config.low && config.high && *config.low > *config.high) fail(path, "low must not exceed high");
 }
 
 MetadataConfig parseMetadata(const YAML::Node& node, const std::string& path) {
@@ -414,7 +477,7 @@ MetadataConfig parseMetadata(const YAML::Node& node, const std::string& path) {
   if (!node) {
     return metadata;
   }
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"description", "units", "precision", "form", "display", "control", "min_step"});
   if (node["description"]) {
     metadata.description = parseString(node["description"], path + ".description");
   }
@@ -428,13 +491,14 @@ MetadataConfig parseMetadata(const YAML::Node& node, const std::string& path) {
     metadata.form = parseDisplayForm(node["form"], path + ".form");
   }
   parseLimitConfig(node["display"], metadata.display, path + ".display");
-  parseLimitConfig(node["control"], metadata.control, path + ".control");
+  parseLimitConfig(node["control"], metadata.control, path + ".control", true);
   if (node["min_step"]) {
     metadata.minStep = parseNumeric<double>(node["min_step"], path + ".min_step");
   }
   if (node["control"] && node["control"]["min_step"]) {
     metadata.minStep = parseNumeric<double>(node["control"]["min_step"], path + ".control.min_step");
   }
+  if (metadata.minStep && *metadata.minStep < 0) fail(path + ".min_step", "must not be negative");
   return metadata;
 }
 
@@ -443,7 +507,7 @@ AlarmConfig parseAlarmConfig(const YAML::Node& node, const std::string& path) {
   if (!node) {
     return alarm;
   }
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"low_alarm", "low_warning", "high_warning", "high_alarm", "hysteresis"});
   if (node["low_alarm"]) {
     alarm.lowAlarm = parseNumeric<double>(node["low_alarm"], path + ".low_alarm");
   }
@@ -459,6 +523,13 @@ AlarmConfig parseAlarmConfig(const YAML::Node& node, const std::string& path) {
   if (node["hysteresis"]) {
     alarm.hysteresis = parseNumeric<double>(node["hysteresis"], path + ".hysteresis");
   }
+  if (alarm.hysteresis < 0) fail(path + ".hysteresis", "must not be negative");
+  std::optional<double> previous;
+  for (const auto& threshold : {alarm.lowAlarm, alarm.lowWarning, alarm.highWarning, alarm.highAlarm}) {
+    if (!threshold) continue;
+    if (previous && *previous > *threshold) fail(path, "alarm thresholds must be ordered low_alarm <= low_warning <= high_warning <= high_alarm");
+    previous = threshold;
+  }
   return alarm;
 }
 
@@ -466,7 +537,7 @@ std::optional<LinearTransformConfig> parseTransform(const YAML::Node& node, cons
   if (!node) {
     return std::nullopt;
   }
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"kind", "scale", "offset"});
   if (node["kind"]) {
     const auto kind = lowerCopy(parseString(node["kind"], path + ".kind"));
     if (kind != "linear") {
@@ -480,26 +551,47 @@ std::optional<LinearTransformConfig> parseTransform(const YAML::Node& node, cons
   if (node["offset"]) {
     transform.offset = parseNumeric<double>(node["offset"], path + ".offset");
   }
-  if (transform.scale == 0.0) {
-    fail(path + ".scale", "must not be zero");
+  if (transform.scale == 0.0 || !std::isfinite(1.0 / transform.scale)) {
+    fail(path + ".scale", "must be nonzero with a finite inverse");
   }
   return transform;
 }
 
 RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path) {
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"endpoint", "service", "suffix", "defaults", "method_defaults", "access",
+                                 "optional", "discovery_timeout_ms", "timeout_ms", "retry_interval_ms"});
   RpcServiceConfig svc;
   svc.endpoint = parseString(requireNode(node, "endpoint", path), path + ".endpoint");
   svc.service = parseString(requireNode(node, "service", path), path + ".service");
   if (node["suffix"]) svc.suffix = parseString(node["suffix"], path + ".suffix");
-  if (node["defaults"]) {
-    const auto& d = node["defaults"];
-    requireMap(d, path + ".defaults");
+  const auto defaults = [&](const YAML::Node& d, const std::string& where) {
+    requireMap(d, where);
+    std::map<std::string, std::string> result;
     for (const auto& kv : d) {
-      svc.defaults[kv.first.as<std::string>()] =
-          parseString(kv.second, path + ".defaults." + kv.first.as<std::string>());
+      const auto key = parseString(kv.first, where + ".key");
+      if (key.empty()) fail(where, "default field names must not be empty");
+      result.emplace(key, parseString(kv.second, where + "." + key));
+    }
+    return result;
+  };
+  if (node["defaults"]) svc.defaults = defaults(node["defaults"], path + ".defaults");
+  if (node["method_defaults"]) {
+    requireMap(node["method_defaults"], path + ".method_defaults");
+    for (const auto& item : node["method_defaults"]) {
+      const auto method = parseString(item.first, path + ".method_defaults.key");
+      if (method.empty()) fail(path + ".method_defaults", "method names must not be empty");
+      svc.methodDefaults.emplace(method, defaults(item.second, path + ".method_defaults." + method));
     }
   }
+  if (node["optional"]) svc.optional = parseNumeric<bool>(node["optional"], path + ".optional");
+  const auto timeout = [&](const char* key, uint32_t fallback, uint32_t minimum) {
+    const auto value = node[key] ? parseNumeric<uint32_t>(node[key], path + "." + key) : fallback;
+    if (value < minimum || value > 300000) fail(path + "." + key, "outside supported range");
+    return value;
+  };
+  svc.discoveryTimeoutMs = timeout("discovery_timeout_ms", svc.discoveryTimeoutMs, 1);
+  svc.timeoutMs = timeout("timeout_ms", svc.timeoutMs, 1);
+  svc.retryIntervalMs = timeout("retry_interval_ms", svc.retryIntervalMs, 100);
   if (node["access"]) svc.access = parseAccessAssignment(node["access"], path + ".access");
   if (svc.endpoint.empty()) fail(path + ".endpoint", "must not be empty");
   if (svc.service.empty()) fail(path + ".service", "must not be empty");
@@ -507,7 +599,7 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
 }
 
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  requireMap(node, path);
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -529,8 +621,35 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
     }
   }
 
-  pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
-  pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
+  if (node["kind"]) {
+    const auto kind = lowerCopy(parseString(node["kind"], path + ".kind"));
+    if (kind == "ntndarray") {
+      pv.kind = PVKind::NTNDArray;
+    } else if (kind != "value" && kind != "scalar" && kind != "array") {
+      fail(path + ".kind", "unsupported PV kind '" + kind + "'");
+    }
+  }
+
+  if (pv.kind == PVKind::NTNDArray) {
+    rejectUnknownKeys(node, path, {"name", "aliases", "kind", "read", "max_frame_bytes", "max_frame_gap", "access", "source_health"});
+    pv.type = PrimitiveType::UInt8;
+    pv.shape = Shape::Array;
+    if (node["max_frame_bytes"]) {
+      pv.maxFrameBytes = parseNumeric<uint64_t>(node["max_frame_bytes"], path + ".max_frame_bytes");
+    }
+    if (pv.maxFrameBytes == 0u || pv.maxFrameBytes > 1024ull * 1024u * 1024u) {
+      fail(path + ".max_frame_bytes", "must be 1..1073741824");
+    }
+    if (node["max_frame_gap"]) {
+      pv.maxFrameGap = parseNumeric<uint32_t>(node["max_frame_gap"], path + ".max_frame_gap");
+    }
+    if (pv.maxFrameGap > 2147483646u) fail(path + ".max_frame_gap", "must be 0..2147483646");
+  } else {
+    if (node["max_frame_bytes"]) fail(path + ".max_frame_bytes", "requires kind: ntndarray");
+    if (node["max_frame_gap"]) fail(path + ".max_frame_gap", "requires kind: ntndarray");
+    pv.type = parsePrimitiveType(requireNode(node, "type", path), path + ".type");
+    pv.shape = parseShape(requireNode(node, "shape", path), path + ".shape");
+  }
   pv.read = parseRoute(requireNode(node, "read", path), path + ".read");
 
   if (node["write"]) {
@@ -548,6 +667,14 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   pv.transform = parseTransform(node["transform"], path + ".transform");
   pv.initialValue = parseInitialValue(node["initial"], pv.type, pv.shape, path + ".initial");
   if (node["access"]) pv.access = parseAccessAssignment(node["access"], path + ".access");
+  if (const auto health = node["source_health"]) {
+    rejectUnknownKeys(health, path + ".source_health", {"required", "stale_after_ms"});
+    if (health["required"]) pv.sourceHealth.required = parseNumeric<bool>(health["required"], path + ".source_health.required");
+    if (health["stale_after_ms"])
+      pv.sourceHealth.staleAfterMs = parseNumeric<uint32_t>(health["stale_after_ms"], path + ".source_health.stale_after_ms");
+    if (pv.sourceHealth.staleAfterMs > 86400000)
+      fail(path + ".source_health.stale_after_ms", "must be 0..86400000");
+  }
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
     fail(path + ".type", "this array element type is unsupported");
@@ -576,15 +703,78 @@ void validateTopLevelSchema(const YAML::Node& root) {
   }
 }
 
+DiscoveryConfig parseDiscovery(const YAML::Node& node) {
+  DiscoveryConfig value;
+  if (!node) return value;
+  rejectUnknownKeys(node, "root.discovery", {"enabled", "bind_address", "udp_port", "timeout_ms", "max_holdoff_ms", "max_records", "max_bytes"});
+  std::set<std::string> keys;
+  for (const auto& entry : node) {
+    const auto key = entry.first.as<std::string>();
+    if (!keys.insert(key).second) fail("root.discovery." + key, "duplicate key");
+  }
+  if (node["enabled"]) value.enabled = parseNumeric<bool>(node["enabled"], "root.discovery.enabled");
+  if (node["bind_address"]) value.bindAddress = parseString(node["bind_address"], "root.discovery.bind_address");
+  in_addr address{};
+  if (inet_pton(AF_INET, value.bindAddress.c_str(), &address) != 1)
+    fail("root.discovery.bind_address", "expected an IPv4 address");
+  const auto bounded = [&](const char* key, uint64_t initial, uint64_t low, uint64_t high) {
+    const auto result = node[key] ? parseNumeric<uint64_t>(node[key], "root.discovery." + std::string(key)) : initial;
+    if (result < low || result > high) fail("root.discovery." + std::string(key), "outside supported range");
+    return result;
+  };
+  value.udpPort = bounded("udp_port", value.udpPort, 0, 65535);
+  value.timeoutMs = bounded("timeout_ms", value.timeoutMs, 1, 300000);
+  value.maxHoldoffMs = bounded("max_holdoff_ms", value.maxHoldoffMs, 0, 60000);
+  value.maxRecords = bounded("max_records", value.maxRecords, 1, 1000000);
+  value.maxBytes = bounded("max_bytes", value.maxBytes, 1024, 1024ull * 1024 * 1024);
+  return value;
+}
+
+OperationLimitsConfig parseOperationLimits(const YAML::Node& node) {
+  OperationLimitsConfig result;
+  if (!node) return result;
+  requireMap(node, "root.limits");
+  rejectUnknownKeys(node, "root.limits", {"write_workers", "queued_writes_per_pv", "queued_write_bytes", "rpc_workers", "queued_rpc_per_method", "queued_rpc_bytes", "max_payload_bytes", "operation_timeout_ms", "alarm_queue_entries", "alarm_state_bytes"});
+  const auto bounded = [&](const char* key, uint64_t initial, uint64_t low, uint64_t high) {
+    const auto value = node[key] ? parseNumeric<uint64_t>(node[key], "root.limits." + std::string(key)) : initial;
+    if (value < low || value > high) fail("root.limits." + std::string(key), "outside supported range");
+    return value;
+  };
+  result.writeWorkers = bounded("write_workers", result.writeWorkers, 1, 64);
+  result.queuedWritesPerPV = bounded("queued_writes_per_pv", result.queuedWritesPerPV, 1, 4096);
+  result.queuedWriteBytes = bounded("queued_write_bytes", result.queuedWriteBytes, 1024, 1024ull * 1024u * 1024u);
+  result.rpcWorkers = bounded("rpc_workers", result.rpcWorkers, 1, 64);
+  result.queuedRpcPerMethod = bounded("queued_rpc_per_method", result.queuedRpcPerMethod, 1, 4096);
+  result.queuedRpcBytes = bounded("queued_rpc_bytes", result.queuedRpcBytes, 1024, 1024ull * 1024u * 1024u);
+  result.maxPayloadBytes = bounded("max_payload_bytes", result.maxPayloadBytes, 1, 1024ull * 1024u * 1024u);
+  result.alarmQueueEntries = bounded("alarm_queue_entries", result.alarmQueueEntries, 1, 1000000);
+  result.alarmStateBytes = bounded("alarm_state_bytes", result.alarmStateBytes, 1024, 1024ull * 1024u * 1024u);
+  if (result.alarmQueueEntries > result.alarmStateBytes / kAlarmQueueEntryBytes)
+    fail("root.limits.alarm_state_bytes", "must cover the reserved alarm queue");
+  if (node["operation_timeout_ms"])
+    result.operationTimeoutMs = bounded("operation_timeout_ms", 0, 1, 300000);
+  return result;
+}
+
 AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& configDirectory) {
   requireMap(root, "root");
   validateTopLevelSchema(root);
+  std::vector<YAML::Node> ancestors;
+  size_t visited = 0;
+  validateTree(root, "root", ancestors, visited);
+  rejectUnknownKeys(root, "root", {"schema_version", "server", "access", "redis", "redis_backends", "alarms", "channelfinder", "discovery", "limits", "pvs", "rpc_services"});
 
   AppConfig config;
+  config.legacyInput = !root["schema_version"];
+  if (!config.legacyInput) config.schemaVersion = parseNumeric<uint32_t>(root["schema_version"], "root.schema_version");
+  if (config.schemaVersion != 1) fail("root.schema_version", "only schema version 1 is supported");
+  config.discovery = parseDiscovery(root["discovery"]);
+  config.limits = parseOperationLimits(root["limits"]);
 
   config.access = parseAccessConfig(root["access"], configDirectory, "root.access");
 
   const auto serverNode = requireMap(requireNode(root, "server", "root"), "root.server");
+  rejectUnknownKeys(serverNode, "root.server", {"instance", "namespace", "interfaces", "tcp_port", "udp_port", "auto_beacon"});
   config.server.instance = parseString(requireNode(serverNode, "instance", "root.server"), "root.server.instance");
   if (serverNode["namespace"]) {
     config.server.nameSpace = parseString(serverNode["namespace"], "root.server.namespace");
@@ -605,6 +795,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
     config.server.autoBeacon = serverNode["auto_beacon"].as<bool>();
   }
 
+  if (config.server.instance.empty()) fail("root.server.instance", "must not be empty");
   config.channelFinder = parseChannelFinderConfig(root["channelfinder"], "root.channelfinder");
 
   const bool hasLegacyRedis = static_cast<bool>(root["redis"]);
@@ -614,7 +805,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
   }
 
   if (hasLegacyRedis) {
-    config.redisBackends.emplace(kDefaultRedisBackendAlias, parseRedisConfig(requireNode(root, "redis", "root"), "root.redis"));
+    config.redisBackends.emplace(kDefaultRedisBackendAlias, parseRedisConfig(requireNode(root, "redis", "root"), "root.redis", configDirectory));
   } else {
     const auto redisBackendsNode = requireMap(requireNode(root, "redis_backends", "root"), "root.redis_backends");
     if (redisBackendsNode.size() == 0u) {
@@ -625,7 +816,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
       if (alias.empty()) {
         fail("root.redis_backends", "backend alias must not be empty");
       }
-      const auto [it, inserted] = config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias));
+      const auto [it, inserted] = config.redisBackends.emplace(alias, parseRedisConfig(entry.second, "root.redis_backends." + alias, configDirectory));
       if (!inserted) {
         fail("root.redis_backends." + alias, "duplicate redis backend alias '" + alias + "'");
       }
@@ -633,7 +824,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
   }
 
   if (root["alarms"]) {
-    const auto alarmNode = requireMap(root["alarms"], "root.alarms");
+    rejectUnknownKeys(root["alarms"], "root.alarms", {"backend", "stream"});
+    const auto alarmNode = root["alarms"];
     if (alarmNode["backend"]) {
       config.alarms.backend = parseString(alarmNode["backend"], "root.alarms.backend");
     }
@@ -641,13 +833,15 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
       config.alarms.stream = parseString(alarmNode["stream"], "root.alarms.stream");
     }
   }
+  if (config.alarms.stream.empty()) fail("root.alarms.stream", "must not be empty");
   resolveBackendAlias(config.alarms.backend, "root.alarms.backend", config.redisBackends, hasLegacyRedis);
 
   // `pvs` is optional: an IOC may expose only RPC services (rpc_services) and no
   // Redis-backed PVs.
   const auto pvsNode = root["pvs"] ? requireSequence(root["pvs"], "root.pvs") : YAML::Node();
 
-  std::set<std::string> servedNames;
+  EndpointRegistry endpoints;
+  endpoints.addDiagnostics(config.server);
   std::set<std::pair<std::string, std::string>> subscribedKeys;
   for (size_t index = 0; index < pvsNode.size(); ++index) {
     auto pv = parsePV(pvsNode[index], "root.pvs[" + std::to_string(index) + "]");
@@ -675,45 +869,7 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
                           config.redisBackends,
                           hasLegacyRedis);
     }
-    const std::vector<std::string> reservedNames{
-      versionPVName(config.server),
-      revisionPVName(config.server),
-      adminPVName(config.server, "version"),
-      adminPVName(config.server, "revision"),
-      adminPVName(config.server, "config:reload"),
-      adminPVName(config.server, "config:generation"),
-      adminPVName(config.server, "config:lastStatus"),
-      adminPVName(config.server, "config:lastError"),
-      adminPVName(config.server, "stats:pvCount"),
-      adminPVName(config.server, "backend:health"),
-      adminPVName(config.server, "access:reload"),
-      adminPVName(config.server, "access:enabled"),
-      adminPVName(config.server, "access:generation"),
-      adminPVName(config.server, "access:lastStatus"),
-      adminPVName(config.server, "access:lastError"),
-      adminPVName(config.server, "access:policyFingerprint"),
-      adminPVName(config.server, "access:watchStatus"),
-      adminPVName(config.server, "access:activeClients"),
-      adminPVName(config.server, "access:deniedReads"),
-      adminPVName(config.server, "access:deniedWrites"),
-      adminPVName(config.server, "access:rightsChanges"),
-    };
-    const auto names = fullPVNames(config.server, pv);
-    for (size_t nameIndex = 0; nameIndex < names.size(); ++nameIndex) {
-      const auto path = nameIndex == 0u
-          ? "root.pvs[" + std::to_string(index) + "].name"
-          : "root.pvs[" + std::to_string(index) + "].aliases[" +
-                std::to_string(nameIndex - 1u) + "]";
-      const auto& name = names[nameIndex];
-      if (!servedNames.insert(name).second) {
-        fail(path, "duplicate served PV name '" + name + "'");
-      }
-      for (const auto& reservedName : reservedNames) {
-        if (name == reservedName) {
-          fail(path, "PV name conflicts with reserved metadata PV '" + reservedName + "'");
-        }
-      }
-    }
+    endpoints.addPV(config.server, pv, "root.pvs[" + std::to_string(index) + "]");
     if (!subscribedKeys.insert({pv.read.backend, pv.read.key}).second) {
       fail("root.pvs[" + std::to_string(index) + "].read.key",
            "duplicate subscribed key '" + pv.read.backend + ":" + pv.read.key + "'");
@@ -744,6 +900,14 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
 
   if (config.pvs.empty() && config.rpcServices.empty()) {
     fail("root", "must define at least one of 'pvs' or 'rpc_services'");
+  }
+
+  auto alarmBytes = config.limits.alarmStateBytes - config.limits.alarmQueueEntries * kAlarmQueueEntryBytes;
+  for (const auto& pv : config.pvs) {
+    const auto nameBytes = fullPVName(config.server, pv).size();
+    if (alarmBytes < 1024 || nameBytes > (alarmBytes - 1024) / 2)
+      fail("root.limits.alarm_state_bytes", "must cover the reserved alarm queue and current PV states");
+    alarmBytes -= 1024 + 2 * nameBytes;
   }
 
   return config;
@@ -785,7 +949,14 @@ std::string summarizeConfig(const AppConfig& config) {
   }
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)
-           << " [" << toString(pv.shape) << " " << toString(pv.type) << "]"
+           << " [";
+    if (pv.kind == PVKind::NTNDArray) {
+      stream << toString(pv.kind) << " max_frame_bytes=" << pv.maxFrameBytes
+             << " max_frame_gap=" << pv.maxFrameGap;
+    } else {
+      stream << toString(pv.shape) << " " << toString(pv.type);
+    }
+    stream << "]"
            << " read=" << pv.read.backend << ":" << pv.read.key;
     if (pv.write) {
       stream << " write=" << pv.write->backend << ":" << pv.write->key;
@@ -847,6 +1018,14 @@ std::string toString(const Shape shape) {
   return "unknown";
 }
 
+std::string toString(const PVKind kind) {
+  switch (kind) {
+  case PVKind::Value: return "value";
+  case PVKind::NTNDArray: return "ntndarray";
+  }
+  return "unknown";
+}
+
 std::string toString(const DisplayForm form) {
   switch (form) {
   case DisplayForm::Default: return "default";
@@ -879,8 +1058,10 @@ bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs) {
        lhs.confirm->timeoutMs == rhs.confirm->timeoutMs);
 
   return lhs.name == rhs.name &&
+         lhs.kind == rhs.kind &&
          lhs.type == rhs.type &&
          lhs.shape == rhs.shape &&
+         lhs.maxFrameBytes == rhs.maxFrameBytes &&
          lhs.read.backend == rhs.read.backend &&
          lhs.read.key == rhs.read.key &&
          sameOptionalRoute(lhs.write, rhs.write) &&
@@ -920,7 +1101,8 @@ bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs) {
          lhs.user == rhs.user &&
          lhs.password == rhs.password &&
          lhs.workers == rhs.workers &&
-         lhs.readers == rhs.readers;
+         lhs.readers == rhs.readers &&
+         lhs.readerProbeMs == rhs.readerProbeMs;
 }
 
 bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs& rhs) {
@@ -941,6 +1123,15 @@ bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs) {
   return lhs.backend == rhs.backend &&
          lhs.stream == rhs.stream;
+}
+
+bool sameOperationLimits(const OperationLimitsConfig& a, const OperationLimitsConfig& b) {
+  return a.writeWorkers == b.writeWorkers && a.queuedWritesPerPV == b.queuedWritesPerPV &&
+         a.queuedWriteBytes == b.queuedWriteBytes && a.maxPayloadBytes == b.maxPayloadBytes &&
+         a.rpcWorkers == b.rpcWorkers && a.queuedRpcPerMethod == b.queuedRpcPerMethod &&
+         a.queuedRpcBytes == b.queuedRpcBytes &&
+         a.operationTimeoutMs == b.operationTimeoutMs && a.alarmQueueEntries == b.alarmQueueEntries &&
+         a.alarmStateBytes == b.alarmStateBytes;
 }
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
@@ -968,6 +1159,49 @@ std::string versionPVName(const ServerConfig& server) {
 
 std::string revisionPVName(const ServerConfig& server) {
   return server.instance + ":revision";
+}
+
+std::vector<std::string> adminPVNames(const ServerConfig& server) {
+  return {
+    versionPVName(server),
+    revisionPVName(server),
+    adminPVName(server, "version"),
+    adminPVName(server, "revision"),
+    adminPVName(server, "config:reload"),
+    adminPVName(server, "config:generation"),
+    adminPVName(server, "config:lastStatus"),
+    adminPVName(server, "config:lastError"),
+    adminPVName(server, "config:lastDiff"),
+    adminPVName(server, "config:reloadStatus"),
+    adminPVName(server, "stats:pvCount"),
+    adminPVName(server, "stats:ndarrayInvalidFrames"),
+    adminPVName(server, "stats:ndarraySkippedFrames"),
+    adminPVName(server, "stats:ndarrayDiscontinuities"),
+    adminPVName(server, "stats:operations"),
+    adminPVName(server, "rpc:status"),
+    adminPVName(server, "alarms:status"),
+    adminPVName(server, "backend:health"),
+    adminPVName(server, "source:status"),
+    adminPVName(server, "ready"),
+    adminPVName(server, "access:reload"),
+    adminPVName(server, "access:enabled"),
+    adminPVName(server, "access:generation"),
+    adminPVName(server, "access:lastStatus"),
+    adminPVName(server, "access:lastError"),
+    adminPVName(server, "access:policyFingerprint"),
+    adminPVName(server, "access:watchStatus"),
+    adminPVName(server, "access:activeClients"),
+    adminPVName(server, "access:deniedReads"),
+    adminPVName(server, "access:deniedWrites"),
+    adminPVName(server, "access:rightsChanges"),
+    adminPVName(server, "access:operations"),
+    adminPVName(server, "discovery:status"),
+  };
+}
+
+bool sameDiscoveryConfig(const DiscoveryConfig& lhs, const DiscoveryConfig& rhs) {
+  return std::tie(lhs.enabled, lhs.bindAddress, lhs.udpPort, lhs.timeoutMs, lhs.maxHoldoffMs, lhs.maxRecords, lhs.maxBytes) ==
+         std::tie(rhs.enabled, rhs.bindAddress, rhs.udpPort, rhs.timeoutMs, rhs.maxHoldoffMs, rhs.maxRecords, rhs.maxBytes);
 }
 
 }  // namespace redis_pvxs_ioc

@@ -1,5 +1,6 @@
 #include "redis_pvxs_ioc/runtime.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -18,6 +19,9 @@
 #include "RedisAdapter.hpp"
 
 #include "redis_pvxs_ioc/alarm_publisher.h"
+#include "redis_pvxs_ioc/access_control.h"
+#include "redis_pvxs_ioc/queued_exec.h"
+#include "redis_pvxs_ioc/ntndarray.h"
 #include "redis_pvxs_ioc/util.h"
 
 namespace redis_pvxs_ioc {
@@ -31,6 +35,14 @@ bool sameRouteTarget(const RouteConfig& lhs, const ConfirmConfig& rhs) {
   return lhs.backend == rhs.backend && lhs.key == rhs.key;
 }
 
+std::string batchHealthError(const RedisAdapter::ReaderStatus& current,
+                             const RedisAdapter::StreamBatchMetadata& metadata) {
+  if (!current.connected) return "Source reader disconnected";
+  if (current.readRejections > metadata.readRejections)
+    return "Source read rejected; waiting for valid data";
+  return {};
+}
+
 std::shared_ptr<RedisAdapter> resolveBackend(const RedisBackendRegistry& redisBackends,
                                              const std::string& alias,
                                              const std::string& fullName,
@@ -42,389 +54,711 @@ std::shared_ptr<RedisAdapter> resolveBackend(const RedisBackendRegistry& redisBa
   return it->second;
 }
 
+class NDArrayRuntime final : public PVRuntimeBase, public std::enable_shared_from_this<NDArrayRuntime> {
+public:
+  NDArrayRuntime(const ServerConfig& serverConfig, PVConfig config,
+                 std::shared_ptr<RedisAdapter> redis, std::shared_ptr<AlarmPublisher> publisher,
+                 std::shared_ptr<RuntimeStats> stats, uint64_t generation, uint64_t payloadLimit, uint32_t probeMs)
+      : config_(std::move(config)), redis_(std::move(redis)), alarmPublisher_(std::move(publisher)),
+        stats_(std::move(stats)), maxFrameBytes_(std::min(config_.maxFrameBytes, payloadLimit)),
+        fullName_(fullPVName(serverConfig, config_)), generation_(generation), probeMs_(probeMs),
+        pv_(pvxs::server::SharedPV::buildReadonly()) {}
+
+  ~NDArrayRuntime() override { deactivate("runtime destroyed"); }
+
+  void initialize() {
+    auto initial = createEmptyNTNDArray();
+    const auto snapshot = redis_->getStreamSnapshot(config_.read.key);
+    if (snapshot.present()) {
+      try {
+        const auto frame = parseNDArrayFrame(snapshot.fields, RA_Time(snapshot.id).value, maxFrameBytes_);
+        initial = buildNTNDArrayValue(frame);
+        lastUniqueId_ = frame.uniqueId; haveGoodFrame_ = true;
+        sample_.accept(snapshot.id, 1);
+        currentAlarm_ = {epicsSevNone, epicsAlarmNone, ""};
+      } catch (const std::exception& error) {
+        ++pendingInvalid_;
+        sample_.reject(std::string(error.what()).substr(0, 512));
+        currentAlarm_ = {epicsSevInvalid, epicsAlarmUDF, std::string(error.what()).substr(0, 512)};
+        setNTNDArrayInvalidAlarm(initial, currentAlarm_.message);
+      }
+    }
+    prototype_ = initial.cloneEmpty();
+    pv_.open(initial);
+    if (alarmPublisher_) alarmRegistration_ = alarmPublisher_->prepare(fullName_, currentAlarm_);
+    auto weak = weak_from_this();
+    RedisAdapter::SubscriptionOptions selection;
+    selection.afterId = snapshot.id; selection.probeMs = probeMs_;
+    std::lock_guard<std::mutex> guard(mutex_);
+    reader_ = redis_->subscribeStreamWithMetadata(config_.read.key,
+        [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
+          if (const auto self = weak.lock()) self->handleRead(data, metadata);
+        }, selection);
+  }
+
+  const PVConfig& config() const override { return config_; }
+  const std::string& fullName() const override { return fullName_; }
+  pvxs::server::SharedPV& sharedPV() override { return pv_; }
+  bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
+
+  class Update final : public PVRuntimeUpdate {
+  public:
+    std::shared_ptr<NDArrayRuntime> runtime;
+    PVConfig config;
+    uint64_t generation;
+    std::shared_ptr<AlarmPublisher> publisher;
+    std::shared_ptr<AlarmPublisher::Registration> registration;
+    void commit() noexcept override {
+      std::lock_guard<std::mutex> guard(runtime->mutex_);
+      std::swap(runtime->config_, config); runtime->generation_ = generation;
+      if (registration != runtime->alarmRegistration_) {
+        if (runtime->alarmRegistration_) runtime->alarmRegistration_->retire();
+        runtime->alarmPublisher_.swap(publisher);
+        runtime->alarmRegistration_.swap(registration);
+      }
+    }
+    void refresh() override {
+      std::lock_guard<std::mutex> guard(runtime->mutex_);
+      if (runtime->alive_) runtime->publishAlarmLocked();
+    }
+  };
+
+  std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation,
+      const std::shared_ptr<AlarmPublisher>& publisher = {}) override {
+    auto update = std::make_unique<Update>();
+    update->runtime = shared_from_this(); update->config = config; update->generation = generation;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!alive_ || !sameReaderTopology(config_, config)) throw std::runtime_error("NTNDArray runtime changed during preparation");
+    update->publisher = publisher ? publisher : alarmPublisher_;
+    update->registration = update->publisher == alarmPublisher_ ? alarmRegistration_
+        : update->publisher->prepare(fullName_, currentAlarm_);
+    return update;
+  }
+  void reconfigure(const PVConfig& config, uint64_t generation) override {
+    auto update = prepareReconfigure(config, generation); update->commit(); update->refresh();
+  }
+  void activate() noexcept override {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (committed_ || !alive_) return;
+    committed_ = true;
+    stats_->ndarrayInvalidFrames += pendingInvalid_; stats_->ndarraySkippedFrames += pendingSkipped_;
+    stats_->ndarrayDiscontinuities += pendingDiscontinuities_;
+    pendingInvalid_ = pendingSkipped_ = pendingDiscontinuities_ = 0;
+    if (alarmRegistration_) alarmRegistration_->activate();
+  }
+  void deactivate(const std::string&) override {
+    RedisAdapter::ReaderHandle retired;
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      if (!alive_) return;
+      alive_ = false; committed_ = false;
+      if (alarmRegistration_) alarmRegistration_->retire();
+      retired = std::move(reader_);
+    }
+    retired.reset(); // Retire only this subscription, including when another PV reads the same key.
+    if (pv_.isOpen()) pv_.close();
+  }
+
+  std::vector<SourceStatus> sourceHealth(SourceClock::time_point now) override {
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto status = assessSource(sample_, reader_.status(), config_, fullName_, config_.read,
+                               "read", alive_ && committed_, probeMs_, now);
+    if (alive_ && committed_ && status.error != healthError_) {
+      healthError_ = status.error;
+      currentAlarm_ = status.ready ? AlarmState{epicsSevNone, epicsAlarmNone, ""}
+                                   : AlarmState{epicsSevInvalid, epicsAlarmUDF, status.error};
+      auto value = pv_.fetch();
+      if (status.ready) {
+        value["alarm.severity"] = int32_t(epicsSevNone); value["alarm.status"] = int32_t(epicsAlarmNone);
+        value["alarm.message"] = "";
+      } else setNTNDArrayInvalidAlarm(value, status.error);
+      pv_.post(value); publishAlarmLocked();
+    }
+    return {std::move(status)};
+  }
+
+private:
+  void publishAlarmLocked() {
+    if (alarmRegistration_) {
+      alarmRegistration_->update(currentAlarm_);
+      if (alive_ && committed_) alarmRegistration_->activate();
+    }
+  }
+  bool acceptEpochLocked(uint64_t epoch, RedisAdapter::ReaderStatus* current = nullptr) {
+    if (!alive_) return false;
+    auto status = reader_.status();
+    const bool matches = status.epoch == epoch;
+    if (current) *current = std::move(status);
+    if (matches) return true;
+    ++sample_.staleCallbacks; return false;
+  }
+  void handleRead(const RedisAdapter::StreamBatch& data, const RedisAdapter::StreamBatchMetadata& metadata) {
+    const auto epoch = metadata.epoch;
+    for (const auto& item : data) {
+      try {
+        const auto frame = parseNDArrayFrame(item.second, RA_Time(item.first).value, maxFrameBytes_);
+        // Owned PVXS arrays use the exact Type opened by this runtime.
+        auto value = buildNTNDArrayValue(frame, prototype_);
+        std::lock_guard<std::mutex> guard(mutex_);
+        RedisAdapter::ReaderStatus current;
+        if (!acceptEpochLocked(epoch, &current)) return;
+        const bool newEpoch = sample_.epoch != epoch;
+        const auto gap = haveGoodFrame_ && !newEpoch ? assessNDArrayFrameGap(lastUniqueId_, frame.uniqueId, config_.maxFrameGap)
+                                       : NDArrayFrameGap{};
+        if (committed_) {
+          stats_->ndarraySkippedFrames += gap.skipped;
+          stats_->ndarrayDiscontinuities += gap.discontinuity ? 1u : 0u;
+        } else {
+          pendingSkipped_ += gap.skipped;
+          pendingDiscontinuities_ += gap.discontinuity ? 1u : 0u;
+        }
+        lastUniqueId_ = frame.uniqueId; haveGoodFrame_ = true;
+        sample_.accept(item.first, epoch); sample_.acceptedReadRejections = metadata.readRejections;
+        healthError_ = batchHealthError(current, metadata);
+        currentAlarm_ = healthError_.empty() ? AlarmState{epicsSevNone, epicsAlarmNone, ""}
+            : AlarmState{epicsSevInvalid, epicsAlarmUDF, healthError_};
+        if (!healthError_.empty()) setNTNDArrayInvalidAlarm(value, healthError_);
+        pv_.post(value);
+        publishAlarmLocked();
+      } catch (const std::exception& error) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!acceptEpochLocked(epoch)) return;
+        if (committed_) ++stats_->ndarrayInvalidFrames; else ++pendingInvalid_;
+        currentAlarm_ = {epicsSevInvalid, epicsAlarmUDF, std::string(error.what()).substr(0, 512)};
+        sample_.reject(currentAlarm_.message, epoch);
+        auto value = pv_.fetch(); // Keep pixels, dimensions, ID and acquisition timestamp from the last good frame.
+        setNTNDArrayInvalidAlarm(value, currentAlarm_.message);
+        pv_.post(value);
+        publishAlarmLocked();
+      }
+    }
+  }
+
+  mutable std::mutex mutex_;
+  PVConfig config_;
+  std::shared_ptr<RedisAdapter> redis_;
+  std::shared_ptr<AlarmPublisher> alarmPublisher_;
+  std::shared_ptr<AlarmPublisher::Registration> alarmRegistration_;
+  std::shared_ptr<RuntimeStats> stats_;
+  const uint64_t maxFrameBytes_;
+  std::string fullName_;
+  uint64_t generation_;
+  const uint32_t probeMs_;
+  pvxs::server::SharedPV pv_;
+  pvxs::Value prototype_;
+  RedisAdapter::ReaderHandle reader_;
+  SourceSampleState sample_;
+  std::string healthError_;
+  bool alive_ = true, committed_ = false, haveGoodFrame_ = false;
+  int32_t lastUniqueId_ = 0;
+  uint64_t pendingInvalid_ = 0, pendingSkipped_ = 0, pendingDiscontinuities_ = 0;
+  AlarmState currentAlarm_{epicsSevInvalid, epicsAlarmUDF, "no valid frame"};
+};
+
+std::shared_ptr<PVRuntimeBase> makeNDArrayRuntime(const ServerConfig& serverConfig, const PVConfig& config,
+    const RedisBackendRegistry& backends, const std::shared_ptr<AlarmPublisher>& publisher,
+    const std::shared_ptr<RuntimeStats>& stats, uint64_t generation, uint64_t payloadLimit, uint32_t probeMs) {
+  auto runtime = std::make_shared<NDArrayRuntime>(serverConfig, config,
+      resolveBackend(backends, config.read.backend, fullPVName(serverConfig, config), "read route"),
+      publisher, stats, generation, payloadLimit, probeMs);
+  runtime->initialize();
+  return runtime;
+}
+
 template <typename T, bool Array>
 class TypedRuntime final : public PVRuntimeBase, public std::enable_shared_from_this<TypedRuntime<T, Array>> {
 public:
   using ValueType = std::conditional_t<Array, std::vector<T>, T>;
-  using ReaderValueType = ValueType;
-  using ReaderList = typename RedisAdapter::TimeValList<ReaderValueType>;
 
-  TypedRuntime(const ServerConfig& serverConfig,
-               PVConfig config,
+  TypedRuntime(const ServerConfig& serverConfig, PVConfig config,
                std::shared_ptr<RedisAdapter> readRedis,
                std::shared_ptr<RedisAdapter> writeRedis,
                std::shared_ptr<RedisAdapter> confirmRedis,
-               std::shared_ptr<AlarmPublisher> alarmPublisher,
-               const uint64_t generation)
-      : config_(std::move(config)),
-        readRedis_(std::move(readRedis)),
-        writeRedis_(std::move(writeRedis)),
-        confirmRedis_(std::move(confirmRedis)),
-        alarmPublisher_(std::move(alarmPublisher)),
-        fullName_(fullPVName(serverConfig, config_)),
-        generation_(generation),
+               std::shared_ptr<AlarmPublisher> alarmPublisher, uint64_t generation,
+               std::shared_ptr<OperationQueue> operations, OperationLimitsConfig limits,
+               uint32_t readProbeMs, uint32_t confirmProbeMs)
+      : config_(std::move(config)), readRedis_(std::move(readRedis)),
+        writeRedis_(std::move(writeRedis)), confirmRedis_(std::move(confirmRedis)),
+        alarmPublisher_(std::move(alarmPublisher)), fullName_(fullPVName(serverConfig, config_)),
+        generation_(generation), operations_(std::move(operations)), limits_(limits),
+        confirmationMs_(config_.confirm ? config_.confirm->timeoutMs : 0),
+        readProbeMs_(readProbeMs), confirmProbeMs_(confirmProbeMs),
         pv_(config_.write ? pvxs::server::SharedPV::buildMailbox() : pvxs::server::SharedPV::buildReadonly()) {}
 
-  ~TypedRuntime() override {
-    deactivate("runtime destroyed");
-  }
+  ~TypedRuntime() override { deactivate("runtime destroyed"); }
 
   void initialize() {
+    if constexpr (Array) lastRaw_ = initialVectorOr<T>(config_.initialValue);
+    else lastRaw_ = initialScalarOr<T>(config_.initialValue, T{});
+    const auto snapshot = readRedis_->getStreamSnapshot(config_.read.key);
+    readCursor_ = snapshot.id;
+    ValueType decoded{};
+    if (snapshot.present() && decode(snapshot.fields, decoded) && RA_Time(snapshot.id).ok()) {
+      lastRaw_ = std::move(decoded);
+      lastTimestampNs_ = static_cast<uint64_t>(RA_Time(snapshot.id).value);
+      sourceValid_ = true;
+      readSample_.accept(snapshot.id, 1);
+    } else {
+      sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : "No source data; using initial fallback";
+      if (snapshot.present()) readSample_.reject(sourceError_);
+    }
     auto initial = createInitialValue(config_);
-    loadInitialValue(initial);
-
+    const auto initialAlarm = populateValue(initial);
+    if (alarmPublisher_) alarmRegistration_ = alarmPublisher_->prepare(fullName_, initialAlarm);
+    pv_.open(initial);
+    auto weak = this->weak_from_this();
     if (config_.write) {
-      auto weak = this->weak_from_this();
-      pv_.onPut([weak](pvxs::server::SharedPV& pv,
-                       std::unique_ptr<pvxs::server::ExecOp>&& op,
+      pv_.onPut([weak](pvxs::server::SharedPV&, std::unique_ptr<pvxs::server::ExecOp>&& op,
                        pvxs::Value&& value) {
-        if (const auto self = weak.lock()) {
-          self->handlePut(pv, std::move(op), std::move(value));
-        } else {
-          op->error("runtime unavailable");
-        }
+        if (const auto self = weak.lock()) self->handlePut(std::move(op), std::move(value));
+        else op->error("runtime unavailable");
       });
     }
-
-    pv_.open(initial);
-    registerReaders();
+    const bool readConfirms = config_.confirm && sameRouteTarget(config_.read, *config_.confirm);
+    RedisAdapter::SubscriptionOptions selection;
+    selection.afterId = readCursor_; selection.probeMs = readProbeMs_;
+    std::lock_guard<std::mutex> guard(mutex_);
+    readReader_ = readRedis_->subscribeStreamWithMetadata(config_.read.key,
+        [weak, readConfirms](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
+          if (const auto self = weak.lock()) self->handleRead(data, true, readConfirms, metadata);
+        }, selection);
+    if (config_.confirm && !readConfirms) {
+      const auto confirmation = confirmRedis_->getStreamSnapshot(config_.confirm->key);
+      ValueType raw{};
+      if (confirmation.present() && decode(confirmation.fields, raw) && RA_Time(confirmation.id).ok())
+        confirmSample_.accept(confirmation.id, 1);
+      else if (confirmation.present()) confirmSample_.reject("Invalid confirmation snapshot");
+      selection.afterId = confirmation.id; selection.probeMs = confirmProbeMs_;
+      confirmReader_ = confirmRedis_->subscribeStreamWithMetadata(config_.confirm->key,
+          [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
+            if (const auto self = weak.lock()) self->handleRead(data, false, true, metadata);
+          }, selection);
+    }
   }
 
-  const PVConfig& config() const override {
-    return config_;
+  const PVConfig& config() const override { return config_; }
+  const std::string& fullName() const override { return fullName_; }
+  pvxs::server::SharedPV& sharedPV() override { return pv_; }
+  bool structurallyCompatible(const PVConfig& config) const override { return sameReaderTopology(config_, config); }
+  void activate() noexcept override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    committed_ = true;
+    if (alarmRegistration_) alarmRegistration_->activate();
   }
 
-  const std::string& fullName() const override {
-    return fullName_;
+  class Update final : public PVRuntimeUpdate {
+  public:
+    std::shared_ptr<TypedRuntime> runtime;
+    PVConfig config;
+    uint64_t generation = 0;
+    std::shared_ptr<const std::string> cancellation;
+    std::shared_ptr<AlarmPublisher> publisher;
+    std::shared_ptr<AlarmPublisher::Registration> alarm;
+    void commit() noexcept override {
+      std::lock_guard<std::mutex> lock(runtime->mutex_);
+      const auto& old = runtime->config_.transform;
+      const bool sameTransform = old.has_value() == config.transform.has_value() &&
+          (!old || (old->scale == config.transform->scale && old->offset == config.transform->offset));
+      if (!sameTransform) {
+        ++runtime->commandEpoch_;
+        runtime->failPendingLocked(cancellation);
+      }
+      static_assert(std::is_nothrow_swappable_v<PVConfig>);
+      if (alarm != runtime->alarmRegistration_) {
+        if (runtime->alarmRegistration_) runtime->alarmRegistration_->retire();
+        runtime->alarmPublisher_.swap(publisher);
+        runtime->alarmRegistration_.swap(alarm);
+        // The new registration stays inactive until refresh/read processing
+        // supplies the latest state; preparation-time samples are not emitted.
+      }
+      std::swap(runtime->config_, config);
+      runtime->generation_ = generation;
+    }
+    void refresh() override { runtime->refreshMetadata(); }
+  };
+
+  std::unique_ptr<PVRuntimeUpdate> prepareReconfigure(const PVConfig& config, uint64_t generation,
+      const std::shared_ptr<AlarmPublisher>& publisher = {}) override {
+    auto result = std::make_unique<Update>();
+    result->runtime = this->shared_from_this();
+    result->config = config;
+    result->generation = generation;
+    result->cancellation = std::make_shared<const std::string>("write transform changed during reload");
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!alive_ || !sameReaderTopology(config_, config)) throw std::runtime_error("runtime changed during preparation");
+    // Validate metadata/value construction now, but do not post a stale sample
+    // at commit: readback can advance while the remaining generation is staged.
+    auto preview = pv_.fetch();
+    const auto state = populateValue(preview, config);
+    result->publisher = publisher ? publisher : alarmPublisher_;
+    result->alarm = result->publisher == alarmPublisher_ ? alarmRegistration_
+        : result->publisher->prepare(fullName_, state);
+    return result;
   }
 
-  pvxs::server::SharedPV& sharedPV() override {
-    return pv_;
+  void reconfigure(const PVConfig& config, uint64_t generation) override {
+    auto update = prepareReconfigure(config, generation);
+    update->commit();
+    update->refresh();
   }
 
-  bool structurallyCompatible(const PVConfig& config) const override {
-    return sameReaderTopology(config_, config);
-  }
-
-  void reconfigure(const PVConfig& config, const uint64_t generation) override {
-    ValueType lastRaw{};
-    uint64_t lastTimestamp = 0;
-    bool haveLastRaw = false;
-
+  void refreshMetadata() {
+    AlarmState state;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      config_ = config;
-      generation_ = generation;
-      if constexpr (Array) {
-        lastRaw = lastRaw_;
-      } else {
-        lastRaw = lastRaw_;
-      }
-      lastTimestamp = lastTimestampNs_;
-      haveLastRaw = haveLastRaw_;
-    }
-
-    if (haveLastRaw) {
-      handleRawUpdate(lastRaw, lastTimestamp, true);
-    } else {
+      if (!alive_) return;
       auto value = pv_.fetch();
-      applyStandardMetadata(value, config);
-      applyTimestamp(value, lastTimestamp);
-      if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-        applyAlarmFields(value, config, AlarmState{epicsSevNone, epicsAlarmNone, ""});
-      }
+      state = populateValue(value);
       pv_.post(value);
+      recordAlarmLocked(state);
     }
   }
 
   void deactivate(const std::string& reason) override {
-    const bool wasActive = active_.exchange(false);
-    if (!wasActive) {
-      return;
-    }
-
-    std::vector<std::shared_ptr<PendingPut>> pending;
+    if (!alive_.exchange(false)) return;
+    RedisAdapter::ReaderHandle retiredRead, retiredConfirm;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      ++commandEpoch_;
+      if (alarmRegistration_) alarmRegistration_->retire();
+      failPendingLocked(std::make_shared<const std::string>(reason));
+      retiredRead = std::move(readReader_); retiredConfirm = std::move(confirmReader_);
+    }
+    retiredRead.reset(); retiredConfirm.reset();
+    if (pv_.isOpen()) pv_.close();
+  }
+
+  std::vector<SourceStatus> sourceHealth(SourceClock::time_point now) override {
+    std::lock_guard<std::mutex> guard(mutex_);
+    const bool sameConfirmation = config_.confirm && sameRouteTarget(config_.read, *config_.confirm);
+    auto read = assessSource(readSample_, readReader_.status(), config_, fullName_, config_.read,
+        sameConfirmation ? "read-confirm" : "read", alive_ && committed_, readProbeMs_, now);
+    std::vector<SourceStatus> result;
+    const auto confirmationEpoch = sameConfirmation ? read.reader.epoch : confirmReader_.status().epoch;
+    if (alive_ && committed_) {
       for (auto& item : pendingPuts_) {
-        item.second->done = true;
-        item.second->error = reason;
-        pending.push_back(item.second);
+        auto& pending = *item.second;
+        if (!pending.done && pending.sourceEpoch != confirmationEpoch) {
+          pending.done = true;
+          pending.error = std::make_shared<const std::string>("confirmation source epoch changed; not retried");
+          pending.cv.notify_all();
+        }
       }
-      pendingPuts_.clear();
-    }
-    for (const auto& item : pending) {
-      item->cv.notify_all();
-    }
-
-    if (readRedis_) {
-      readRedis_->removeReader(config_.read.key);
-      if (config_.confirm && confirmRedis_ && !sameRouteTarget(config_.read, *config_.confirm)) {
-        confirmRedis_->removeReader(config_.confirm->key);
+      if (read.error != healthError_) {
+        healthError_ = read.error;
+        auto value = pv_.fetch();
+        const auto alarm = populateValue(value);
+        pv_.post(value); recordAlarmLocked(alarm);
       }
     }
-
-    if (pv_.isOpen()) {
-      pv_.close();
+    result.push_back(std::move(read));
+    if (config_.confirm && !sameConfirmation) {
+      const RouteConfig route{config_.confirm->backend, config_.confirm->key};
+      result.push_back(assessSource(confirmSample_, confirmReader_.status(), config_, fullName_, route,
+          "confirm", alive_ && committed_, confirmProbeMs_, now));
     }
+    return result;
   }
 
 private:
   struct PendingPut {
     uint64_t id = 0;
     ValueType expectedRaw{};
+    std::string afterId;
+    uint64_t sourceEpoch = 0;
     bool done = false;
-    std::string error;
+    std::shared_ptr<const std::string> error;
     std::condition_variable cv;
   };
 
-  void loadInitialValue(pvxs::Value& initial) {
-    ValueType raw{};
-    if constexpr (Array) {
-      raw = initialVectorOr<T>(config_.initialValue);
-    } else {
-      raw = initialScalarOr<T>(config_.initialValue, T{});
+  bool decode(const RedisAdapter::Attrs& fields, ValueType& raw) const {
+    if constexpr (Array) return RedisAdapter::decodeArray(fields, raw, limits_.maxPayloadBytes);
+    else return RedisAdapter::decodeScalar(fields, raw, limits_.maxPayloadBytes);
+  }
+
+  AlarmState populateValue(pvxs::Value& value, const PVConfig& config) {
+    const auto present = applyForwardTransform(config, lastRaw_);
+    if constexpr (Array) assignArrayValue(value, present);
+    else assignScalarValue(value, present);
+    applyStandardMetadata(value, config);
+    if (lastTimestampNs_) applyTimestamp(value, lastTimestampNs_);
+    else {
+      value["timeStamp.secondsPastEpoch"] = static_cast<int64_t>(0);
+      value["timeStamp.nanoseconds"] = static_cast<int32_t>(0);
+      value["timeStamp.userTag"] = static_cast<int32_t>(0);
     }
-
-    uint64_t timestamp = 0;
-    loadSnapshot(raw, timestamp);
-    haveLastRaw_ = true;
-    lastRaw_ = raw;
-    lastTimestampNs_ = timestamp;
-
-    const auto present = applyForwardTransform(config_, raw);
-    if constexpr (Array) {
-      assignArrayValue(initial, present);
-    } else {
-      assignScalarValue(initial, present);
+    AlarmState state{epicsSevNone, epicsAlarmNone, ""};
+    if (!healthError_.empty()) state = {epicsSevInvalid, epicsAlarmUDF, healthError_};
+    else if (!sourceValid_) state = {epicsSevInvalid, epicsAlarmUDF, sourceError_};
+    else if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
+      const int prior = value["alarm.status"].as<int>();
+      state = evaluateNumericAlarm(config, static_cast<double>(present), prior);
     }
+    applyAlarmFields(value, config, state);
+    return state;
+  }
 
-    applyTimestamp(initial, timestamp);
+  AlarmState populateValue(pvxs::Value& value) { return populateValue(value, config_); }
 
-    if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-      const auto alarmState = evaluateNumericAlarm(config_, static_cast<double>(present), epicsAlarmNone);
-      applyAlarmFields(initial, config_, alarmState);
-      lastPublishedStatus_ = alarmState.status;
-      lastPublishedSeverity_ = alarmState.severity;
-    } else {
-      applyAlarmFields(initial, config_, AlarmState{epicsSevNone, epicsAlarmNone, ""});
+  void recordAlarmLocked(const AlarmState& state) {
+    if (alarmRegistration_) {
+      alarmRegistration_->update(state);
+      if (alive_ && committed_) alarmRegistration_->activate();
     }
   }
 
-  void loadSnapshot(ValueType& raw, uint64_t& timestamp) {
-    if constexpr (Array) {
-      const auto result = readRedis_->getSingleList<T>(config_.read.key, raw);
-      timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
-    } else if constexpr (std::is_same_v<T, double>) {
-      const auto result = readRedis_->getSingleValue<double>(config_.read.key, raw);
-      timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
-    } else {
-      const auto result = readRedis_->getSingleValue<T>(config_.read.key, raw);
-      timestamp = result.ok() ? static_cast<uint64_t>(result.value) : 0;
-    }
-  }
-
-  void registerReaders() {
-    auto weak = this->weak_from_this();
-
-    if constexpr (Array) {
-      readRedis_->addListsReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-        if (const auto self = weak.lock()) {
-          self->handleRead(data, true);
-        }
-      });
-    } else {
-      readRedis_->addValuesReader<T>(config_.read.key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-        if (const auto self = weak.lock()) {
-          self->handleRead(data, true);
-        }
-      });
-    }
-
-    if (config_.confirm && !sameRouteTarget(config_.read, *config_.confirm)) {
-      if constexpr (Array) {
-        confirmRedis_->addListsReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-          if (const auto self = weak.lock()) {
-            self->handleRead(data, false);
-          }
-        });
-      } else {
-        confirmRedis_->addValuesReader<T>(config_.confirm->key, [weak](const std::string&, const std::string&, const ReaderList& data) {
-          if (const auto self = weak.lock()) {
-            self->handleRead(data, false);
-          }
-        });
+  void handleRead(const RedisAdapter::StreamBatch& data, bool updateValue, bool canConfirm,
+                  const RedisAdapter::StreamBatchMetadata& metadata) {
+    // Evaluate every observed sample for alarms and confirmations, including
+    // intermediate values in a batch. Confirmation data never changes readback.
+    for (const auto& entry : data) {
+      if (!alive_) return;
+      ValueType raw{};
+      const auto timestamp = RA_Time(entry.first);
+      if (!decode(entry.second, raw) || !timestamp.ok()) {
+        if (!markInvalid("Invalid Redis payload or source timestamp", updateValue, metadata.epoch)) return;
+        continue;
       }
+      if (!handleRawUpdate(raw, static_cast<uint64_t>(timestamp.value), updateValue, canConfirm, entry.first, &metadata)) return;
     }
   }
 
-  void handleRead(const ReaderList& data, const bool updateValue) {
-    if (!active_.load() || data.empty()) {
-      return;
-    }
-    const auto& latest = data.back();
-    handleRawUpdate(latest.second, static_cast<uint64_t>(latest.first.value), updateValue);
+  bool acceptEpochLocked(bool read, uint64_t epoch, RedisAdapter::ReaderStatus* current = nullptr) {
+    if (!alive_) return false;
+    auto status = (read ? readReader_ : confirmReader_).status();
+    const bool matches = status.epoch == epoch;
+    if (current) *current = std::move(status);
+    if (matches) return true;
+    ++(read ? readSample_ : confirmSample_).staleCallbacks; return false;
   }
 
-  void handleRawUpdate(const ValueType& raw, const uint64_t timestamp, const bool updateValue) {
-    pvxs::Value value;
-    AlarmState alarmState{epicsSevNone, epicsAlarmNone, ""};
-    bool publishTransition = false;
-
+  bool markInvalid(const std::string& error, bool updateValue, uint64_t epoch) {
+    AlarmState state;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_.load()) {
-        return;
-      }
+      if (!acceptEpochLocked(updateValue, epoch)) return false;
+      (updateValue ? readSample_ : confirmSample_).reject(error, epoch);
+      if (!updateValue) return true;
+      sourceValid_ = false;
+      sourceError_ = error;
+      healthError_.clear();
+      auto value = pv_.fetch();
+      state = populateValue(value);
+      pv_.post(value);
+      recordAlarmLocked(state);
+    }
+    return true;
+  }
 
-      haveLastRaw_ = true;
+  bool handleRawUpdate(const ValueType& raw, uint64_t timestamp, bool updateValue,
+                       bool canConfirm = false, const std::string& streamId = {},
+                       const RedisAdapter::StreamBatchMetadata* metadata = nullptr) {
+    AlarmState state;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!alive_) return false;
+      const auto epoch = metadata ? metadata->epoch : 0;
+      RedisAdapter::ReaderStatus current;
+      if (epoch) {
+        if (!acceptEpochLocked(updateValue, epoch, &current)) return false;
+        auto& sample = updateValue ? readSample_ : confirmSample_;
+        sample.accept(streamId, epoch);
+        sample.acceptedReadRejections = metadata->readRejections;
+      }
+      if (canConfirm) {
+        for (auto& item : pendingPuts_) {
+          auto& pending = *item.second;
+          if (!pending.done && pending.sourceEpoch != epoch) {
+            pending.done = true;
+            pending.error = std::make_shared<const std::string>("confirmation source epoch changed; not retried");
+            pending.cv.notify_all();
+          } else if (!pending.done && RedisAdapter::compareStreamIds(streamId, pending.afterId) > 0 &&
+              valuesEqual(pending.expectedRaw, raw)) {
+            pending.done = true;
+            pending.cv.notify_all();
+          }
+        }
+      }
+      if (!updateValue) return true;
       lastRaw_ = raw;
       lastTimestampNs_ = timestamp;
-      completePendingLocked(raw);
-
-      if (!updateValue) {
-        return;
-      }
-
-      value = pv_.fetch();
-      const auto currentConfig = config_;
-      const auto present = applyForwardTransform(currentConfig, raw);
-
-      if constexpr (Array) {
-        assignArrayValue(value, present);
-      } else {
-        assignScalarValue(value, present);
-      }
-
-      applyStandardMetadata(value, currentConfig);
-      applyTimestamp(value, timestamp);
-
-      if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-        const int priorStatus = value["alarm.status"].valid() ? value["alarm.status"].as<int>() : epicsAlarmNone;
-        alarmState = evaluateNumericAlarm(currentConfig, static_cast<double>(present), priorStatus);
-        applyAlarmFields(value, currentConfig, alarmState);
-        publishTransition = (alarmState.status != lastPublishedStatus_ ||
-                             alarmState.severity != lastPublishedSeverity_);
-        lastPublishedStatus_ = alarmState.status;
-        lastPublishedSeverity_ = alarmState.severity;
-      } else {
-        applyAlarmFields(value, currentConfig, AlarmState{epicsSevNone, epicsAlarmNone, ""});
-      }
+      sourceValid_ = true;
+      sourceError_.clear();
+      if (epoch) healthError_ = batchHealthError(current, *metadata);
+      auto value = pv_.fetch();
+      state = populateValue(value);
+      // Serialize value and alarm-state updates with commit and retirement.
+      pv_.post(value);
+      recordAlarmLocked(state);
     }
-
-    pv_.post(value);
-    if (publishTransition && alarmPublisher_) {
-      alarmPublisher_->publishTransition(fullName_, alarmState);
-    }
+    return true;
   }
 
-  void completePendingLocked(const ValueType& raw) {
+  void failPendingLocked(const std::shared_ptr<const std::string>& reason) {
     for (auto& item : pendingPuts_) {
-      if (!item.second->done && valuesEqual(item.second->expectedRaw, raw)) {
-        item.second->done = true;
-        item.second->cv.notify_all();
-      }
+      item.second->done = true;
+      item.second->error = reason;
+      item.second->cv.notify_all();
     }
   }
 
-  void handlePut(pvxs::server::SharedPV&,
-                 std::unique_ptr<pvxs::server::ExecOp>&& op,
-                 pvxs::Value&& value) {
-    if (!active_.load()) {
-      op->error("generation is no longer active");
-      return;
+  void handlePut(std::unique_ptr<pvxs::server::ExecOp>&& op, pvxs::Value&& value) {
+    // Admission must not wait behind the worker's network dispatch fence.
+    if (!alive_ || !committed_) { op->error("generation is no longer active"); return; }
+    const auto epoch = commandEpoch_.load();
+    size_t bytes = sizeof(T);
+    try {
+      if constexpr (Array) {
+        const auto array = value["value"].as<pvxs::shared_array<const T>>();
+        if (array.size() > limits_.maxPayloadBytes / sizeof(T)) {
+          op->error("write payload exceeds max_payload_bytes"); return;
+        }
+        bytes = array.size() * sizeof(T);
+      } else if constexpr (std::is_same_v<T, std::string>) {
+        bytes = value["value"].as<std::string>().size();
+      }
+      if (bytes > limits_.maxPayloadBytes) { op->error("write payload exceeds max_payload_bytes"); return; }
+    } catch (const std::exception& ex) {
+      op->error(std::string("invalid put value: ") + ex.what()); return;
     }
+    const auto deadline = OperationQueue::Clock::now() + std::chrono::milliseconds(
+        limits_.operationTimeoutMs.value_or(static_cast<uint32_t>(std::max(5000, confirmationMs_ + 2000))));
+    auto request = QueuedExec::create(std::move(op), operations_);
+    auto self = this->shared_from_this();
+    const auto ticket = operations_->submit({fullName_, bytes, deadline,
+        [self, request, epoch, deadline, value = std::move(value)]() mutable {
+          self->dispatchPut(request, std::move(value), epoch, deadline);
+        },
+        [request](OperationFailure, const std::string& message) { request->error(message); }});
+    request->ticket(operations_, ticket);
+  }
 
-    PVConfig currentConfig;
-    uint64_t generation = 0;
+  void dispatchPut(const std::shared_ptr<QueuedExec>& request, pvxs::Value value,
+                   uint64_t epoch, OperationQueue::Clock::time_point deadline) {
+    if (request->stopped()) return;
+    PVConfig current;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      currentConfig = config_;
-      generation = generation_;
+      if (!alive_ || !committed_ || commandEpoch_ != epoch) {
+        request->error("write configuration changed before dispatch"); return;
+      }
+      current = config_;
     }
-
     ValueType present{};
-    if constexpr (Array) {
-      present = arrayValueFrom<T>(value);
-    } else {
-      present = scalarValueFrom<T>(value);
+    try {
+      if constexpr (Array) present = arrayValueFrom<T>(value);
+      else present = scalarValueFrom<T>(value);
+    } catch (const std::exception& ex) {
+      request->error(std::string("invalid put value: ") + ex.what()); return;
     }
-
-    const auto raw = applyInverseTransform(currentConfig, present);
-
+    const auto raw = applyInverseTransform(current, present);
     std::shared_ptr<PendingPut> pending;
-    if (currentConfig.confirm) {
-      pending = std::make_shared<PendingPut>();
-      pending->expectedRaw = raw;
+    if (current.confirm) {
+      if (request->stopped()) return;
+      uint64_t confirmationEpoch;
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        confirmationEpoch = (sameRouteTarget(current.read, *current.confirm) ? readReader_ : confirmReader_).status().epoch;
+      }
+      const auto snapshot = confirmRedis_->getStreamSnapshot(current.confirm->key);
+      if (!snapshot.connected) { request->error("confirmation backend unavailable"); return; }
+      pending = std::make_shared<PendingPut>();
+      pending->expectedRaw = raw;
+      pending->afterId = snapshot.id;
+      pending->sourceEpoch = confirmationEpoch;
+    }
+    RA_Time writeTime;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!alive_ || commandEpoch_ != epoch) { request->error("write configuration changed"); return; }
+      if (request->stopped()) return;
+      if (OperationQueue::Clock::now() >= deadline) {
+        request->error("total operation deadline exceeded before dispatch"); return;
+      }
+      const auto operation = request->operation();
+      if (!operation) return;
+      if (!authorizeWriteDispatch(*operation, value)) {
+        request->error("write no longer authorized at dispatch"); return;
+      }
+      if (request->stopped()) return;
+      if (pending) {
+        if (pending->sourceEpoch != (sameRouteTarget(current.read, *current.confirm) ? readReader_ : confirmReader_).status().epoch) {
+          request->error("confirmation source epoch changed before dispatch"); return;
+        }
         pending->id = ++nextPendingId_;
         pendingPuts_[pending->id] = pending;
       }
+      // Only one worker per canonical PV reaches this acceptance boundary.
+      // Retirement is serialized with dispatch; no command is ever replayed.
+      try { writeTime = writeToRedis(current, raw); }
+      catch (...) { if (pending) pendingPuts_.erase(pending->id); throw; }
+      if (!writeTime.ok() && pending) pendingPuts_.erase(pending->id);
     }
-
-    const auto writeTime = writeToRedis(currentConfig, raw);
-    if (!writeTime.ok()) {
-      if (pending) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pendingPuts_.erase(pending->id);
-      }
-      op->error("redis write failed");
-      return;
-    }
-
-    if (!currentConfig.confirm) {
-      if (currentConfig.write && sameRouteTarget(currentConfig.read, *currentConfig.write)) {
+    if (!writeTime.ok()) { request->error("redis write failed; not retried"); return; }
+    if (!pending) {
+      if (request->stopped()) return;
+      if (sameRouteTarget(current.read, *current.write))
         handleRawUpdate(raw, static_cast<uint64_t>(writeTime.value), true);
+      if (OperationQueue::Clock::now() >= deadline)
+        request->error("total operation deadline exceeded after dispatch; not retried");
+      else request->reply();
+      return;
+    }
+    // Register outside mutex_: wake() also calls back if already stopped.
+    // Taking the waiter's mutex closes the predicate-check/wait wake-up gap.
+    request->wake([owner = this->weak_from_this(), weak = std::weak_ptr<PendingPut>(pending)] {
+      if (const auto self = owner.lock()) {
+        std::lock_guard<std::mutex> guard(self->mutex_);
+        if (const auto item = weak.lock()) item->cv.notify_all();
       }
-      op->reply();
-      return;
-    }
-
-    std::unique_lock<std::mutex> lock(mutex_);
-    const auto timeout = std::chrono::milliseconds(currentConfig.confirm->timeoutMs);
-    const bool completed = pending->cv.wait_for(lock, timeout, [&]() {
-      return pending->done || !active_.load() || generation_ != generation;
     });
-
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto confirmationDeadline = std::min(deadline,
+        OperationQueue::Clock::now() + std::chrono::milliseconds(current.confirm->timeoutMs));
+    const bool completed = pending->cv.wait_until(lock, confirmationDeadline, [&] {
+      return pending->done || request->stopped() || !alive_ || commandEpoch_ != epoch;
+    });
     pendingPuts_.erase(pending->id);
-
-    if (!completed || !pending->done) {
-      op->error("backend confirmation timeout");
-      return;
-    }
-    if (!pending->error.empty()) {
-      op->error(pending->error);
-      return;
-    }
-    op->reply();
+    const auto error = pending->error;
+    const bool confirmed = completed && pending->done;
+    lock.unlock();
+    if (request->stopped()) return;
+    if (error) request->error(*error);
+    else if (OperationQueue::Clock::now() >= deadline)
+      request->error("total operation deadline exceeded after dispatch; not retried");
+    else if (!confirmed) request->error("backend confirmation timeout; not retried");
+    else request->reply();
   }
 
   RA_Time writeToRedis(const PVConfig& config, const ValueType& raw) {
-    if constexpr (Array) {
-      return writeRedis_->addSingleList<T>(config.write->key, raw);
-    } else if constexpr (std::is_same_v<T, double>) {
-      return writeRedis_->addSingleDouble(config.write->key, raw);
-    } else {
-      return writeRedis_->addSingleValue<T>(config.write->key, raw);
-    }
+    if constexpr (Array) return writeRedis_->addSingleList<T>(config.write->key, raw);
+    else if constexpr (std::is_same_v<T, double>) return writeRedis_->addSingleDouble(config.write->key, raw);
+    else return writeRedis_->addSingleValue<T>(config.write->key, raw);
   }
 
   mutable std::mutex mutex_;
   PVConfig config_;
-  std::shared_ptr<RedisAdapter> readRedis_;
-  std::shared_ptr<RedisAdapter> writeRedis_;
-  std::shared_ptr<RedisAdapter> confirmRedis_;
+  std::shared_ptr<RedisAdapter> readRedis_, writeRedis_, confirmRedis_;
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
+  std::shared_ptr<AlarmPublisher::Registration> alarmRegistration_;
   std::string fullName_;
   uint64_t generation_ = 0;
+  std::atomic<uint64_t> commandEpoch_{0};
+  std::shared_ptr<OperationQueue> operations_;
+  const OperationLimitsConfig limits_;
+  const int confirmationMs_;
+  const uint32_t readProbeMs_, confirmProbeMs_;
   pvxs::server::SharedPV pv_;
-  std::atomic<bool> active_{true};
+  std::atomic<bool> alive_{true};       // false once retired
+  std::atomic<bool> committed_{false};  // true after staging commits
+  RedisAdapter::ReaderHandle readReader_, confirmReader_;
+  SourceSampleState readSample_, confirmSample_;
+  std::string healthError_;
+  std::string readCursor_;
   ValueType lastRaw_{};
-  bool haveLastRaw_ = false;
   uint64_t lastTimestampNs_ = 0;
-  int lastPublishedStatus_ = epicsAlarmNone;
-  int lastPublishedSeverity_ = epicsSevNone;
+  bool sourceValid_ = false;
+  std::string sourceError_;
   uint64_t nextPendingId_ = 0;
   std::unordered_map<uint64_t, std::shared_ptr<PendingPut>> pendingPuts_;
 };
@@ -434,7 +768,9 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
                                                 const PVConfig& config,
                                                 const RedisBackendRegistry& redisBackends,
                                                 const std::shared_ptr<AlarmPublisher>& alarmPublisher,
-                                                const uint64_t generation) {
+                                                const uint64_t generation,
+                                                std::shared_ptr<OperationQueue> operations,
+                                                OperationLimitsConfig limits, const RedisBackendConfigs& readerPolicies) {
   const auto fullName = fullPVName(serverConfig, config);
   auto runtime = std::make_shared<TypedRuntime<T, Array>>(
       serverConfig,
@@ -443,7 +779,9 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
       config.write ? resolveBackend(redisBackends, config.write->backend, fullName, "write route") : nullptr,
       config.confirm ? resolveBackend(redisBackends, config.confirm->backend, fullName, "confirm route") : nullptr,
       alarmPublisher,
-      generation);
+      generation, std::move(operations), limits,
+      readerPolicies.count(config.read.backend) ? readerPolicies.at(config.read.backend).readerProbeMs : 1000,
+      config.confirm && readerPolicies.count(config.confirm->backend) ? readerPolicies.at(config.confirm->backend).readerProbeMs : 1000);
   runtime->initialize();
   return runtime;
 }
@@ -454,36 +792,48 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            const PVConfig& config,
                                            const RedisBackendRegistry& redisBackends,
                                            const std::shared_ptr<AlarmPublisher>& alarmPublisher,
-                                           const uint64_t generation) {
+                                           const uint64_t generation,
+                                                std::shared_ptr<OperationQueue> operations,
+                                                OperationLimitsConfig limits,
+                                                std::shared_ptr<RuntimeStats> stats,
+                                                const RedisBackendConfigs& readerPolicies) {
+  if (config.kind == PVKind::NTNDArray)
+    return makeNDArrayRuntime(serverConfig, config, redisBackends, alarmPublisher,
+                              stats ? stats : std::make_shared<RuntimeStats>(), generation, limits.maxPayloadBytes,
+                              readerPolicies.count(config.read.backend) ? readerPolicies.at(config.read.backend).readerProbeMs : 1000);
+  if (!operations) {
+    static auto defaultOperations = std::make_shared<OperationQueue>();
+    operations = defaultOperations;
+  }
   switch (config.shape) {
   case Shape::Scalar:
     switch (config.type) {
-    case PrimitiveType::Boolean: return makeTypedRuntime<bool, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float32: return makeTypedRuntime<float, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float64: return makeTypedRuntime<double, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::String: return makeTypedRuntime<std::string, false>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Boolean: return makeTypedRuntime<bool, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Float32: return makeTypedRuntime<float, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Float64: return makeTypedRuntime<double, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::String: return makeTypedRuntime<std::string, false>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
     }
     break;
   case Shape::Array:
     switch (config.type) {
-    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float32: return makeTypedRuntime<float, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
-    case PrimitiveType::Float64: return makeTypedRuntime<double, true>(serverConfig, config, redisBackends, alarmPublisher, generation);
+    case PrimitiveType::Int8: return makeTypedRuntime<int8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt8: return makeTypedRuntime<uint8_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int16: return makeTypedRuntime<int16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt16: return makeTypedRuntime<uint16_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int32: return makeTypedRuntime<int32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt32: return makeTypedRuntime<uint32_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Int64: return makeTypedRuntime<int64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::UInt64: return makeTypedRuntime<uint64_t, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Float32: return makeTypedRuntime<float, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
+    case PrimitiveType::Float64: return makeTypedRuntime<double, true>(serverConfig, config, redisBackends, alarmPublisher, generation, operations, limits, readerPolicies);
     case PrimitiveType::Boolean:
     case PrimitiveType::String:
       break;

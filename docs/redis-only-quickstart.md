@@ -1,7 +1,7 @@
 # Redis-Only Quick Start
 
-Use this path when you only want Redis-backed PVAccess PVs. No legacy sidecar,
-no Channel Access, no local image build.
+Use the published image to serve Redis-backed PVAccess PVs and register them
+automatically with RecCeiver.
 
 ## Run The Demo
 

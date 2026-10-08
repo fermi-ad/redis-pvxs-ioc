@@ -9,6 +9,8 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <unistd.h>
 #include <sys/socket.h>
 
 #include <pvxs/client.h>
@@ -16,10 +18,18 @@
 
 using namespace redis_pvxs_ioc;
 
+template<class F> void eventually(F predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (!predicate()) {
+    assert(std::chrono::steady_clock::now() < deadline);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+}
+
 int main() {
   // Match Application startup ordering: initialize PVXS before asLib.
   auto server = pvxs::server::Config::isolated(AF_INET).build();
-  const auto policyPath = std::filesystem::temp_directory_path() / "redis-pvxs-ioc-runtime.acf";
+  const auto policyPath = std::filesystem::temp_directory_path() / ("redis-pvxs-ioc-runtime-" + std::to_string(getpid()) + ".acf");
   const auto writePolicy = [&](const std::string& text) {
     std::ofstream output(policyPath, std::ios::binary | std::ios::trunc);
     output << text;
@@ -40,9 +50,15 @@ int main() {
   auto mailbox = pvxs::server::SharedPV::buildMailbox();
   auto initial = pvxs::nt::NTScalar{pvxs::TypeCode::Int32}.create();
   initial["value"] = static_cast<int32_t>(7);
-  mailbox.onPut([](pvxs::server::SharedPV& pv,
+  std::mutex pendingMutex;
+  std::unique_ptr<pvxs::server::ExecOp> pending;
+  mailbox.onPut([&](pvxs::server::SharedPV& pv,
                    std::unique_ptr<pvxs::server::ExecOp>&& op,
                    pvxs::Value&& value) {
+    const auto request = value["value"].as<int32_t>();
+    if (request == 99) { op->error("backend fixture rejected write"); return; }
+    if (request == 100) { std::lock_guard<std::mutex> lock(pendingMutex); pending = std::move(op); return; }
+    if (request == 101) return; // Dropped by the handler without completion.
     pv.post(value);
     op->reply();
   });
@@ -127,17 +143,59 @@ int main() {
     }
   }
   assert(monitorStopped);
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    try { client.get("secured").exec()->wait(2.); assert(false); }
+    catch (const pvxs::client::RemoteError&) {}
+  }
+  assert(controller->status().denialLogsSuppressed > 0);
 
   writePolicy(
       "ASG(TEST) { RULE(0, WRITE, TRAPWRITE) }\n"
-      "ASG(RPC) { RULE(0, WRITE) }\n"
+      "ASG(RPC) { RULE(0, WRITE, TRAPWRITE) }\n"
       "ASG(DENIED_RPC) { RULE(0, NONE) }\n");
   assert(controller->reload("test-restore", error));
   client.put("secured").set("value", 9).exec()->wait(5.0);
   assert(client.get("secured").exec()->wait(5.0)["value"].as<int32_t>() == 9);
   assert(controller->status().generation == 3u);
 
+  eventually([&] { return controller->status().operationsSucceeded == 2; });
+  assert(controller->status().authorizedOperations == 2); // Denials did not execute.
+  try { client.put("secured").set("value", 99).exec()->wait(2.); assert(false); }
+  catch (const pvxs::client::RemoteError& error) { assert(std::string(error.what()).find("backend fixture") != std::string::npos); }
+  eventually([&] { return controller->status().operationsFailed == 1; });
+  auto cancelled = client.put("secured").set("value", 100).exec();
+  eventually([&] { return controller->status().operationsInFlight == 1; });
+  cancelled->cancel();
+  eventually([&] { return controller->status().operationsCancelled == 1; });
+  { std::lock_guard<std::mutex> lock(pendingMutex); pending.reset(); }
+  assert(controller->status().operationsInFlight == 0 && controller->status().operationsAbandoned == 0);
+  auto abandoned = client.put("secured").set("value", 101).exec();
+  eventually([&] { return controller->status().operationsAbandoned == 1; });
+  abandoned->cancel();
+  auto privateRequest = pvxs::TypeDef(pvxs::TypeCode::Struct, {
+    pvxs::Member(pvxs::TypeCode::String, "token")}).create();
+  privateRequest["token"] = "private-rpc-value-must-not-be-logged";
+  assert(client.rpc("secured-rpc", privateRequest).exec()->wait(2.)["token"].as<std::string>() ==
+         "private-rpc-value-must-not-be-logged");
+  eventually([&] { return controller->status().operationsSucceeded == 3; });
+  const auto status = controller->status();
+  assert(status.authorizedOperations == 6 && status.operationsInFlight == 0);
+  assert(status.operationsFailed == 1 && status.operationsCancelled == 1 && status.operationsAbandoned == 1);
+
+  monitor->cancel(); client.close();
+  eventually([&] { return controller->status().activeClients == 0; });
+  // Short-lived peers release their rate-limit state; admission also prunes
+  // expired weak client references without waiting for a policy change.
+  for (unsigned peer = 0; peer < 12; ++peer) {
+    auto transient = server.clientConfig().build();
+    try { transient.rpc("denied-rpc", privateRequest).exec()->wait(2.); assert(false); }
+    catch (const pvxs::client::RemoteError&) {}
+    transient.close();
+    eventually([&] { return controller->status().activeClients == 0; });
+  }
+  controller->clearBindings();
   server.stop();
+  eventually([&] { return controller->status().activeClients == 0; });
   std::error_code ignored;
   std::filesystem::remove(policyPath, ignored);
   return 0;

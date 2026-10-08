@@ -10,6 +10,8 @@
 namespace redis_pvxs_ioc {
 
 inline constexpr const char kDefaultRedisBackendAlias[] = "default";
+inline constexpr uint64_t kAlarmQueueEntryBytes = 1024;
+inline constexpr uint32_t kDefaultNDArrayMaxFrameGap = 10000;
 
 enum class PrimitiveType {
   Boolean,
@@ -29,6 +31,11 @@ enum class PrimitiveType {
 enum class Shape {
   Scalar,
   Array,
+};
+
+enum class PVKind {
+  Value,
+  NTNDArray,
 };
 
 enum class DisplayForm {
@@ -80,6 +87,13 @@ struct LinearTransformConfig {
   double offset = 0.0;
 };
 
+struct SourceHealthConfig {
+  bool required = true;
+  // Zero leaves source cadence unspecified. Age is measured on the local
+  // monotonic clock, never by reinterpreting the source timestamp.
+  uint32_t staleAfterMs = 0;
+};
+
 struct AccessAssignment {
   std::string asg = "DEFAULT";
   int asl = 0;
@@ -114,10 +128,14 @@ struct RpcServiceConfig {
   std::string endpoint;   // gRPC "host:port"
   std::string service;    // fully-qualified, e.g. "bpm.query.v1.BpmQuery"
   std::string suffix;     // appended to each derived PV name (e.g. "_RPC")
-  // Fixed request-field defaults applied (by proto field name / dotted path /
-  // unique leaf) before per-call pvxcall args. Fields that a given method's
-  // request doesn't have are ignored, so one map can serve every method.
+  // Shared defaults must match at least one method, and are applied only to
+  // methods with that field. Method defaults override shared defaults.
   std::map<std::string, std::string> defaults;
+  std::map<std::string, std::map<std::string, std::string>> methodDefaults;
+  bool optional = false;
+  uint32_t discoveryTimeoutMs = 3000;
+  uint32_t timeoutMs = 10000;
+  uint32_t retryIntervalMs = 5000;
   std::optional<AccessAssignment> access;
 };
 
@@ -149,6 +167,7 @@ using TypedValue = std::variant<
 struct PVConfig {
   std::string name;
   std::vector<std::string> aliases;
+  PVKind kind = PVKind::Value;
   PrimitiveType type = PrimitiveType::Float64;
   Shape shape = Shape::Scalar;
   RouteConfig read;
@@ -159,6 +178,9 @@ struct PVConfig {
   std::optional<LinearTransformConfig> transform;
   TypedValue initialValue;
   std::optional<AccessAssignment> access;
+  uint64_t maxFrameBytes = 32u * 1024u * 1024u;
+  uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap;
+  SourceHealthConfig sourceHealth;
 };
 
 struct ServerConfig {
@@ -178,6 +200,7 @@ struct RedisConfig {
   std::string password;
   uint16_t workers = 1;
   uint16_t readers = 1;
+  uint32_t readerProbeMs = 1000;
 };
 
 using RedisBackendConfigs = std::map<std::string, RedisConfig>;
@@ -194,12 +217,40 @@ struct ChannelFinderConfig {
   std::map<std::string, std::string> properties;
 };
 
+struct DiscoveryConfig {
+  bool enabled = true;
+  std::string bindAddress = "0.0.0.0";
+  uint16_t udpPort = 5049;
+  uint32_t timeoutMs = 20000;
+  uint32_t maxHoldoffMs = 10000;
+  uint32_t maxRecords = 100000;
+  uint64_t maxBytes = 16u * 1024u * 1024u;
+};
+
+struct OperationLimitsConfig {
+  uint32_t writeWorkers = 4;
+  uint32_t queuedWritesPerPV = 16;
+  uint64_t queuedWriteBytes = 64u * 1024u * 1024u;
+  uint32_t rpcWorkers = 4;
+  uint32_t queuedRpcPerMethod = 16;
+  uint64_t queuedRpcBytes = 64u * 1024u * 1024u;
+  uint64_t maxPayloadBytes = 32u * 1024u * 1024u;
+  // Omitted: max(5 seconds, configured confirmation wait + 2 seconds).
+  std::optional<uint32_t> operationTimeoutMs;
+  uint32_t alarmQueueEntries = 1024;
+  uint64_t alarmStateBytes = 64u * 1024u * 1024u;
+};
+
 struct AppConfig {
+  uint32_t schemaVersion = 1;
+  bool legacyInput = true;
   ServerConfig server;
   AccessConfig access;
   RedisBackendConfigs redisBackends;
   AlarmStreamConfig alarms;
   ChannelFinderConfig channelFinder;
+  DiscoveryConfig discovery;
+  OperationLimitsConfig limits;
   std::vector<PVConfig> pvs;
   std::vector<RpcServiceConfig> rpcServices;
 };
@@ -214,6 +265,7 @@ bool isArrayElementTypeSupported(PrimitiveType type);
 
 std::string toString(PrimitiveType type);
 std::string toString(Shape shape);
+std::string toString(PVKind kind);
 std::string toString(DisplayForm form);
 
 bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs);
@@ -229,5 +281,8 @@ std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig&
 std::string adminPVName(const ServerConfig& server, const std::string& suffix);
 std::string versionPVName(const ServerConfig& server);
 std::string revisionPVName(const ServerConfig& server);
+std::vector<std::string> adminPVNames(const ServerConfig& server);
+bool sameDiscoveryConfig(const DiscoveryConfig& lhs, const DiscoveryConfig& rhs);
+bool sameOperationLimits(const OperationLimitsConfig& lhs, const OperationLimitsConfig& rhs);
 
 }  // namespace redis_pvxs_ioc

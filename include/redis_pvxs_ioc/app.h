@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -12,23 +11,17 @@ public:
   explicit Application(std::string configPath);
   ~Application();
 
-  bool validateOnly(std::string& summary, std::string& error) const;
+  bool validateOnly(std::string& summary, std::string& error, struct AppConfig* normalized = nullptr) const;
   bool start(std::string& error);
   void requestReload();
   void pump();
   void stop();
 
 private:
-  using BeforeCommit = std::function<bool(std::string&)>;
-
   bool applyConfig(const struct AppConfig& config, bool initialLoad, std::string& error);
-  bool replaceAll(const struct AppConfig& config,
-                  uint64_t generation,
-                  const BeforeCommit& beforeCommit,
-                  std::string& error);
-  bool applyIncremental(const struct AppConfig& config,
+  void pumpRpcRecovery();
+  bool applyGeneration(const struct AppConfig& config,
                         uint64_t generation,
-                        const BeforeCommit& beforeCommit,
                         std::string& error);
 
   std::string configPath_;

@@ -32,8 +32,24 @@ Required tools and libraries are:
 - gRPC C++ and Protocol Buffers development libraries;
 - `protoc` and the gRPC C++ code-generation plugin.
 
-gRPC and Protocol Buffers are mandatory build dependencies even when the
-runtime configuration has no `rpc_services`.
+The default test build also requires Python 3 and `redis-server`. CTest starts
+an isolated loopback Redis fixture and removes it when the runtime test exits.
+Use `-DREDIS_PVXS_IOC_BUILD_TESTS=OFF` only for builds that will be tested separately.
+
+The official image enables both integrations. A minimal Redis/PVA build needs
+neither gRPC/Protobuf nor curl:
+
+```sh
+cmake -S . -B build \
+  -DREDIS_PVXS_IOC_ENABLE_GRPC=OFF \
+  -DREDIS_PVXS_IOC_ENABLE_CHANNELFINDER=OFF
+```
+
+The two options are independent and default to `ON`. A build without gRPC
+rejects configured `rpc_services` explicitly in both `--check-config` and
+startup. Disabling ChannelFinder omits its publication tool and tests; stored
+catalog metadata remains compatible. CMake verifies the pinned Base
+`asRefreshHag(unsigned*)` extension at configuration time.
 
 Ubuntu 24.04:
 
@@ -42,13 +58,13 @@ sudo apt-get update
 sudo apt-get install \
   build-essential ca-certificates cmake git libcurl4-openssl-dev \
   libreadline-dev libgrpc++-dev libprotobuf-dev perl pkg-config \
-  protobuf-compiler protobuf-compiler-grpc
+  protobuf-compiler protobuf-compiler-grpc python3 redis-server
 ```
 
 macOS with Homebrew:
 
 ```sh
-brew install cmake curl grpc protobuf readline pkg-config
+brew install cmake curl grpc protobuf readline pkg-config python redis
 ```
 
 ## Build the pinned EPICS dependencies
@@ -70,6 +86,12 @@ make -C third_party/pvxs configure.install setup.install src.install \
 
 The main service links EPICS `libCom` and standalone PVXS. It does not require
 an EPICS database, `pvxsIoc`, or `iocInit()`.
+
+Let PVXS select its libevent libraries. Linking the monolithic `libevent` in
+addition to PVXS's `event_core` and `event_pthreads` dependencies creates
+duplicate event-threading state on macOS and can block PVA server startup.
+The native CI jobs exercise actual PVA server/client operations on Linux amd64,
+Linux arm64, and macOS arm64 to detect this class of build problem.
 
 ## Build and test the service
 
@@ -141,5 +163,27 @@ docker run --rm redis-pvxs-ioc:local \
 REDIS_PVXS_IOC_IMAGE=redis-pvxs-ioc:local REDIS_PVXS_IOC_PULL_POLICY=never ./scripts/smoke-test.sh
 ```
 
-The optional legacy sidecar has a separate dependency surface and build
-overlay. See [Legacy IOC sidecar](legacy-sidecar.md).
+`Dockerfile` fixes the Ubuntu base by digest, and
+`packaging/ubuntu.sources` fixes the signed Ubuntu package archive for
+both build and runtime stages. All source dependencies use the committed Git
+submodule revisions. Rebuilds therefore do not silently pick newer system
+packages. This pins dependency inputs; it does not promise byte-identical
+compiler output.
+
+The minimal base has no CA bundle, so a checksum-pinned Ubuntu certificate
+package supplies the initial HTTPS trust roots. APT then installs that package
+normally. Only the fixed archive is configured, and index download errors fail
+the build. The historical archive's freshness expiry is disabled; signature,
+package hash, and HTTPS certificate verification remain enabled.
+
+Refresh the base digest and snapshot together in a reviewed change, then run
+the full image and native validation before qualifying a replacement image.
+Security updates require that explicit refresh and validation. Do not run
+package upgrades inside a deployed IOC container.
+
+The image retains exact build/runtime package inventories and source dependency
+notices under `/usr/share/doc/redis-pvxs-ioc/`. The snapshot is selected using
+Ubuntu's [APT snapshot configuration](https://ubuntu.com/server/docs/how-to/software/snapshot-service/).
+
+Native RecCeiver discovery is part of the service and requires no additional
+support-module checkout or build. See [Discovery](reccaster.md).

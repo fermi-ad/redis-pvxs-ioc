@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.9.0 - unreleased
+
+- report Redis source readiness, monotonic freshness, exact cursors and stream
+  epochs; retain last-good values/time through source failures and fence
+  confirmations across stream replacement
+- deliberately enable bounded IOC continuity inspection with a configurable
+  default interval of 1000 ms; see source-health documentation for workload cost,
+  disabling, permissions and required qualification
+- count NTNDArray rollover gaps with serial arithmetic and bound ambiguous ID
+  jumps with `max_frame_gap`; expose a separate discontinuity diagnostic
+
+### Upgrade notes
+
+These changes belong to the v0.9.0 feature stack and are not part of the
+preceding v0.8.2 correctness release.
+
+- Configuration now rejects unknown keys and malformed mappings (#104). Remove
+  ignored or misspelled settings and run `--check-config` before upgrading; see
+  [configuration validation](docs/configuration.md).
+- Configured RPC services are required by default (#117). An unavailable required
+  backend rejects startup or a changed service on reload. Set `optional: true`
+  only when the service may be absent; see [RPC forwarding](docs/rpc-forwarding.md).
+- The container runs as UID `10001` (#118). Ensure mounted configuration,
+  ACF policy, and secret files are readable by that identity, including traversal
+  permissions on parent directories; see [container operations](docs/operations.md)
+  and [access-policy files](docs/access-control.md).
+- RecCeiver discovery is enabled by default and listens on UDP `5049` (#102).
+  Allow the intended discovery traffic, choose a non-conflicting port, or set
+  `discovery.enabled: false`; see [discovery networking](docs/reccaster.md).
+
+## v0.8.2 - unreleased
+
+- fix native macOS PVA startup by avoiding a second libevent threading state
+- use individually owned upstream redis-adapter subscriptions so replacing or
+  rejecting a staged runtime cannot remove another runtime's reader
+- resume live reads from the exact snapshot stream ID, preserving updates
+  between snapshot acquisition and reader activation
+- isolate displayed readback from confirmation observations and require a
+  confirmation stream position newer than the pre-command snapshot; metadata
+  changes no longer replay observations into pending writes
+- evaluate major alarm thresholds before warning hysteresis retention
+- decode scalars and arrays with validated lengths and safe copying; accept
+  empty numeric arrays and preserve the last good value on malformed input
+- mark initial-only fallback values invalid until valid source data arrives,
+  without attributing a fabricated source timestamp to them
+- fence retired callbacks and suppress commands and alarm publication from
+  staged runtimes until activation
+- run Redis/PVA regression tests with an isolated, automatically cleaned-up
+  Redis fixture as part of the normal CTest and image build
+
+## v0.8.1 - 2026-08-03
+
+- serialize access-policy reconfiguration and watcher reloads
+- clear recovered ACF watcher errors while retaining the last good policy
+
 ## v0.8.0 - 2026-08-03
 
 - add explicitly enabled native EPICS ACF enforcement for PV, RPC, and admin

@@ -7,13 +7,6 @@ docker compose pull
 docker compose up -d
 ```
 
-Full testbed with legacy sidecar:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy pull
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy up -d
-```
-
 ## Validate Redis-Backed PVs
 
 The default compose stack uses a private Docker bridge network. Validate it from
@@ -93,18 +86,12 @@ docker compose \
   --config /etc/redis-pvxs-ioc/config.yaml
 ```
 
-## Validate Legacy Sidecar
+## Automatic discovery
 
-```sh
-SIDE_CAR_PV_ENV='EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=239.128.1.6'
-
-docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:readback"
-docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxput LEGACY:setpoint 2.5"
-docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:setpoint"
-docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:counter"
-docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:State-Sts"
-docker exec "$IOC_CONTAINER" sh -lc "$SIDE_CAR_PV_ENV $PVX_BIN_DIR/pvxget LEGACY:RecCaster:Msg-I"
-```
+Native discovery registers the actual PV catalog with a reachable RecCeiver.
+See [Discovery](reccaster.md) for the UDP 5049 mapping used with bridge networks
+and the structured status PV. PVA search itself uses the existing PVXS network
+configuration.
 
 ## Use Your Config
 
@@ -124,5 +111,5 @@ docker compose up -d
 ## Stop
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.legacy-sidecar.yml --profile legacy down
+docker compose down
 ```

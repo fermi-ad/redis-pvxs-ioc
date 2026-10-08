@@ -8,8 +8,12 @@
   defaults, types, and validation rules.
 - [Operations and diagnostics](operations.md): hot reload, built-in PVs, health,
   and troubleshooting.
+- [Source health](source-health.md): Redis readiness, freshness, continuity
+  inspection, failure behavior and overhead qualification.
 - [Access control](access-control.md): opt-in native ACF policy, hot reload,
   watcher behavior, auditing, and diagnostics.
+- [Container runtime and secret files](container-runtime.md): non-root identity,
+  UID override, read-only mounts and credential rotation.
 - [Live ACF validation](access-live-validation.md): controlled acceptance and
   rollback procedure for a representative deployed IOC.
 - [PVAccess networking](pva-networking.md): container discovery and routable
@@ -18,13 +22,13 @@
 
 ## Integrators
 
+- [Redis-backed NTNDArray](ntndarray.md): versioned image envelope, validation,
+  acquisition-time provenance, and normative-value mapping.
 - [ChannelFinder sync](channelfinder-sync.md): preview and publish configured PV
   catalog entries.
 - [PVA RPC to gRPC forwarding](rpc-forwarding.md): expose reflected gRPC methods
   as RPC PVs.
-- [Legacy IOC sidecar](legacy-sidecar.md): experimental `.db` and support-module
-  compatibility lane.
-- [RecCaster sidecar](reccaster.md): conventional IOC record cataloging.
+- [Discovery](reccaster.md): native RecCeiver catalog registration and PVA search.
 
 ## Contributors
 
@@ -50,6 +54,7 @@
 
 ## Historical design material
 
+- [Sidecar retirement and migration](legacy-sidecar.md)
 - [Original design proposal](history/original-design.md)
 - [Initial MVP specification](history/mvp-spec.md)
 - [Architecture decisions](adr/)

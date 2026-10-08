@@ -14,6 +14,9 @@ gitlink, verify that its public remote contains the exact pinned commit.
 - Current known branch containing the commit: `dev/as-hag-refresh-api-v7.0.10`
 - Verified remote branch: `https://github.com/derekste/epics-base.git` `refs/heads/dev/as-hag-refresh-api-v7.0.10`
 - Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
+- Remaining qualification limitation: this pin holds the access lock during HAG
+  DNS. The separate correction described in [IOC #114](https://github.com/fermi-ad/redis-pvxs-ioc/pull/114)
+  remains local pending dependency publication and independent review.
 
 ### `third_party/pvxs`
 
@@ -21,15 +24,23 @@ gitlink, verify that its public remote contains the exact pinned commit.
 - Pinned commit: `8e00eaecdee5ce8a474704e70d820e6f92693fa1`
 - Publish status: ready
 - Release tag: `1.5.2`
-- No redis-pvxs-ioc-specific PVXS changes are required.
+- This pin predates the bounded listener-backlog proposal. [Issue #122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122)
+  retains the burst comparison; backlog 32 remains local pending upstream review
+  and publication approval. Adopt a reviewed merged pin and repeat final burst/
+  reconnect qualification before release.
 
 ### `third_party/redis-adapter`
 
 - Published `.gitmodules` URL: `https://github.com/fermi-ad/redis-adapter.git`
-- Pinned commit: `9193b21203104eeb28fff01fe391ff46a347e2e3`
-- Publish status: ready
-- Default branch: `main`
-- Upstream change: [merged redis-adapter #98](https://github.com/fermi-ad/redis-adapter/pull/98)
+- Pinned commit: `94470f5918c4bb544312f32f0e4a09847a122572`
+- Publish status: published development commit; merge and release qualification pending
+- Verified remote branch: `dev/stream-recovery-status`
+- Upstream change: [redis-adapter #111](https://github.com/fermi-ad/redis-adapter/pull/111),
+  following #127 → #108 → #109. Source-health callbacks use its immutable batch
+  epoch/rejection metadata; the earlier callback API remains compatible.
+- Release gate: keep source-health preparation in draft until the upstream
+  sequence is reviewed and merged, replace this development pin with the exact
+  reviewed merged revision, and pass strict CI plus Instrumentation review.
 
 ### `third_party/yaml-cpp`
 
@@ -37,40 +48,6 @@ gitlink, verify that its public remote contains the exact pinned commit.
 - Pinned commit: `4861d049534ed6f2c51c45b01d7c2926022e5f3f`
 - Publish status: ready
 - Source of the local checkout: `https://github.com/jbeder/yaml-cpp.git`
-
-### `third_party/reccaster`
-
-- Published `.gitmodules` URL: `https://github.com/ChannelFinder/reccaster.git`
-- Pinned commit: `254723063a2b7a7c80d8e50f05efa8d748f429dd`
-- Pinned upstream tag: none; the standalone repository has not published a tag
-- Publish status: ready
-- Use: legacy IOC sidecar RecCaster support only
-- License notice: retained in `licenses/RecCaster-LICENSE` because the
-  standalone upstream repository does not contain a license file at this commit
-
-## Legacy sidecar support-module remotes
-
-These public support modules are pinned for the registry-built legacy IOC sidecar:
-
-| Path | Remote | Pinned commit | Tag/describe |
-| --- | --- | --- | --- |
-| `third_party/support/seq` | `https://github.com/epics-modules/sequencer.git` | `7544ad3acd18d0b4d072c5d3b089b87b073097c0` | `R2-2-5` |
-| `third_party/support/sscan` | `https://github.com/epics-modules/sscan.git` | `a67107fd9ca533d3056b157ad29a7e0b395f3147` | `R2-12` |
-| `third_party/support/calc` | `https://github.com/epics-modules/calc.git` | `7ab5914a869716dbb5d860214e42f744839282af` | `R3-7-5-48-g7ab5914` |
-| `third_party/support/asyn` | `https://github.com/epics-modules/asyn.git` | `0e6d2edfcefd2e53580f07ba159a0ef0f8a4bc55` | `R4-44` |
-| `third_party/support/std` | `https://github.com/epics-modules/std.git` | `5d9411f5c386f8ca1abd02e114bd6a77736d584f` | `R3-6-4-29-g5d9411f` |
-| `third_party/support/StreamDevice` | `https://github.com/paulscherrerinstitute/StreamDevice.git` | `668d1d525509604ab4ccd7382022dfb469c99841` | `2.8.26` |
-| `third_party/support/lua` | `https://github.com/epics-modules/lua.git` | `0091a141a9f708a47c87554a72da79da039f210b` | `R1-2-339-g0091a14` |
-| `third_party/support/iocStats` | `https://github.com/epics-modules/iocStats.git` | `4df9e87815f6a9432955a3ddb45fafa9fe4a4d40` | `3.1.15-22-g4df9e87` |
-| `third_party/support/alive` | `https://github.com/epics-modules/alive.git` | `4108a24d26e9d353a80e637f0dbea78fec1c3256` | `R1-4-1-11-g4108a24` |
-| `third_party/support/autosave` | `https://github.com/epics-modules/autosave.git` | `800c2d600908cf300c9b1c8beedd090991e8d554` | `R5-10-21-g800c2d6` |
-| `third_party/support/busy` | `https://github.com/epics-modules/busy.git` | `569a6b6fb1288c067ac2b22a998aa7de5375ddc4` | `R1-7-4` |
-| `third_party/support/caPutLog` | `https://github.com/epics-modules/caPutLog.git` | `062998a1d4b9c4ccacf3277e9097a63c5db4c28e` | `R4.0` |
-| `third_party/support/linStat` | `https://github.com/mdavidsaver/linStat.git` | `b4729e43c8ee9791975abbc7e06b870f46fb9661` | `1.2.1` |
-
-Vendored non-submodule trees:
-
-- `third_party/support/pcre`: copied from the local GHE support-module monorepo `pcre-8.44` tree because the EPICS build wrapper is local.
 
 ## Update checklist
 

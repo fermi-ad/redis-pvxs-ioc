@@ -1,0 +1,8 @@
+# An immutable archive intentionally outlives InRelease's freshness window.
+# Signatures and package hashes are still verified with Ubuntu's archive key.
+Types: deb
+URIs: https://snapshot.ubuntu.com/ubuntu/20260928T000000Z/
+Suites: resolute resolute-updates resolute-backports resolute-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+Check-Valid-Until: no

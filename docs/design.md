@@ -12,8 +12,8 @@ variables over PVAccess without loading an EPICS database or calling `iocInit()`
   forwarding.
 - Redis is the value plane for configured reads, writes, confirmations, and alarm
   stream events. One generation may use multiple independent Redis servers.
-- The legacy conventional IOC is a separate, optional sidecar with its own image
-  and release history.
+- Native RecCeiver registration publishes the active PVA catalog automatically.
+  Discovery has its own bounded worker and follows successful generation activation.
 
 ## Startup and configuration
 
@@ -54,14 +54,18 @@ are deactivated, and stale callbacks from prior generations are fenced.
 Alias-only changes update the PVA registry in place while retaining the
 canonical runtime and its Redis subscription. Removed aliases stop resolving;
 new aliases immediately share the existing value, monitor, and put behavior.
-PVXS's static registry closes a `SharedPV` when any registered name is removed,
-so an alias-set change briefly reopens that same `SharedPV` and re-registers its
-complete desired name set. Existing PVA clients may observe a disconnect and
-reconnect during that reload; no Redis subscription, command, or confirmation
-route is rebuilt or replayed.
+The registry tracks channels by served name and publishes a prepared endpoint
+snapshot. Removing an alias closes only that name's channels; canonical and
+retained-alias monitors stay connected to the same `SharedPV`. Retired endpoint
+leases also fail authorization at queued-write dispatch.
 
 If parsing, validation, backend construction, or RPC reflection fails, the new
-generation is rejected and the active generation continues serving. The
+generation is rejected and the active generation continues serving. Metadata,
+access members, policy bytes and the discovery catalog are prepared without
+publishing changes. Policy activation is the last fallible commit gate; runtime
+configuration swaps and endpoint publication then use the prepared objects.
+Metadata posts use the latest cached source value, never the preparation-time
+sample. The
 generation, last status, and last error are observable through built-in PVs.
 Server namespace and bind settings are intentionally immutable after startup.
 
@@ -78,8 +82,8 @@ verification commands are in [`operations.md`](operations.md).
   generation and publication for configured Redis PVs.
 - [`rpc-forwarding.md`](rpc-forwarding.md) documents reflection-based PVA RPC to
   gRPC forwarding.
-- [`legacy-sidecar.md`](legacy-sidecar.md) documents the experimental conventional
-  IOC compatibility path. It is not part of the main runtime process.
+- [`reccaster.md`](reccaster.md) documents native RecCeiver discovery and catalog
+  reconciliation without a conventional IOC.
 
 ## Dependencies and releases
 

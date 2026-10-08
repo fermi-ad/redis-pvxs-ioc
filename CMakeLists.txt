@@ -441,6 +441,9 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-channelfinder)
     target_compile_options(channelfinder_tests PRIVATE -UNDEBUG)
     add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
+    add_test(NAME channelfinder_http_tests COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/tests/channelfinder_http_tests.py $<TARGET_FILE:redis-pvxs-channelfinder-sync>)
+    set_tests_properties(channelfinder_http_tests PROPERTIES TIMEOUT 30)
   endif()
 
   # redis-plus-plus supplies a default Release build type when callers don't

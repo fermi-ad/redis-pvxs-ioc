@@ -83,7 +83,9 @@ A queued PUT/RPC rechecks its rights immediately before dispatch. If a policy
 reload or HAG refresh removed WRITE after admission, the operation is refused
 before reaching the backend: a `TRAPWRITE` operation then records
 `phase=authorization result=denied` and `phase=completion result=denied` under
-its admitted `id`, so the refusal is not mistaken for a backend error.
+its admitted `id`, so the refusal is not mistaken for a backend error. If the
+client cancelled the operation first, it completes as `cancelled` and the late
+denial is recorded with `id=0`, so a completion is always that id's last record.
 
 Writes denied at admission retain an authorization audit with `id=0` and no completion
 record. Records include operation kind, PV, account, peer, authentication method

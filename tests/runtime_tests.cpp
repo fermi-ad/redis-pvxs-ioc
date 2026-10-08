@@ -111,6 +111,12 @@ int main() {
   eventually([&] { return producer.getStreamSnapshot("command").id != previousCommand; });
   metadata.metadata.description = "metadata during pending write";
   runtime->reconfigure(metadata, 3);
+  auto rejectedConfig = metadata;
+  rejectedConfig.transform = LinearTransformConfig{2., 0.};
+  {
+    auto rejected = runtime->prepareReconfigure(rejectedConfig, 4);
+    assert(runtime->sharedPV().fetch()["value"].as<double>() == 123.);
+  }
   assert(!repeated.waitFor(100ms));
   assert(producer.addSingleDouble("ack", 123.).ok());
   assert(repeated.waitFor(3s) && repeated.error.empty());
@@ -122,6 +128,15 @@ int main() {
   assert(producer.addSingleDouble("readback", 7.).ok());
   eventually([&] { return runtime->sharedPV().fetch()["value"].as<double>() == 7.; });
   assert(runtime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevNone);
+
+  auto stagedMetadata = metadata;
+  stagedMetadata.metadata.description = "prepared before the newest source sample";
+  auto stagedUpdate = runtime->prepareReconfigure(stagedMetadata, 4);
+  assert(producer.addSingleDouble("readback", 7.5).ok());
+  eventually([&] { return runtime->sharedPV().fetch()["value"].as<double>() == 7.5; });
+  stagedUpdate->commit();
+  stagedUpdate->refresh();
+  assert(runtime->sharedPV().fetch()["value"].as<double>() == 7.5);
 
   observer.reset();
   auto replacementConfig = config;

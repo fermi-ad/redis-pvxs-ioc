@@ -512,17 +512,17 @@ struct CloseHandle {
 
 }  // namespace
 
-struct AccessController::Impl {
+struct AccessController::Impl : public std::enable_shared_from_this<AccessController::Impl> {
   explicit Impl(AccessConfig initial)
-      : config(std::move(initial)), staticSource(pvxs::server::StaticSource::build()) {}
+      : config(std::move(initial)), registry(std::make_shared<PVRegistry>()) {}
 
   AccessConfig config;
   mutable std::mutex mutex;
   std::mutex reloadMutex;
-  pvxs::server::StaticSource staticSource;
-  std::shared_ptr<pvxs::server::Source> securedSource;
+  std::shared_ptr<PVRegistry> registry;
   std::unordered_map<std::string, std::shared_ptr<AccessMember>> members;
   std::vector<std::weak_ptr<ChannelState>> dirty;
+  std::atomic<bool> recomputeNeeded{false};
   std::atomic<uint64_t> generation{0};
   std::atomic<uint64_t> activeClients{0};
   std::atomic<uint64_t> deniedReads{0};
@@ -602,7 +602,7 @@ public:
                std::shared_ptr<AccessMember> accessMember,
                std::string channelName,
                const pvxs::server::ClientCredentials& credentials)
-      : owner(owner), member(std::move(accessMember)), name(std::move(channelName)), peer(credentials.peer),
+      : lifetime(owner.shared_from_this()), owner(owner), member(std::move(accessMember)), name(std::move(channelName)), peer(credentials.peer),
         host(clientHost(credentials.peer)), method(credentials.method), account(credentials.account),
         users(clientUsers(credentials)), closer(std::make_shared<CloseHandle>()) {}
 
@@ -666,11 +666,14 @@ public:
     if (!self->dirty.exchange(true, std::memory_order_acq_rel)) {
       try {
         self->owner.markDirty(self->shared_from_this());
-      } catch (const std::bad_weak_ptr&) {
+      } catch (...) {
+        // Never unwind a C access-library callback after policy activation.
+        self->owner.recomputeNeeded = true;
       }
     }
   }
 
+  std::shared_ptr<AccessController::Impl> lifetime;
   AccessController::Impl& owner;
   std::shared_ptr<AccessMember> member;
   std::string name;
@@ -709,7 +712,7 @@ std::vector<std::shared_ptr<ChannelState>> AccessMember::liveClients() {
   return live;
 }
 
-class AuthorizedExecOp final : public pvxs::server::ExecOp {
+class AuthorizedExecOp final : public pvxs::server::ExecOp, public OperationAuthorization {
 public:
   AuthorizedExecOp(std::unique_ptr<pvxs::server::ExecOp> target, std::shared_ptr<ChannelState> state)
       : ExecOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
@@ -719,8 +722,8 @@ public:
   void error(const std::string& message) override { target_->error(message); }
   void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
   void onCancel(std::function<void()>&& fn) override { target_->onCancel(std::move(fn)); }
-  bool authorize(const pvxs::Value& value) {
-    if ((state_->loadRights() & kWrite) != 0u) return true;
+  bool authorized(const pvxs::Value& value) override {
+    if ((state_->loadRights() & kWrite) != 0u) return authorizeWriteDispatch(*target_, value);
     state_->owner.recordDenied(*state_, true, &value);
     return false;
   }
@@ -857,46 +860,12 @@ private:
   std::shared_ptr<ChannelState> state_;
 };
 
-class AuthorizedSource final : public pvxs::server::Source {
-public:
-  AuthorizedSource(AccessController::Impl& owner, std::shared_ptr<pvxs::server::Source> target)
-      : owner_(owner), target_(std::move(target)) {}
-
-  void onSearch(Search& search) override { target_->onSearch(search); }
-
-  void onCreate(std::unique_ptr<pvxs::server::ChannelControl>&& op) override {
-    const auto name = op->name();
-    std::shared_ptr<AccessMember> member;
-    {
-      std::lock_guard<std::mutex> guard(owner_.mutex);
-      const auto found = owner_.members.find(op->name());
-      if (found == owner_.members.end()) return;
-      member = found->second;
-    }
-    try {
-      auto state = std::make_shared<ChannelState>(owner_, std::move(member), name, *op->credentials());
-      state->initialize();
-      target_->onCreate(std::make_unique<AuthorizedChannelControl>(std::move(op), std::move(state)));
-    } catch (const std::exception& ex) {
-      std::fprintf(stderr, "[redis-pvxs-ioc] access channel setup failed for %s: %s\n",
-                   name.c_str(), ex.what());
-      if (op) op->close();
-    }
-  }
-
-  List onList() override { return target_->onList(); }
-  void show(std::ostream& stream) override { target_->show(stream); }
-
-private:
-  AccessController::Impl& owner_;
-  std::shared_ptr<pvxs::server::Source> target_;
-};
 
 }  // namespace
 
 bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value) {
-  auto* authorized = dynamic_cast<AuthorizedExecOp*>(&operation);
-  return !authorized || authorized->authorize(value);
+  auto* authorized = dynamic_cast<OperationAuthorization*>(&operation);
+  return !authorized || authorized->authorized(value);
 }
 
 void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& state) {
@@ -905,6 +874,7 @@ void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& stat
 }
 
 void AccessController::Impl::drainDirty() {
+  if (recomputeNeeded.exchange(false)) { recomputeAllClients(); return; }
   std::vector<std::weak_ptr<ChannelState>> pending;
   {
     std::lock_guard<std::mutex> guard(mutex);
@@ -973,11 +943,78 @@ void AccessController::Impl::recordAudit(const ChannelState& state, const pvxs::
 }
 
 AccessController::AccessController(AccessConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {
-  impl_->securedSource = std::make_shared<AuthorizedSource>(*impl_, impl_->staticSource.source());
+    : impl_(std::make_shared<Impl>(std::move(config))) {}
+
+AccessController::~AccessController() {
+  try { clearBindings(); }
+  catch (const std::exception& ex) {
+    std::fprintf(stderr, "[redis-pvxs-ioc] access endpoint cleanup failed: %s\n", ex.what());
+  }
 }
 
-AccessController::~AccessController() = default;
+struct AccessController::PreparedConfiguration {
+  std::shared_ptr<AccessController::Impl> owner;
+  std::unique_lock<std::mutex> serialized;
+  AccessConfig config;
+  std::set<std::string> requiredAsgs;
+  PreparedPolicy policy;
+  std::string status = "config reload active";
+  std::string watchStatus;
+  bool policyChanged = false;
+  explicit PreparedConfiguration(AccessController::Impl& impl)
+      : owner(impl.shared_from_this()), serialized(impl.reloadMutex) {}
+};
+
+std::shared_ptr<AccessController::PreparedConfiguration> AccessController::prepareConfiguration(
+    const AccessConfig& config, const std::set<std::string>& requiredAsgs) {
+  auto result = std::make_shared<PreparedConfiguration>(*impl_);
+  result->config = config;
+  result->requiredAsgs = requiredAsgs;
+  result->policy = preparePolicy(config, requiredAsgs);
+  result->watchStatus = config.watch.enabled ? "watching " + config.file : "disabled";
+  std::lock_guard<std::mutex> guard(impl_->mutex);
+  if (config.enabled != impl_->config.enabled)
+    throw std::runtime_error("access.enabled is immutable after startup");
+  result->policyChanged = result->policy.expanded != impl_->activePolicy;
+  return result;
+}
+
+bool AccessController::activateConfiguration(const std::shared_ptr<PreparedConfiguration>& prepared,
+                                             std::string& error) {
+  if (!prepared || prepared->owner.get() != impl_.get() || !prepared->serialized.owns_lock()) {
+    error = "invalid prepared access configuration";
+    return false;
+  }
+  if (prepared->policyChanged) {
+    const auto status = asInitMem(prepared->policy.expanded.c_str(), nullptr);
+    if (status != 0) {
+      error = std::string("ACF parse failed: ") + errSymMsg(status);
+      return false;
+    }
+  }
+  // Everything after the library's successful activation is a prepared swap.
+  // Client revocation is deferred until the complete endpoint set is published.
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    std::swap(impl_->config, prepared->config);
+    impl_->configuredAsgs.swap(prepared->requiredAsgs);
+    impl_->activePolicy.swap(prepared->policy.expanded);
+    impl_->policyFingerprint.swap(prepared->policy.fingerprint);
+    impl_->observedRaw.swap(prepared->policy.raw);
+    impl_->lastStatus.swap(prepared->status);
+    impl_->watchStatus.swap(prepared->watchStatus);
+    impl_->lastError.clear();
+    impl_->watchLastAttemptRaw.clear();
+    impl_->watchCandidateRaw.clear();
+    impl_->watchMissingReported = false;
+    impl_->hasPreviousPolicy = false;
+  }
+  ++impl_->generation;
+  error.clear();
+  return true;
+}
+
+void AccessController::finishConfiguration() { impl_->recomputeAllClients(); }
 
 bool AccessController::start(const std::set<std::string>& requiredAsgs, std::string& error) {
   {
@@ -1234,44 +1271,100 @@ void AccessController::pump() {
   }
 }
 
+struct AccessController::PreparedBindings {
+  std::shared_ptr<PVRegistry::Prepared> publication;
+  std::unordered_map<std::string, std::shared_ptr<AccessMember>> members;
+};
+
+std::shared_ptr<AccessController::PreparedBindings> AccessController::prepareBindings(const PVBindings& bindings) {
+  auto result = std::make_shared<PreparedBindings>();
+  const auto existing = impl_->registry->bindings();
+  decltype(result->members) previous;
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    previous = impl_->members;
+  }
+  PVRegistry::Wrappers wrappers;
+  for (const auto& entry : bindings) {
+    const auto before = existing.find(entry.first);
+    const auto member = previous.find(entry.first);
+    std::shared_ptr<AccessMember> prepared;
+    if (before != existing.end() && member != previous.end() &&
+        before->second.owner == entry.second.owner &&
+        sameAccessAssignment(before->second.access, entry.second.access))
+      prepared = member->second;
+    else
+      prepared = std::make_shared<AccessMember>(entry.second.access);
+    result->members.emplace(entry.first, prepared);
+    wrappers.emplace(entry.first, [weak = std::weak_ptr<Impl>(impl_), prepared, name = entry.first](PVRegistry::Channel channel) -> PVRegistry::Channel {
+      const auto owner = weak.lock();
+      if (!owner) { channel->close(); return {}; }
+      auto state = std::make_shared<ChannelState>(*owner, prepared, name, *channel->credentials());
+      state->initialize();
+      return std::make_unique<AuthorizedChannelControl>(std::move(channel), std::move(state));
+    });
+  }
+  result->publication = impl_->registry->prepare(bindings, wrappers);
+  return result;
+}
+
+bool AccessController::publishBindings(const std::shared_ptr<PreparedBindings>& prepared,
+    const std::function<bool(std::string&)>& beforeCommit, std::string& error) {
+  if (!prepared) { error = "invalid prepared endpoints"; return false; }
+  return impl_->registry->publish(prepared->publication, [&](std::string& failure) {
+    if (beforeCommit && !beforeCommit(failure)) return false;
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    impl_->members.swap(prepared->members);
+    return true;
+  }, error);
+}
+
+void AccessController::finishBindings(const std::shared_ptr<PreparedBindings>& prepared) {
+  impl_->registry->finish(prepared->publication);
+}
+
+void AccessController::clearBindings() {
+  std::string error;
+  const auto prepared = prepareBindings({});
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
+}
+
 void AccessController::addPV(const std::string& name,
                              const pvxs::server::SharedPV& pv,
                              const AccessAssignment& assignment) {
-  auto member = std::make_shared<AccessMember>(assignment);
-  std::lock_guard<std::mutex> guard(impl_->mutex);
-  impl_->staticSource.add(name, pv);
-  impl_->members[name] = std::move(member);
+  auto desired = impl_->registry->bindings();
+  auto owner = std::make_shared<pvxs::server::SharedPV>(pv);
+  if (!desired.emplace(name, PVBinding{pv, std::move(owner), assignment}).second)
+    throw std::runtime_error("duplicate secured PV '" + name + "'");
+  std::string error;
+  const auto prepared = prepareBindings(desired);
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
 }
 
 void AccessController::removePV(const std::string& name) {
-  std::shared_ptr<AccessMember> member;
-  {
-    std::lock_guard<std::mutex> guard(impl_->mutex);
-    const auto found = impl_->members.find(name);
-    if (found != impl_->members.end()) {
-      member = std::move(found->second);
-      impl_->members.erase(found);
-    }
-  }
-  impl_->staticSource.remove(name);
-  if (member) member->closeClients();
+  auto desired = impl_->registry->bindings();
+  if (!desired.erase(name)) return;
+  std::string error;
+  const auto prepared = prepareBindings(desired);
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
 }
 
 void AccessController::setAssignment(const std::string& name, const AccessAssignment& assignment) {
-  std::shared_ptr<AccessMember> old;
-  {
-    std::lock_guard<std::mutex> guard(impl_->mutex);
-    const auto found = impl_->members.find(name);
-    if (found == impl_->members.end()) throw std::runtime_error("unknown secured PV '" + name + "'");
-    if (sameAccessAssignment(found->second->assignment, assignment)) return;
-    auto replacement = std::make_shared<AccessMember>(assignment);
-    old = std::move(found->second);
-    found->second = std::move(replacement);
-  }
-  old->closeClients();
+  auto desired = impl_->registry->bindings();
+  const auto found = desired.find(name);
+  if (found == desired.end()) throw std::runtime_error("unknown secured PV '" + name + "'");
+  if (sameAccessAssignment(found->second.access, assignment)) return;
+  found->second.access = assignment;
+  std::string error;
+  const auto prepared = prepareBindings(desired);
+  if (!publishBindings(prepared, {}, error)) throw std::runtime_error(error);
+  finishBindings(prepared);
 }
 
-std::shared_ptr<pvxs::server::Source> AccessController::source() const { return impl_->securedSource; }
+std::shared_ptr<pvxs::server::Source> AccessController::source() const { return impl_->registry; }
 
 AccessStatus AccessController::status() const {
   AccessStatus result;

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -19,12 +18,9 @@ public:
   void stop();
 
 private:
-  using BeforeCommit = std::function<bool(std::string&)>;
-
   bool applyConfig(const struct AppConfig& config, bool initialLoad, std::string& error);
-  bool applyIncremental(const struct AppConfig& config,
+  bool applyGeneration(const struct AppConfig& config,
                         uint64_t generation,
-                        const BeforeCommit& beforeCommit,
                         std::string& error);
 
   std::string configPath_;

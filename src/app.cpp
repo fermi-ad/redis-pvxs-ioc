@@ -71,7 +71,7 @@ void openStringPV(pvxs::server::SharedPV& pv,
   pv.open(value);
 }
 
-class AdminNamespace {
+class AdminNamespace : public std::enable_shared_from_this<AdminNamespace> {
 public:
   explicit AdminNamespace(const ServerConfig& serverConfig, const bool accessConfigured)
       : serverConfig_(serverConfig), accessConfigured_(accessConfigured),
@@ -247,15 +247,13 @@ public:
     discovery_.post(value);
   }
 
-  void install(pvxs::server::Server& server,
-               AccessController* access,
-               const AccessDefaultsConfig& defaults) {
-    std::map<std::string, std::pair<pvxs::server::SharedPV, AccessAssignment>> bindings;
+  PVBindings bindings(const AccessDefaultsConfig& defaults) {
+    PVBindings bindings;
     EndpointRegistry endpoints;
     const auto add = [&](const std::string& name, const pvxs::server::SharedPV& pv,
                          const AccessAssignment& assignment) {
       endpoints.reserve(name, EndpointKind::Diagnostic, "runtime");
-      bindings.emplace(name, std::make_pair(pv, assignment));
+      bindings.emplace(name, PVBinding{pv, shared_from_this(), assignment});
     };
     add(lastDiffName_, lastDiff_, defaults.adminRead);
     add(operationsName_, operations_, defaults.adminRead);
@@ -287,54 +285,7 @@ public:
     for (const auto& name : reserved)
       if (!bindings.count(name))
         throw std::logic_error("reserved diagnostic is not installed: " + name);
-    for (const auto& binding : bindings) {
-      if (access) access->addPV(binding.first, binding.second.first, binding.second.second);
-      else server.addPV(binding.first, binding.second.first);
-    }
-  }
-
-  void remove(pvxs::server::Server& server, AccessController* access) {
-    const auto remove = [&](const std::string& name) {
-      if (access) access->removePV(name);
-      else server.removePV(name);
-    };
-    remove(lastDiffName_);
-    remove(operationsName_);
-    remove(discoveryName_);
-    remove(reloadName_);
-    remove(versionName_);
-    remove(revisionName_);
-    remove(sysVersionName_);
-    remove(sysRevisionName_);
-    remove(generationName_);
-    remove(lastStatusName_);
-    remove(lastErrorName_);
-    remove(pvCountName_);
-    remove(backendHealthName_);
-    remove(accessReloadName_);
-    remove(accessEnabledName_);
-    remove(accessGenerationName_);
-    remove(accessLastStatusName_);
-    remove(accessLastErrorName_);
-    remove(accessPolicyFingerprintName_);
-    remove(accessWatchStatusName_);
-    remove(accessActiveClientsName_);
-    remove(accessDeniedReadsName_);
-    remove(accessDeniedWritesName_);
-    remove(accessRightsChangesName_);
-  }
-
-  void setAccessAssignments(AccessController& access, const AccessDefaultsConfig& defaults) {
-    access.setAssignment(reloadName_, defaults.adminWrite);
-    access.setAssignment(accessReloadName_, defaults.adminWrite);
-    const std::vector<std::string> readNames{
-      lastDiffName_, operationsName_, discoveryName_, versionName_, revisionName_, sysVersionName_, sysRevisionName_, generationName_,
-      lastStatusName_, lastErrorName_, pvCountName_, backendHealthName_, accessEnabledName_,
-      accessGenerationName_, accessLastStatusName_, accessLastErrorName_,
-      accessPolicyFingerprintName_, accessWatchStatusName_, accessActiveClientsName_,
-      accessDeniedReadsName_, accessDeniedWritesName_, accessRightsChangesName_,
-    };
-    for (const auto& name : readNames) access.setAssignment(name, defaults.adminRead);
+    return bindings;
   }
 
   bool consumeReloadRequest() {
@@ -526,7 +477,6 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
 using RpcMap = std::unordered_map<std::string, std::shared_ptr<pvxs::server::SharedPV>>;
-using PVBindingMap = std::map<std::string, std::string>;
 using AssignmentMap = std::unordered_map<std::string, AccessAssignment>;
 struct RpcServiceState {
   RpcServiceConfig config;
@@ -534,17 +484,6 @@ struct RpcServiceState {
   std::map<std::string, std::string> owners;
 };
 using RpcServices = std::vector<RpcServiceState>;
-
-PVBindingMap pvBindings(const AppConfig& config) {
-  PVBindingMap bindings;
-  for (const auto& pv : config.pvs) {
-    const auto canonicalName = fullPVName(config.server, pv);
-    for (const auto& servedName : fullPVNames(config.server, pv)) {
-      bindings.emplace(servedName, canonicalName);
-    }
-  }
-  return bindings;
-}
 
 std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
   std::set<std::string> groups;
@@ -666,7 +605,8 @@ struct Application::Impl {
   std::unique_ptr<DiscoveryPublisher> discovery;
   std::shared_ptr<const DiscoveryCatalog> catalog;
   std::shared_ptr<AccessController> access;
-  std::unique_ptr<AdminNamespace> admin;
+  std::shared_ptr<AdminNamespace> admin;
+  std::shared_ptr<PVRegistry> registry = std::make_shared<PVRegistry>();
   AppConfig currentConfig;
   bool hasConfig = false;
   uint64_t generation = 0;
@@ -677,22 +617,6 @@ struct Application::Impl {
   AssignmentMap rpcAssignments;
   RpcServices rpcServices;
   std::chrono::steady_clock::time_point lastHealthUpdate{};
-
-  void addEndpoint(const std::string& name,
-                   const pvxs::server::SharedPV& pv,
-                   const AccessAssignment& assignment) {
-    if (access) access->addPV(name, pv, assignment);
-    else server.addPV(name, pv);
-  }
-
-  void removeEndpoint(const std::string& name) {
-    if (access) access->removePV(name);
-    else server.removePV(name);
-  }
-
-  void setAssignment(const std::string& name, const AccessAssignment& assignment) {
-    if (access) access->setAssignment(name, assignment);
-  }
 };
 
 Application::Application(std::string configPath)
@@ -740,8 +664,8 @@ bool Application::start(std::string& error) {
       if (!impl_->access->start(requiredAccessAsgs(config), error)) return false;
       impl_->server.addSource("access", impl_->access->source());
     }
-    impl_->admin = std::make_unique<AdminNamespace>(config.server, config.access.enabled);
-    impl_->admin->install(impl_->server, impl_->access.get(), config.access.defaults);
+    impl_->admin = std::make_shared<AdminNamespace>(config.server, config.access.enabled);
+    if (!impl_->access) impl_->server.addSource("registry", impl_->registry);
     impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
     if (!applyConfig(config, true, error)) {
       return false;
@@ -807,36 +731,26 @@ void Application::pump() {
 }
 
 void Application::stop() {
-  if (!started_) {
-    return;
-  }
-
+  if (!started_ && !impl_->hasConfig) return;
   impl_->discovery.reset();
   impl_->catalog.reset();
-  for (const auto& binding : pvBindings(impl_->currentConfig)) {
-    impl_->removeEndpoint(binding.first);
-  }
-  for (auto& item : impl_->runtimes) {
-    item.second->deactivate("application stopping");
-  }
+  if (impl_->access) impl_->access->clearBindings();
+  else impl_->registry->clear();
+  for (auto& item : impl_->runtimes) item.second->deactivate("application stopping");
   if (impl_->operations) impl_->operations->shutdown();
   impl_->runtimes.clear();
-  for (auto& item : impl_->rpcPVs) {
-    impl_->removeEndpoint(item.first);
-  }
   impl_->rpcPVs.clear();
   impl_->rpcServices.clear();
   impl_->redisBackends.clear();
   impl_->alarmPublisher.reset();
-
-  if (impl_->admin) {
-    impl_->admin->remove(impl_->server, impl_->access.get());
-  }
   if (impl_->access) {
     impl_->server.removeSource("access");
-    impl_->access.reset();
+  } else {
+    impl_->server.removeSource("registry");
   }
   impl_->server.stop();
+  impl_->access.reset();
+  impl_->hasConfig = false;
   started_ = false;
 }
 
@@ -861,213 +775,130 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
     error = "discovery listener settings are immutable after startup; restart is required";
     return false;
   }
-  bool policyActivated = false;
-  const BeforeCommit activatePolicy = [&](std::string& activationError) {
-    if (initialLoad || !impl_->access) return true;
-    if (!impl_->access->reconfigure(config.access, requiredAccessAsgs(config), activationError)) {
-      return false;
-    }
-    policyActivated = true;
-    try {
-      impl_->admin->setAccessAssignments(*impl_->access, config.access.defaults);
-      return true;
-    } catch (const std::exception& ex) {
-      activationError = ex.what();
-      return false;
-    }
-  };
-
-  const auto nextGeneration = impl_->generation + 1;
-
-  const bool applied = applyIncremental(config, nextGeneration, activatePolicy, error);
-  if (!applied && policyActivated) {
-    std::string restoreError;
-    if (!impl_->access->restorePrevious(restoreError)) {
-      error += "; previous ACF restore failed: " + restoreError;
-    } else {
-      impl_->admin->setAccessAssignments(*impl_->access, impl_->currentConfig.access.defaults);
-    }
-  }
-  return applied;
+  return applyGeneration(config, impl_->generation + 1, error);
 }
 
-bool Application::applyIncremental(const AppConfig& config,
+bool Application::applyGeneration(const AppConfig& config,
                                    const uint64_t generation,
-                                   const BeforeCommit& beforeCommit,
                                    std::string& error) {
+  bool committed = false;
   try {
-    auto newRedisBackends = buildRedisBackends(config, impl_->currentConfig, impl_->redisBackends);
+    AppConfig nextConfig = config;
+    auto nextBackends = buildRedisBackends(config, impl_->currentConfig, impl_->redisBackends);
     const auto priorAlarm = impl_->currentConfig.redisBackends.find(config.alarms.backend);
     const bool reuseAlarm = impl_->hasConfig &&
         sameAlarmStreamConfig(impl_->currentConfig.alarms, config.alarms) &&
         priorAlarm != impl_->currentConfig.redisBackends.end() &&
         sameRedisConfig(priorAlarm->second, config.redisBackends.at(config.alarms.backend));
-    auto newAlarmPublisher = reuseAlarm ? impl_->alarmPublisher : buildAlarmPublisher(config);
-    const auto currentBindings = pvBindings(impl_->currentConfig);
-    const auto desiredBindings = pvBindings(config);
-    std::map<std::string, PVConfig> desired;
+    auto nextAlarm = reuseAlarm ? impl_->alarmPublisher : buildAlarmPublisher(config);
+
+    RuntimeMap nextRuntimes;
+    std::vector<std::unique_ptr<PVRuntimeUpdate>> updates;
+    std::vector<std::shared_ptr<PVRuntimeBase>> added, retired;
     for (const auto& pv : config.pvs) {
-      desired.emplace(fullPVName(config.server, pv), pv);
-    }
-
-    std::vector<std::string> removeNames;
-    std::vector<std::string> replaceNames;
-    std::vector<std::pair<std::string, PVConfig>> addNames;
-    std::vector<std::pair<std::string, PVConfig>> reconfigureNames;
-    std::set<std::string> reopenNames;
-
-    for (const auto& current : impl_->runtimes) {
-      const auto desiredIt = desired.find(current.first);
-      if (desiredIt == desired.end()) {
-        removeNames.push_back(current.first);
-        continue;
-      }
-
-      if (current.second->structurallyCompatible(desiredIt->second) &&
-          sameBackendBindings(desiredIt->second, impl_->redisBackends, newRedisBackends)) {
-        reconfigureNames.emplace_back(current.first, desiredIt->second);
-        const auto currentServedNames =
-            fullPVNames(impl_->currentConfig.server, current.second->config());
-        const auto desiredServedNames = fullPVNames(config.server, desiredIt->second);
-        if (std::set<std::string>(currentServedNames.begin(), currentServedNames.end()) !=
-            std::set<std::string>(desiredServedNames.begin(), desiredServedNames.end())) {
-          reopenNames.insert(current.first);
-        }
+      const auto name = fullPVName(config.server, pv);
+      const auto existing = impl_->runtimes.find(name);
+      if (existing != impl_->runtimes.end() && existing->second->structurallyCompatible(pv) &&
+          sameBackendBindings(pv, impl_->redisBackends, nextBackends)) {
+        updates.emplace_back(existing->second->prepareReconfigure(pv, generation));
+        nextRuntimes.emplace(name, existing->second);
       } else {
-        replaceNames.push_back(current.first);
+        auto runtime = makeRuntime(config.server, pv, nextBackends, nextAlarm, generation,
+                                   impl_->operations, config.limits);
+        added.push_back(runtime);
+        nextRuntimes.emplace(name, std::move(runtime));
       }
     }
+    for (const auto& old : impl_->runtimes) {
+      const auto next = nextRuntimes.find(old.first);
+      if (next == nextRuntimes.end() || next->second != old.second) retired.push_back(old.second);
+    }
+    AssignmentMap nextRpcAssignments;
+    RpcServices nextRpcServices;
+    auto nextRpcs = buildRpcPVs(config, nextRpcAssignments, impl_->rpcServices, nextRpcServices);
+    auto nextCatalog = buildDiscoveryCatalog(config, nextRpcs, impl_->server.config().tcp_port, generation);
 
-    for (const auto& item : desired) {
-      if (impl_->runtimes.count(item.first) == 0) {
-        addNames.push_back(item);
-      }
+    auto bindings = impl_->admin->bindings(config.access.defaults);
+    const auto bind = [&](const std::string& name, const pvxs::server::SharedPV& pv,
+                          std::shared_ptr<void> owner, const AccessAssignment& assignment) {
+      if (!bindings.emplace(name, PVBinding{pv, std::move(owner), assignment}).second)
+        throw std::runtime_error("duplicate endpoint binding: " + name);
+    };
+    for (const auto& pv : config.pvs) {
+      const auto runtime = nextRuntimes.at(fullPVName(config.server, pv));
+      for (const auto& name : fullPVNames(config.server, pv))
+        bind(name, runtime->sharedPV(), runtime, pv.access.value_or(config.access.defaults.pv));
+    }
+    for (const auto& rpc : nextRpcs)
+      bind(rpc.first, *rpc.second, rpc.second, nextRpcAssignments.at(rpc.first));
+
+    std::shared_ptr<AccessController::PreparedConfiguration> policy;
+    std::shared_ptr<AccessController::PreparedBindings> secured;
+    std::shared_ptr<PVRegistry::Prepared> plain;
+    if (impl_->access) {
+      if (impl_->hasConfig) policy = impl_->access->prepareConfiguration(config.access, requiredAccessAsgs(config));
+      secured = impl_->access->prepareBindings(bindings);
+    } else {
+      plain = impl_->registry->prepare(std::move(bindings));
     }
 
-    RuntimeMap staged;
-    // Owned subscriptions let staged runtimes attach independently. Do not
-    // suspend every live reader while constructing an unrelated runtime.
-    for (const auto& name : replaceNames)
-      staged.emplace(name, makeRuntime(config.server, desired.at(name), newRedisBackends, newAlarmPublisher, generation, impl_->operations, config.limits));
-    for (const auto& item : addNames)
-      staged.emplace(item.first, makeRuntime(config.server, item.second, newRedisBackends, newAlarmPublisher, generation, impl_->operations, config.limits));
+    // All allocation, reflection, metadata validation and endpoint construction
+    // precede this point. Policy activation is the last fallible commit action;
+    // a rejected policy leaves the live values, members and channels untouched.
+    const auto commit = [&](std::string& failure) {
+      if (policy && !impl_->access->activateConfiguration(policy, failure)) return false;
+      for (const auto& runtime : nextRuntimes) runtime.second->setAlarmPublisher(nextAlarm);
+      for (const auto& update : updates) update->commit();
+      for (const auto& runtime : added) runtime->activate();
+      return true;
+    };
+    const bool published = impl_->access
+        ? impl_->access->publishBindings(secured, commit, error)
+        : impl_->registry->publish(plain, commit, error);
+    if (!published) return false;
+    committed = true;
 
-    const std::set<std::string> replaced(replaceNames.begin(), replaceNames.end());
-    std::map<std::string, pvxs::Value> reopenValues;
-    for (const auto& name : reopenNames) {
-      reopenValues.emplace(name, impl_->runtimes.at(name)->sharedPV().fetch());
-    }
-
-    AssignmentMap stagedRpcAssignments;
-    RpcServices stagedRpcServices;
-    auto stagedRpcPVs = buildRpcPVs(config, stagedRpcAssignments, impl_->rpcServices, stagedRpcServices);
-    auto stagedCatalog = buildDiscoveryCatalog(config, stagedRpcPVs, impl_->server.config().tcp_port, generation);
-    if (!beforeCommit(error)) {
-      for (auto& item : staged) item.second->deactivate("staged config rejected");
-      return false;
-    }
-
-    for (const auto& binding : currentBindings) {
-      const auto desiredIt = desiredBindings.find(binding.first);
-      if (desiredIt == desiredBindings.end() ||
-          desiredIt->second != binding.second ||
-          replaced.count(binding.second) != 0u ||
-          reopenNames.count(binding.second) != 0u) {
-        impl_->removeEndpoint(binding.first);
-      }
-    }
-
-    // PVXS StaticSource::remove() closes the SharedPV even when that same
-    // SharedPV is registered under other names. Alias-only changes therefore
-    // remove every binding for the logical runtime, reopen the existing
-    // SharedPV with its current value, and then register the desired name set.
-    // The Redis readers and confirmation routes remain attached to the same
-    // runtime throughout.
-    for (const auto& name : reopenNames) {
-      impl_->runtimes.at(name)->sharedPV().open(reopenValues.at(name));
-    }
-
-    for (const auto& item : reconfigureNames) {
-      impl_->runtimes.at(item.first)->setAlarmPublisher(newAlarmPublisher);
-      impl_->runtimes.at(item.first)->reconfigure(item.second, generation);
-      for (const auto& servedName : fullPVNames(config.server, item.second)) {
-        const auto currentIt = currentBindings.find(servedName);
-        if (currentIt != currentBindings.end() &&
-            currentIt->second == item.first &&
-            reopenNames.count(item.first) == 0u) {
-          impl_->setAssignment(servedName, item.second.access.value_or(config.access.defaults.pv));
-        }
-      }
-    }
-
-    for (const auto& name : removeNames) {
-      impl_->runtimes.at(name)->deactivate("pv removed");
-      impl_->runtimes.erase(name);
-    }
-
-    for (const auto& name : replaceNames) {
-      impl_->runtimes.at(name)->deactivate("pv replaced");
-      impl_->runtimes.erase(name);
-      impl_->runtimes.emplace(name, staged.at(name));
-      staged.at(name)->activate();
-      staged.erase(name);
-    }
-
-    for (auto& item : staged) {
-      item.second->activate();
-      impl_->runtimes.emplace(item.first, item.second);
-    }
-
-    for (const auto& binding : desiredBindings) {
-      const auto currentIt = currentBindings.find(binding.first);
-      if (currentIt == currentBindings.end() ||
-          currentIt->second != binding.second ||
-          replaced.count(binding.second) != 0u ||
-          reopenNames.count(binding.second) != 0u) {
-        impl_->addEndpoint(
-            binding.first,
-            impl_->runtimes.at(binding.second)->sharedPV(),
-            desired.at(binding.second).access.value_or(config.access.defaults.pv));
-      }
-    }
-
-    // Preserve unchanged reflected services and their existing client channels.
-    for (auto& item : impl_->rpcPVs) {
-      const auto next = stagedRpcPVs.find(item.first);
-      if (next == stagedRpcPVs.end() || next->second != item.second)
-        impl_->removeEndpoint(item.first);
-    }
-    auto priorRpcPVs = std::move(impl_->rpcPVs);
-    impl_->rpcPVs = std::move(stagedRpcPVs);
-    impl_->rpcAssignments = std::move(stagedRpcAssignments);
-    impl_->rpcServices = std::move(stagedRpcServices);
-    for (auto& item : impl_->rpcPVs) {
-      const auto previous = priorRpcPVs.find(item.first);
-      if (previous != priorRpcPVs.end() && previous->second == item.second)
-        impl_->setAssignment(item.first, impl_->rpcAssignments.at(item.first));
-      else
-        impl_->addEndpoint(item.first, *item.second, impl_->rpcAssignments.at(item.first));
-    }
-
-    impl_->redisBackends = std::move(newRedisBackends);
-    impl_->alarmPublisher = std::move(newAlarmPublisher);
-    impl_->currentConfig = config;
-    impl_->hasConfig = true;
+    // Publication has committed. No subsequent failure is reported as a rejected
+    // generation. Retain old owners until retired channels/work have drained.
+    impl_->runtimes.swap(nextRuntimes);
+    impl_->redisBackends.swap(nextBackends);
+    impl_->rpcPVs.swap(nextRpcs);
+    impl_->rpcAssignments.swap(nextRpcAssignments);
+    impl_->rpcServices.swap(nextRpcServices);
+    impl_->alarmPublisher.swap(nextAlarm);
+    std::swap(impl_->currentConfig, nextConfig);
+    impl_->catalog.swap(nextCatalog);
     impl_->generation = generation;
-    impl_->catalog = std::move(stagedCatalog);
-    if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
-
-    if (impl_->admin) {
+    impl_->hasConfig = true;
+    try {
+      if (secured) impl_->access->finishBindings(secured);
+      else impl_->registry->finish(plain);
+      for (const auto& runtime : retired) runtime->deactivate("generation retired");
+      for (const auto& update : updates) update->refresh();
+      if (policy) impl_->access->finishConfiguration();
+      if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
       impl_->admin->setGeneration(generation);
       impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
-      impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
+      impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
+    } catch (const std::exception& ex) {
+      // The active registry is already complete. Preserve its generation and
+      // report an operational refresh failure, not a fictitious rollback.
+      std::fprintf(stderr, "[redis-pvxs-ioc] generation %llu committed; refresh failed: %s\n",
+                   static_cast<unsigned long long>(generation), ex.what());
+      impl_->admin->setGeneration(generation);
+      impl_->admin->setStatus("generation active; refresh failed");
+      impl_->admin->setError(ex.what());
     }
+    error.clear();
     return true;
   } catch (const std::exception& ex) {
     error = ex.what();
-    return false;
+    if (committed)
+      std::fprintf(stderr, "[redis-pvxs-ioc] committed generation %llu reporting failed: %s\n",
+                   static_cast<unsigned long long>(generation), ex.what());
+    return committed;
   }
 }
 

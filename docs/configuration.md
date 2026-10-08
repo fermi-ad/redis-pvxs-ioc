@@ -174,6 +174,13 @@ name:
 With `server.namespace: DEMO`, this serves both `DEMO:magnet:current` and the
 exact alias `FACILITY:AREA_GROUP_MAGNET01:I`.
 
+Canonical names, aliases, diagnostic PVs and reflected RPC methods share one
+reserved namespace. Collisions reject startup or the staged reload before live
+endpoints or access policy change, including when discovery is disabled.
+`--check-config` checks the statically known names offline; RPC names are also
+checked after reflection during startup or reload. Installed diagnostics must
+match the same reserved name set.
+
 Adding, renaming, or removing aliases during a successful reload retains the
 logical runtime and all Redis routes. Because the PVXS static registry closes a
 shared PV when a registered name is removed, clients attached to any name for

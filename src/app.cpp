@@ -1,4 +1,5 @@
 #include "redis_pvxs_ioc/app.h"
+#include "redis_pvxs_ioc/endpoints.h"
 
 #include <algorithm>
 #include <atomic>
@@ -72,7 +73,7 @@ void openStringPV(pvxs::server::SharedPV& pv,
 class AdminNamespace {
 public:
   explicit AdminNamespace(const ServerConfig& serverConfig, const bool accessConfigured)
-      : accessConfigured_(accessConfigured),
+      : serverConfig_(serverConfig), accessConfigured_(accessConfigured),
         reloadCommand_(pvxs::server::SharedPV::buildMailbox()),
         accessReloadCommand_(pvxs::server::SharedPV::buildMailbox()),
         version_(pvxs::server::SharedPV::buildReadonly()),
@@ -226,10 +227,12 @@ public:
   void install(pvxs::server::Server& server,
                AccessController* access,
                const AccessDefaultsConfig& defaults) {
+    std::map<std::string, std::pair<pvxs::server::SharedPV, AccessAssignment>> bindings;
+    EndpointRegistry endpoints;
     const auto add = [&](const std::string& name, const pvxs::server::SharedPV& pv,
                          const AccessAssignment& assignment) {
-      if (access) access->addPV(name, pv, assignment);
-      else server.addPV(name, pv);
+      endpoints.reserve(name, EndpointKind::Diagnostic, "runtime");
+      bindings.emplace(name, std::make_pair(pv, assignment));
     };
     add(lastDiffName_, lastDiff_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
@@ -254,6 +257,16 @@ public:
     add(accessDeniedReadsName_, accessDeniedReads_, defaults.adminRead);
     add(accessDeniedWritesName_, accessDeniedWrites_, defaults.adminRead);
     add(accessRightsChangesName_, accessRightsChanges_, defaults.adminRead);
+    const auto reserved = adminPVNames(serverConfig_);
+    if (bindings.size() != reserved.size())
+      throw std::logic_error("installed diagnostics do not match the reserved namespace");
+    for (const auto& name : reserved)
+      if (!bindings.count(name))
+        throw std::logic_error("reserved diagnostic is not installed: " + name);
+    for (const auto& binding : bindings) {
+      if (access) access->addPV(binding.first, binding.second.first, binding.second.second);
+      else server.addPV(binding.first, binding.second.first);
+    }
   }
 
   void remove(pvxs::server::Server& server, AccessController* access) {
@@ -341,6 +354,7 @@ public:
   }
 
 private:
+  const ServerConfig serverConfig_;
   bool accessConfigured_ = false;
   std::atomic<bool> reloadRequested_{false};
   std::atomic<bool> accessReloadRequested_{false};
@@ -504,6 +518,7 @@ std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
 // The IOC has no compiled-in knowledge of the methods or message schema.
 RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
   RpcMap rpcPVs;
+  auto endpoints = configuredEndpoints(config);
   assignments.clear();
 #if REDIS_PVXS_IOC_ENABLE_GRPC
   for (const auto& svc : config.rpcServices) {
@@ -533,6 +548,7 @@ RpcMap buildRpcPVs(const AppConfig& config, AssignmentMap& assignments) {
       std::string leaf = methodToPvLeaf(m.method) + svc.suffix;
       std::string name =
           config.server.nameSpace.empty() ? leaf : config.server.nameSpace + ":" + leaf;
+      endpoints.reserve(name, EndpointKind::RPC, m.service + "/" + m.method, "root.rpc_services");
       auto runtime = std::make_shared<RpcPV>(bridge, m, svc.defaults);
       rpcPVs.emplace(name, std::shared_ptr<pvxs::server::SharedPV>(runtime, &runtime->sharedPV()));
       assignments.emplace(name, svc.access.value_or(config.access.defaults.rpc));

@@ -2,28 +2,31 @@
 
 ## v0.9.0 - unreleased
 
-- add native RecCeiver discovery with catalog updates after successful reloads
-  and recovery after receiver restarts; retire the conventional IOC sidecar
-- validate versioned configuration strictly, report offline configuration
-  differences, and reserve canonical, alias, admin and reflected RPC names
-- make runtime reload transactional while retaining unchanged backends and
-  subscriptions; expose structured reload phase, outcome and timing diagnostics
-- bound asynchronous writes, RPC and alarm publication; enforce finite operation
-  deadlines and dispatch-time authorization, and reconcile alarms after recovery
-- add read-only Redis-backed NTNDArray PVs with validated envelope/pixel data,
-  last-good-frame preservation and malformed-input recovery
-- separate optional gRPC and ChannelFinder integrations, bound HTTP requests,
-  and support mounted credentials with a non-root container runtime
-- pin build inputs and retain source inventory, SBOM and provenance; require
-  measured candidate qualification and immutable digest promotion for v0.9.0
-- report Redis source readiness, monotonic freshness, exact cursors and stream
-  epochs; retain last-good values/time through source failures and fence
-  confirmations across stream replacement
-- deliberately enable bounded IOC continuity inspection with a configurable
-  default interval of 1000 ms; see source-health documentation for workload cost,
-  disabling, permissions and required qualification
-- count NTNDArray rollover gaps with serial arithmetic and bound ambiguous ID
-  jumps with `max_frame_gap`; expose a separate discontinuity diagnostic
+v0.9.0 makes the standalone Redis/PVXS service the supported runtime. The
+release focuses on safe configuration changes, observable Redis continuity,
+bounded operations, and production image PVs.
+
+### Highlights
+
+- Discover PVs through native RecCeiver integration and keep ChannelFinder
+  catalog entries current after reloads and receiver restarts. The legacy
+  conventional-IOC sidecar is no longer part of the main runtime.
+- Validate configuration strictly and apply reloads transactionally. Invalid or
+  rejected changes leave the running service alone, while unchanged Redis
+  connections and subscriptions survive successful reloads. `--check-config`
+  and reload diagnostics show what changed and where a reload failed.
+- Add read-only Redis-backed `NTNDArray` image PVs. Malformed frames preserve
+  the last good image, and separate gap/discontinuity diagnostics handle frame-ID
+  rollover without turning ambiguous jumps into invented loss counts.
+- Put finite bounds on writes, RPC calls, alarm publication, and ChannelFinder
+  requests. Queued work is authorized when dispatched, and alarms reconcile
+  after a backend recovers.
+- Report whether each Redis source is connected, current, stale, reset, or
+  missing history. Last-good values survive outages, while exact cursors and
+  stream epochs prevent an old observation from confirming a newer command.
+- Run the container as non-root UID `10001`, support mounted credentials, and
+  keep gRPC and ChannelFinder integrations optional rather than startup
+  dependencies.
 
 ### Upgrade notes
 
@@ -43,6 +46,14 @@ preceding v0.8.2 correctness release.
 - RecCeiver discovery is enabled by default and listens on UDP `5049` (#102).
   Allow the intended discovery traffic, choose a non-conflicting port, or set
   `discovery.enabled: false`; see [discovery networking](docs/reccaster.md).
+
+### Release assurance
+
+- Release images use pinned build inputs and retain their source inventory,
+  SBOM, and provenance. Stable 0.9.0 promotion requires same-revision native,
+  image, and candidate validation; measured 24-hour qualification; rollback to
+  the published v0.8.2 image and configuration; and promotion of the qualified
+  digest without rebuilding it.
 
 ## v0.8.2 - 2026-10-09
 

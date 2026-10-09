@@ -944,6 +944,7 @@ class CollectorBoundaryTests(unittest.TestCase):
         self.assertIn("native-qualification-${{ matrix.evidence }}-${{ github.run_id }}-${{ github.run_attempt }}", text)
         self.assertIn("ctest --test-dir build --output-on-failure 2>&1 | tee -a build/native-qualification.log", text)
         self.assertIn("Retain native qualification evidence", text)
+        self.assertEqual(text.count("shell: bash"), 2)
         import re
         uploads = re.findall(r"uses:\s+(actions/upload-artifact@\S+)", text)
         self.assertEqual(uploads, ["actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"])

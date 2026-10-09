@@ -87,6 +87,13 @@ struct LinearTransformConfig {
   double offset = 0.0;
 };
 
+struct SourceHealthConfig {
+  bool required = true;
+  // Zero leaves source cadence unspecified. Age is measured on the local
+  // monotonic clock, never by reinterpreting the source timestamp.
+  uint32_t staleAfterMs = 0;
+};
+
 struct AccessAssignment {
   std::string asg = "DEFAULT";
   int asl = 0;
@@ -173,6 +180,7 @@ struct PVConfig {
   std::optional<AccessAssignment> access;
   uint64_t maxFrameBytes = 32u * 1024u * 1024u;
   uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap;
+  SourceHealthConfig sourceHealth;
 };
 
 struct ServerConfig {
@@ -192,6 +200,7 @@ struct RedisConfig {
   std::string password;
   uint16_t workers = 1;
   uint16_t readers = 1;
+  uint32_t readerProbeMs = 1000;
 };
 
 using RedisBackendConfigs = std::map<std::string, RedisConfig>;

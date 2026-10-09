@@ -750,6 +750,29 @@ pvs:
   assert(throwsConfig(kNoPvsNoRpc));             // neither pvs nor rpc_services
 
   assert(loadConfigString(kLegacyConfig).discovery.enabled);
+  const std::string healthBase = "server: {instance: health}\nredis: {base_key: test, host: localhost, port: 6379";
+  const std::string healthPV = "\npvs: [{name: value, type: float64, shape: scalar, read: {key: value}, source_health: {";
+  const auto healthConfig = loadConfigString(healthBase + ", reader_probe_ms: 0}" + healthPV + "required: false, stale_after_ms: 1000}}]");
+  assert(healthConfig.redisBackends.at("default").readerProbeMs == 0);
+  assert(!healthConfig.pvs[0].sourceHealth.required && healthConfig.pvs[0].sourceHealth.staleAfterMs == 1000);
+  const auto imageHealth = loadConfigString(healthBase + "}\npvs: [{name: image, kind: ntndarray, read: {key: image}, source_health: {required: false, stale_after_ms: 86400000}}]");
+  assert(!imageHealth.pvs[0].sourceHealth.required && imageHealth.pvs[0].sourceHealth.staleAfterMs == 86400000);
+  auto beforeHealth = imageHealth, afterHealth = imageHealth;
+  afterHealth.pvs[0].sourceHealth.required = true;
+  assert(sameReaderTopology(beforeHealth.pvs[0], afterHealth.pvs[0]));
+  auto probeChanged = beforeHealth.redisBackends.at("default"); probeChanged.readerProbeMs = 0;
+  assert(!sameRedisConfig(beforeHealth.redisBackends.at("default"), probeChanged));
+  const auto defaults = loadConfigString(kLegacyConfig);
+  assert(defaults.redisBackends.at("default").readerProbeMs == 1000);
+  assert(defaults.pvs[0].sourceHealth.required && defaults.pvs[0].sourceHealth.staleAfterMs == 0);
+  for (const auto* setting : {"reader_probe_ms: -1", "reader_probe_ms: 99", "reader_probe_ms: 60001", "reader_probe_ms: 1.5", "reader_probe_mz: 1000"}) {
+    const auto text = healthBase + ", " + setting + "}" + healthPV + "}}]";
+    assert(throwsConfig(text.c_str()));
+  }
+  for (const auto* setting : {"stale_after_ms: -1", "stale_after_ms: 86400001", "required: maybe", "require: false", "required: true, required: false"}) {
+    const auto text = healthBase + "}" + healthPV + setting + "}}]";
+    assert(throwsConfig(text.c_str()));
+  }
   for (const auto* setting : {"udp_port: 65536", "timeout_ms: 0", "max_records: 0", "max_bytes: 1023",
                              "bind_address: localhost", "unknown: true", "enabled: true, enabled: false"}) {
     const auto text = std::string(kLegacyConfig) + "\ndiscovery: {" + setting + "}\n";

@@ -8,6 +8,8 @@
   defaults, types, and validation rules.
 - [Operations and diagnostics](operations.md): hot reload, built-in PVs, health,
   and troubleshooting.
+- [Source health](source-health.md): Redis readiness, freshness, continuity
+  inspection, failure behavior and overhead qualification.
 - [Access control](access-control.md): opt-in native ACF policy, hot reload,
   watcher behavior, auditing, and diagnostics.
 - [Container runtime and secret files](container-runtime.md): non-root identity,

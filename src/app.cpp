@@ -6,12 +6,14 @@
 #include <chrono>
 #include <cstdio>
 #include <future>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -100,6 +102,13 @@ struct ReloadStatus {
   std::vector<BackendPreparation> backends;
 };
 
+template<class T, class Select>
+pvxs::shared_array<const T> sourceColumn(const std::vector<SourceStatus>& sources, Select select) {
+  pvxs::shared_array<T> values(sources.size());
+  for (size_t i = 0; i < sources.size(); ++i) values[i] = select(sources[i]);
+  return values.freeze();
+}
+
 class AdminNamespace : public std::enable_shared_from_this<AdminNamespace> {
 public:
   explicit AdminNamespace(const ServerConfig& serverConfig, const bool accessConfigured)
@@ -146,6 +155,37 @@ public:
     discoveryName_ = adminPVName(serverConfig, "discovery:status");
     using pvxs::TypeCode;
     using pvxs::Member;
+    sourceName_ = adminPVName(serverConfig, "source:status");
+    readyName_ = adminPVName(serverConfig, "ready");
+    auto ready = makeAdminValue(TypeCode::Bool, "All required Redis data sources are ready");
+    ready["value"] = false; ready_.open(ready);
+    sourceStatus_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:sources:1.0", {
+      Member(TypeCode::Bool, "ready"), Member(TypeCode::String, "state"),
+      Member(TypeCode::UInt64, "generation"), Member(TypeCode::UInt64, "total"),
+      Member(TypeCode::UInt64, "required"), Member(TypeCode::UInt64, "readySources"),
+      Member(TypeCode::UInt64, "unreadyRequired"),
+      Member(TypeCode::Struct, "sources", {
+        Member(TypeCode::StringA, "pv"), Member(TypeCode::StringA, "backend"),
+        Member(TypeCode::StringA, "key"), Member(TypeCode::StringA, "role"),
+        Member(TypeCode::StringA, "state"), Member(TypeCode::StringA, "error"),
+        Member(TypeCode::StringA, "inspection"), Member(TypeCode::StringA, "streamKind"),
+        Member(TypeCode::StringA, "cursor"), Member(TypeCode::StringA, "observedCursor"),
+        Member(TypeCode::StringA, "lastValidCursor"),
+        Member(TypeCode::BoolA, "required"), Member(TypeCode::BoolA, "active"),
+        Member(TypeCode::BoolA, "connected"), Member(TypeCode::BoolA, "inspected"),
+        Member(TypeCode::BoolA, "hasData"), Member(TypeCode::BoolA, "valid"),
+        Member(TypeCode::BoolA, "fresh"), Member(TypeCode::BoolA, "stale"), Member(TypeCode::BoolA, "ready"),
+        Member(TypeCode::UInt32A, "staleAfterMs"), Member(TypeCode::UInt32A, "readerProbeMs"),
+        Member(TypeCode::Int64A, "lastValidAgeMs"), Member(TypeCode::Int64A, "lastReceivedAgeMs"),
+        Member(TypeCode::UInt64A, "epoch"), Member(TypeCode::UInt64A, "lastValidEpoch"),
+        Member(TypeCode::UInt64A, "readFailures"), Member(TypeCode::UInt64A, "readRejections"),
+        Member(TypeCode::UInt64A, "socketTimeouts"), Member(TypeCode::UInt64A, "reconnects"),
+        Member(TypeCode::UInt64A, "streamResets"), Member(TypeCode::UInt64A, "disappearances"),
+        Member(TypeCode::UInt64A, "retentionGaps"), Member(TypeCode::UInt64A, "inspectionFailures"),
+        Member(TypeCode::UInt64A, "inspectionRejections"), Member(TypeCode::UInt64A, "callbacks"),
+        Member(TypeCode::UInt64A, "entries"), Member(TypeCode::UInt64A, "callbackErrors"),
+        Member(TypeCode::UInt64A, "invalidSamples"), Member(TypeCode::UInt64A, "staleTransitions"),
+        Member(TypeCode::UInt64A, "staleCallbacks")})}).create());
     reloadStatusName_ = adminPVName(serverConfig, "config:reloadStatus");
     reloadStatus_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:reload:1.0", {
       Member(TypeCode::UInt64, "attempt"), Member(TypeCode::UInt64, "candidateGeneration"),
@@ -421,6 +461,48 @@ public:
     alarms_.post(value);
   }
 
+  void setSourceStatus(std::vector<SourceStatus> sources, uint64_t generation) {
+    std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {
+      return std::tie(a.pv, a.role) < std::tie(b.pv, b.role);
+    });
+    uint64_t required = 0, available = 0, unreadyRequired = 0;
+    for (const auto& source : sources) {
+      required += source.required; available += source.ready;
+      unreadyRequired += source.required && !source.ready;
+    }
+    const bool ready = unreadyRequired == 0;
+    auto value = sourceStatus_.fetch();
+    value["ready"] = ready; value["state"] = ready ? "ready" : "degraded";
+    value["generation"] = generation; value["total"] = uint64_t(sources.size());
+    value["required"] = required; value["readySources"] = available; value["unreadyRequired"] = unreadyRequired;
+#define SOURCE_COLUMN(TYPE, FIELD) value["sources." #FIELD] = sourceColumn<TYPE>(sources, [](const auto& s) { return s.FIELD; })
+#define READER_COLUMN(TYPE, FIELD) value["sources." #FIELD] = sourceColumn<TYPE>(sources, [](const auto& s) { return s.reader.FIELD; })
+    SOURCE_COLUMN(std::string, pv); SOURCE_COLUMN(std::string, backend); SOURCE_COLUMN(std::string, key);
+    SOURCE_COLUMN(std::string, role); SOURCE_COLUMN(std::string, state); SOURCE_COLUMN(std::string, error);
+    SOURCE_COLUMN(std::string, inspection); SOURCE_COLUMN(std::string, lastValidCursor);
+    SOURCE_COLUMN(bool, required); SOURCE_COLUMN(bool, valid); SOURCE_COLUMN(bool, fresh);
+    SOURCE_COLUMN(bool, stale); SOURCE_COLUMN(bool, ready);
+    SOURCE_COLUMN(uint32_t, staleAfterMs); SOURCE_COLUMN(uint32_t, readerProbeMs);
+    SOURCE_COLUMN(int64_t, lastValidAgeMs); SOURCE_COLUMN(uint64_t, lastValidEpoch);
+    SOURCE_COLUMN(uint64_t, invalidSamples); SOURCE_COLUMN(uint64_t, staleTransitions); SOURCE_COLUMN(uint64_t, staleCallbacks);
+    READER_COLUMN(std::string, cursor); READER_COLUMN(std::string, observedCursor);
+    READER_COLUMN(bool, active); READER_COLUMN(bool, connected); READER_COLUMN(bool, inspected); READER_COLUMN(bool, hasData);
+    READER_COLUMN(uint64_t, epoch); READER_COLUMN(uint64_t, readFailures); READER_COLUMN(uint64_t, readRejections);
+    READER_COLUMN(uint64_t, socketTimeouts); READER_COLUMN(uint64_t, reconnects); READER_COLUMN(uint64_t, streamResets);
+    READER_COLUMN(uint64_t, disappearances); READER_COLUMN(uint64_t, retentionGaps); READER_COLUMN(uint64_t, inspectionFailures);
+    READER_COLUMN(uint64_t, inspectionRejections); READER_COLUMN(uint64_t, callbacks); READER_COLUMN(uint64_t, entries);
+    READER_COLUMN(uint64_t, callbackErrors);
+#undef READER_COLUMN
+#undef SOURCE_COLUMN
+    value["sources.streamKind"] = sourceColumn<std::string>(sources, [](const auto& s) { return streamKindName(s.reader.streamKind); });
+    const auto now = SourceClock::now();
+    value["sources.lastReceivedAgeMs"] = sourceColumn<int64_t>(sources, [now](const auto& s) {
+      return s.reader.lastReceived == SourceClock::time_point{} ? int64_t(-1)
+          : std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(now - s.reader.lastReceived).count());
+    });
+    sourceStatus_.post(value); setAdminScalar(ready_, ready);
+  }
+
   PVBindings bindings(const AccessDefaultsConfig& defaults) {
     PVBindings bindings;
     EndpointRegistry endpoints;
@@ -448,6 +530,7 @@ public:
     add(ndarraySkippedFramesName_, ndarraySkippedFrames_, defaults.adminRead);
     add(ndarrayDiscontinuitiesName_, ndarrayDiscontinuities_, defaults.adminRead);
     add(backendHealthName_, backendHealth_, defaults.adminRead);
+    add(sourceName_, sourceStatus_, defaults.adminRead); add(readyName_, ready_, defaults.adminRead);
     add(accessReloadName_, accessReloadCommand_, defaults.adminWrite);
     add(accessEnabledName_, accessEnabled_, defaults.adminRead);
     add(accessGenerationName_, accessGeneration_, defaults.adminRead);
@@ -555,6 +638,9 @@ private:
   pvxs::server::SharedPV ndarraySkippedFrames_;
   pvxs::server::SharedPV ndarrayDiscontinuities_;
   pvxs::server::SharedPV backendHealth_;
+  pvxs::server::SharedPV sourceStatus_ = pvxs::server::SharedPV::buildReadonly();
+  pvxs::server::SharedPV ready_ = pvxs::server::SharedPV::buildReadonly();
+  std::string sourceName_, readyName_;
   pvxs::server::SharedPV accessEnabled_;
   pvxs::server::SharedPV accessGeneration_;
   pvxs::server::SharedPV accessLastStatus_;
@@ -605,6 +691,7 @@ std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {
   }
   options.workers = config.workers;
   options.readers = config.readers;
+  options.readerProbeMs = config.readerProbeMs;
   return std::make_shared<RedisAdapter>(config.baseKey, options);
 }
 
@@ -841,6 +928,15 @@ struct Application::Impl {
   ReloadStatus reload;
   std::chrono::steady_clock::time_point reloadStarted;
 
+  void publishSourceHealth(SourceClock::time_point now = SourceClock::now()) {
+    std::vector<SourceStatus> sources;
+    for (const auto& entry : runtimes) {
+      auto statuses = entry.second->sourceHealth(now);
+      sources.insert(sources.end(), std::make_move_iterator(statuses.begin()), std::make_move_iterator(statuses.end()));
+    }
+    if (admin) admin->setSourceStatus(std::move(sources), generation);
+  }
+
   void publishReload() {
     reload.durationMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - reloadStarted).count();
@@ -1021,6 +1117,7 @@ void Application::pump() {
     impl_->lastHealthUpdate = now;
     if (impl_->admin) {
       impl_->admin->setBackendHealth(backendHealthSummary(impl_->redisBackends));
+      impl_->publishSourceHealth(now);
       impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);
       impl_->admin->setRpcStatus(impl_->rpcServices, impl_->rpcOperations ? impl_->rpcOperations->stats() : OperationQueueStats{},
                                  impl_->currentConfig.limits);
@@ -1221,7 +1318,7 @@ bool Application::applyGeneration(const AppConfig& config,
         nextRuntimes.emplace(name, existing->second);
       } else {
         auto runtime = makeRuntime(config.server, pv, nextBackends, nextAlarm, generation,
-                                   impl_->operations, config.limits, impl_->runtimeStats);
+                                   impl_->operations, config.limits, impl_->runtimeStats, config.redisBackends);
         added.push_back(runtime);
         nextRuntimes.emplace(name, std::move(runtime));
       }
@@ -1309,6 +1406,7 @@ bool Application::applyGeneration(const AppConfig& config,
       impl_->admin->setRpcStatus(impl_->rpcServices, impl_->rpcOperations ? impl_->rpcOperations->stats() : OperationQueueStats{},
                                  impl_->currentConfig.limits);
       impl_->admin->setAlarmStatus(impl_->alarmPublisher->status());
+      impl_->publishSourceHealth();
     } catch (const std::exception& ex) {
       // The active registry is already complete. Preserve its generation and
       // report an operational refresh failure, not a fictitious rollback.

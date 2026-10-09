@@ -8,6 +8,7 @@
 #include <pvxs/sharedpv.h>
 
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/source_health.h"
 
 class RedisAdapter;
 
@@ -44,6 +45,8 @@ public:
       const std::shared_ptr<AlarmPublisher>& publisher = {}) = 0;
   virtual void activate() noexcept = 0;
   virtual void deactivate(const std::string& reason) = 0;
+  // Refresh health alarms without replacing retained source values/timestamps.
+  virtual std::vector<SourceStatus> sourceHealth(SourceClock::time_point now = SourceClock::now()) = 0;
 };
 
 std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
@@ -53,6 +56,7 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                            uint64_t generation,
                                            std::shared_ptr<OperationQueue> operations = {},
                                            OperationLimitsConfig limits = {},
-                                           std::shared_ptr<RuntimeStats> stats = {});
+                                           std::shared_ptr<RuntimeStats> stats = {},
+                                           const RedisBackendConfigs& readerPolicies = {});
 
 }  // namespace redis_pvxs_ioc

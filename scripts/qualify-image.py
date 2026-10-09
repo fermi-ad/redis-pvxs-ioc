@@ -102,7 +102,7 @@ def baseline_evidence(directory):
         shutil.copyfile(extracted / "candidate" / name, folder / name)
     shutil.rmtree(extracted)
     run_info = github.retained_run(candidate["run_id"], candidate["revision"], "candidate-image.yml",
-                                  folder / "run.json", dispatch_only=True)
+                                  folder / "run.json", dispatch_only=True, published_baseline=True)
     contract.validate_candidate(candidate, directory, "rollback/", run_info, "0.8.2", candidate["revision"])
     # Verify the published tag resolves to the actual qualified baseline source.
     ref = github.api(f"repos/{contract.REPOSITORY}/git/ref/tags/v0.8.2")["object"]

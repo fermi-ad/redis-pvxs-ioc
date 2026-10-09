@@ -90,6 +90,7 @@ class ProofFixture:
         write(directory / "ci/candidate-run.json", candidate_run)
         ci = self.ci()
         old_run = self.run(14, "candidate-image.yml", revision=OLD_SHA)
+        old_run["head_branch"] = "dev/runtime-correctness-v0.8.2"
         self.candidate("rollback", old_run, "0.8.2", OLD_SHA, OLD_IMAGE)
         write(directory / "rollback/run.json", old_run)
         released = dict(id=5, tag_name="v0.8.2", draft=False, prerelease=False, published_at=utc(-3600),
@@ -326,6 +327,46 @@ class QualificationContractTests(unittest.TestCase):
         self.assertEqual(record["checks"], sorted(contract.CHECKS))
         self.assertFalse((self.fixture.directory / "qualification.json").exists())
 
+    def test_published_baseline_acquisition_accepts_release_branch(self):
+        with tempfile.TemporaryDirectory(prefix="baseline-acquisition-") as temporary:
+            root = Path(temporary)
+            assets = root / "assets"
+            assets.mkdir()
+            candidate_asset = assets / "candidate.json"
+            candidate_asset.write_bytes((self.fixture.directory / "rollback/candidate.json").read_bytes())
+            archive = assets / "release-evidence.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                for name in ("candidate.json", *contract.ATTESTATIONS):
+                    bundle.add(self.fixture.directory / "rollback" / name, arcname="candidate/" + name)
+            release = dict(id=5, tag_name="v0.8.2", draft=False, prerelease=False,
+                published_at=utc(-3600), assets=[
+                    dict(id=41, name="candidate.json", size=candidate_asset.stat().st_size,
+                         digest="sha256:" + contract.digest(candidate_asset)),
+                    dict(id=42, name="release-evidence.tar.gz", size=archive.stat().st_size,
+                         digest="sha256:" + contract.digest(archive))])
+            endpoints = {
+                f"repos/{contract.REPOSITORY}/releases/tags/v0.8.2": release,
+                f"repos/{contract.REPOSITORY}/actions/runs/14":
+                    self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"],
+                f"repos/{contract.REPOSITORY}/git/ref/tags/v0.8.2":
+                    dict(object=dict(type="commit", sha=OLD_SHA)),
+            }
+            sources = {
+                f"repos/{contract.REPOSITORY}/releases/assets/41": candidate_asset,
+                f"repos/{contract.REPOSITORY}/releases/assets/42": archive,
+            }
+            def download(endpoint, output, limit=None, binary=False):
+                output.write_bytes(sources[endpoint].read_bytes())
+            destination = root / "collected"
+            destination.mkdir()
+            with patch.object(collector.github, "api",
+                              side_effect=lambda endpoint: copy.deepcopy(endpoints[endpoint])), \
+                    patch.object(collector.github, "download", side_effect=download):
+                candidate = collector.baseline_evidence(destination)
+            self.assertEqual(candidate["revision"], OLD_SHA)
+            self.assertEqual(contract.read(destination, "rollback/run.json")["head_branch"],
+                             "dev/runtime-correctness-v0.8.2")
+
     def reject(self, message=None):
         self.fixture.refresh()
         with self.assertRaisesRegex(ValueError, message or "."):
@@ -343,6 +384,32 @@ class QualificationContractTests(unittest.TestCase):
     def test_same_source_pr_or_fork_evidence_is_rejected(self):
         self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12"]["event"] = "pull_request"
         self.reject("trusted-main")
+
+    def test_final_candidate_remains_main_only(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/11"
+        self.fixture.remote[endpoint]["head_branch"] = "dev/release-0.9.0"
+        self.reject("trusted-main")
+
+    def test_release_branch_override_is_published_candidate_only(self):
+        baseline = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"]
+        with self.assertRaisesRegex(ValueError, "trusted-main"):
+            contract.validate_run(baseline, OLD_SHA, "candidate-image.yml", dispatch_only=True)
+        contract.validate_run(baseline, OLD_SHA, "candidate-image.yml", dispatch_only=True,
+                              published_baseline=True)
+        native = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12"]
+        with self.assertRaisesRegex(ValueError, "candidate-only"):
+            contract.validate_run(native, SHA, "native.yml", published_baseline=True)
+        with self.assertRaisesRegex(ValueError, "candidate-only"):
+            contract.validate_run(self.fixture.own_run, SHA, "qualify-image.yml", dispatch_only=True,
+                                  active=True, published_baseline=True)
+
+    def test_published_baseline_live_metadata_cannot_change(self):
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"]["head_branch"] = "dev/other"
+        self.reject("stale or mismatched")
+
+    def test_published_baseline_still_requires_dispatch_evidence(self):
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"]["event"] = "pull_request"
+        self.reject("published-baseline")
 
     def test_rerun_attempt_invalidates_retained_ci(self):
         self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12"]["run_attempt"] = 2

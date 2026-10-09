@@ -65,9 +65,11 @@ def artifact(run_info, kind, destination):
     return value
 
 
-def retained_run(run_id, revision, workflow, destination, dispatch_only=False):
+def retained_run(run_id, revision, workflow, destination, dispatch_only=False, *,
+                 published_baseline=False):
     run_info = api(f"repos/{REPOSITORY}/actions/runs/{integer(run_id, 'run ID', 1)}")
-    validate_run(run_info, revision, workflow, dispatch_only=dispatch_only)
+    validate_run(run_info, revision, workflow, dispatch_only=dispatch_only,
+                 published_baseline=published_baseline)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(run_info, indent=2) + "\n")
     return run_info

@@ -164,11 +164,21 @@ def immutable_image(value):
     return value
 
 
-def validate_run(info, revision, workflow, dispatch_only=False, active=False):
-    require(info.get("head_sha") == revision and info.get("head_branch") == "main"
+def validate_run(info, revision, workflow, dispatch_only=False, active=False, *,
+                 published_baseline=False):
+    if published_baseline:
+        require(workflow == "candidate-image.yml" and dispatch_only and not active,
+                "published baseline run validation is candidate-only")
+    # The published v0.8.2 release binds its exact candidate run to an immutable
+    # tag, asset checksums and source revision. Only that rollback path may use
+    # its historical release branch; all current release evidence remains main-only.
+    branch = info.get("head_branch")
+    branch_matches = branch == "main" or (
+        published_baseline and isinstance(branch, str) and bool(branch.strip()))
+    require(info.get("head_sha") == revision and branch_matches
             and info.get("path") == ".github/workflows/" + workflow
             and info.get("event") in ({"workflow_dispatch"} if dispatch_only else {"push", "workflow_dispatch"}),
-            "run is not matching trusted-main evidence")
+            "run is not matching trusted-main or published-baseline evidence")
     require(info.get("repository", {}).get("full_name") == REPOSITORY
             and info.get("head_repository", {}).get("full_name") == REPOSITORY,
             "run repository identity mismatch")
@@ -182,12 +192,15 @@ def validate_run(info, revision, workflow, dispatch_only=False, active=False):
     return info
 
 
-def authenticated_run(retained, api, revision, workflow, dispatch_only=False, active=False):
+def authenticated_run(retained, api, revision, workflow, dispatch_only=False, active=False, *,
+                      published_baseline=False):
     live = api(f"repos/{REPOSITORY}/actions/runs/{integer(retained.get('id'), 'run ID', 1)}")
-    validate_run(live, revision, workflow, dispatch_only, active)
+    validate_run(live, revision, workflow, dispatch_only=dispatch_only, active=active,
+                 published_baseline=published_baseline)
     for field in ("id", "run_attempt", "head_sha", "head_branch", "event", "path", "run_started_at"):
         require(retained.get(field) == live.get(field), "stale or mismatched run metadata: " + field)
-    validate_run(retained, revision, workflow, dispatch_only, active)
+    validate_run(retained, revision, workflow, dispatch_only=dispatch_only, active=active,
+                 published_baseline=published_baseline)
     return live
 
 
@@ -624,7 +637,8 @@ def validate_rollback(directory, item, identity, api, qualification_run):
     revision = baseline.get("revision", "")
     require(SHA.fullmatch(revision), "invalid rollback source revision")
     retained = read(directory, item["run"])
-    run_info = authenticated_run(retained, api, revision, "candidate-image.yml", dispatch_only=True)
+    run_info = authenticated_run(retained, api, revision, "candidate-image.yml", dispatch_only=True,
+                                 published_baseline=True)
     validate_candidate(baseline, directory, item["candidate"].removesuffix("candidate.json"), run_info, "0.8.2", revision)
     release = read(directory, item["release"])
     live = api(f"repos/{REPOSITORY}/releases/tags/v0.8.2")

@@ -153,6 +153,33 @@ def main():
         conflict = copy.deepcopy(changed)
         conflict["redis"]["password"] = "secret-that-must-not-appear"
         assert "mutually exclusive" in check(conflict, False)["error"]
+        # File authentication and source-health probing share the same strict
+        # backend parser in both legacy and named-backend configurations.
+        user = directory / "user.secret"
+        user.write_text("fixture-user\n")
+        coupled = copy.deepcopy(changed)
+        coupled["redis"]["user_file"] = user.name
+        coupled["pvs"][0]["source_health"] = dict(required=False, stale_after_ms=1000)
+        for named in (False, True):
+            value = copy.deepcopy(coupled)
+            backend = value["redis"]
+            if named:
+                value["redis_backends"] = {"primary": value.pop("redis")}
+                value["pvs"][0]["read"]["backend"] = "primary"
+            for interval in (0, 100, 60000):
+                backend["reader_probe_ms"] = interval
+                report = check(value)
+                assert "secret-that-must-not-appear" not in json.dumps(report)
+            for interval in (-1, 99, 60001, 1.5):
+                backend["reader_probe_ms"] = interval
+                assert "reader_probe_ms" in check(value, False)["error"]
+            backend["reader_probe_ms"] = 1000
+            backend["reader_probe_mz"] = 1000
+            error = check(value, False)["error"]
+            assert "reader_probe_mz" in error and "unknown key" in error
+            del backend["reader_probe_mz"]
+            backend["user"] = "fixture-user"
+            assert "mutually exclusive" in check(value, False)["error"]
         for content in (b"", b"\n", b"secret-that-must-not-appear\x00", b"one\ntwo", b"x" * 16385):
             secret.write_bytes(content)
             report = check(changed, False)

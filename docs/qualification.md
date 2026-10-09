@@ -147,6 +147,17 @@ It cross-checks measured UTC/monotonic duration with the eventual successful
 GitHub run's authenticated elapsed interval. The same-run collector is trusted
 reviewed code; file hashes are integrity checks, not independent attestations.
 
+Before collection starts, the workflow authenticates and seals the exact GitHub
+responses needed to validate its source, candidate, CI and published v0.8.2
+rollback evidence. `proof.json` binds that closed endpoint set, its SHA-256,
+source revision, run attempt and capture time. Post-soak verification has no
+network fallback: a missing, extra, changed or stale response fails. This keeps
+the mandatory 24-hour soak independent of the self-hosted job's 24-hour
+[`GITHUB_TOKEN` refresh limit](https://docs.github.com/en/actions/concepts/security/github_token).
+Release promotion separately reauthenticates the completed qualification run and
+all external evidence live with a fresh token. Final artifact upload remains a
+required fail-closed workflow step; an upload failure cannot authorize promotion.
+
 Downloads are size-limited and extracted only after preflighting all member
 names, duplicate paths, link/type collisions and expanded sizes. Absolute paths,
 traversal, backslashes, symlinks, non-regular entries, duplicate JSON keys and

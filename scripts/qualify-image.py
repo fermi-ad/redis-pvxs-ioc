@@ -159,6 +159,7 @@ def prepare(args):
         ci=ci, policy="policy.json", capacity=[], rollback=rollback,
         soak=dict(manifest="soak/collector.json", observations="soak/observations.jsonl", config="soak/config.json",
                   producer_events="runtime/producer-events.jsonl"))
+    github.seal_preflight(args.output, proof)
     write(args.output / "proof.json", proof)
     return identity, baseline, policy, proof
 
@@ -837,8 +838,10 @@ def run(args):
         record = dict(identity, schema=1, candidate_run=contract.read(args.output, "ci/candidate-run.json")["id"],
             candidate_attempt=contract.read(args.output, "ci/candidate-run.json")["run_attempt"], checks=sorted(contract.CHECKS),
             soak_seconds=seconds, rollback_version="0.8.2", evidence=contract.inventory(args.output))
-        info = github.api(f"repos/{contract.REPOSITORY}/actions/runs/{identity['run_id']}")
-        contract.verify_bundle(args.output, record, info, github.api, active=True)
+        # github.token cannot outlive the mandatory 24-hour collection. Local
+        # verification uses the sealed authenticated preflight responses only;
+        # release promotion requires fresh live completed-run authentication.
+        contract.verify_collected_bundle(args.output, record)
         write(args.output / "qualification.json", record)
         print(json.dumps(record, indent=2))
     finally:

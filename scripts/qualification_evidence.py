@@ -1,11 +1,14 @@
 """Read-only GitHub evidence acquisition with bounded private extraction."""
 import json
+import datetime as dt
 import os
 from pathlib import Path
 import selectors
 import subprocess
 import tempfile
 import time
+
+import qualification_contract as contract
 
 from qualification_contract import (MAX_BUNDLE_BYTES, REPOSITORY, extract_archive,
                                     integer, parse_json, require, validate_run)
@@ -45,6 +48,45 @@ def api(endpoint):
         path = Path(temporary) / "response.json"
         download(endpoint, path, 8 * 1024**2)
         return parse_json(path.read_bytes())
+
+
+def utc():
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
+
+
+def seal_preflight(directory, proof):
+    """Authenticate a closed response set before any qualification collection.
+
+    The collector cannot refresh github.token after a full day. Retain these
+    responses for local active verification; promotion re-authenticates live.
+    No credentials or arbitrary/offline API input are accepted here.
+    """
+    tag_endpoint = f"repos/{REPOSITORY}/git/ref/tags/v0.8.2"
+    responses = {tag_endpoint: api(tag_endpoint)}
+    endpoints = contract.snapshot_endpoints(directory, proof, responses[tag_endpoint].get("object"))
+    for endpoint in sorted(endpoints - {tag_endpoint}):
+        responses[endpoint] = api(endpoint)
+    def captured(endpoint):
+        require(endpoint in responses, "GitHub endpoint absent from preflight capture")
+        return responses[endpoint]
+    identity = proof["identity"]
+    own = captured(f"repos/{REPOSITORY}/actions/runs/{identity['run_id']}")
+    validate_run(own, identity["revision"], "qualify-image.yml", dispatch_only=True, active=True)
+    require(own["status"] == "in_progress" and own["id"] == identity["run_id"]
+            and own["run_attempt"] == identity["run_attempt"],
+            "qualification run attempt changed before collection")
+    contract.validate_external_evidence(directory, proof, identity, captured)
+    contract.validate_baseline_evidence(directory, proof["rollback"], captured)
+    snapshot = dict(schema=1, identity=identity, captured_at=utc(), responses=responses)
+    path = directory / "ci/github-preflight.json"
+    require(not path.exists(), "GitHub preflight snapshot already exists")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(snapshot, indent=2, allow_nan=False) + "\n").encode()
+    require(len(data) <= contract.MAX_FILE_BYTES, "GitHub preflight snapshot exceeds bound")
+    with path.open("xb") as stream:
+        stream.write(data)
+    proof["github_snapshot"] = dict(path="ci/github-preflight.json", sha256=contract.digest(path))
+    contract.sealed_snapshot_api(directory, proof)
 
 
 def artifact(run_info, kind, destination):

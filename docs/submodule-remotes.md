@@ -9,7 +9,7 @@ gitlink, verify that its public remote contains the exact pinned commit.
 ### `third_party/epics-base`
 
 - Published `.gitmodules` URL: `https://github.com/derekste/epics-base.git`
-- Pinned commit: `64fe4ba7c0aeb384ee68accc80e630a52a7bcd27`
+- Pinned commit: `016595f738564a05a924465d3745ffd5c055ce01`
 - Publish status: published correction; final candidate qualification pending
 - Verified remote branch: `https://github.com/derekste/epics-base.git`
   `refs/heads/dev/hag-dns-staging`
@@ -18,9 +18,10 @@ gitlink, verify that its public remote contains the exact pinned commit.
 - Upstream relink plan: once these fork changes are merged upstream, point this
   submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
 - This correction stages HAG DNS work outside the client access lock while
-  retaining the documented synchronous-callback restriction. Independent
-  Instrumentation review and final candidate access/recovery qualification
-  remain required.
+  retaining the documented synchronous-callback restriction. It also declares
+  the existing resolver dependency for static Linux `aslibtest` links.
+  Independent Instrumentation review and final candidate access/recovery
+  qualification remain required.
 
 ### `third_party/pvxs`
 

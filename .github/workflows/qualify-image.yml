@@ -1,0 +1,86 @@
+name: Qualify redis-pvxs-ioc candidate image
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Successful candidate-image run for this exact main commit
+        required: true
+        type: string
+      native_run:
+        description: Successful native matrix run for this exact main commit
+        required: true
+        type: string
+      image_run:
+        description: Successful ci-image run on adlinux3 for this exact main commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: redis-pvxs-candidate-qualification
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  qualify:
+    # No pull-request or arbitrary-ref code reaches the Fermilab runner.
+    if: github.ref == 'refs/heads/main' && github.repository == 'fermi-ad/redis-pvxs-ioc'
+    runs-on: adlinux3
+    timeout-minutes: 1560
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Set qualification evidence directory
+        run: echo "EVIDENCE=${RUNNER_TEMP}/release-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      - name: Validate qualification tooling
+        run: python3 -m unittest discover -s tests -p '*_tools_test.py' -v
+      - name: Isolate registry credentials
+        run: |
+          DOCKER_CONFIG="$(mktemp -d "${RUNNER_TEMP}/redis-pvxs-qualification-docker.XXXXXXXX")"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          mkdir -m 700 "$DOCKER_CONFIG/buildx"
+          echo "BUILDX_CONFIG=$DOCKER_CONFIG/buildx" >> "$GITHUB_ENV"
+      - name: Registry login for immutable image pulls
+        env:
+          REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          REGISTRY_SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        run: |
+          printf '%s' "$REGISTRY_SECRET" | docker login adregistry.fnal.gov \
+            --username "$REGISTRY_USERNAME" --password-stdin
+      - name: Collect actual candidate qualification and rollback evidence
+        env:
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+          NATIVE_RUN: ${{ inputs.native_run }}
+          IMAGE_RUN: ${{ inputs.image_run }}
+        run: |
+          python3 scripts/qualify-image.py --candidate-run "$CANDIDATE_RUN" \
+            --native-run "$NATIVE_RUN" --image-run "$IMAGE_RUN" --output "$EVIDENCE"
+          cat "$EVIDENCE/qualification.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove only this attempt's private qualification runtime
+        if: always()
+        run: python3 scripts/qualify-image.py --cleanup --output "$EVIDENCE"
+      - name: Retain qualification and failure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Docker logout and credential cleanup
+        if: always() && env.DOCKER_CONFIG != ''
+        run: |
+          docker logout adregistry.fnal.gov
+          rm -rf -- "$DOCKER_CONFIG"

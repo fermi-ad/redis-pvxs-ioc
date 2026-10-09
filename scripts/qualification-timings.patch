@@ -1,0 +1,30 @@
+--- a/tests/ndarray_transfer.cpp
++++ b/tests/ndarray_transfer.cpp
+@@ -120,6 +120,8 @@
+     const auto start = Clock::now();
+     const auto period = std::chrono::nanoseconds(1000000000 / fps);
+     double producerMaxLateMs = 0;
++    std::vector<int64_t> steadySends;
++    steadySends.reserve(frames);
+     for (uint32_t id = 1; id <= frames; ++id) {
+       std::this_thread::sleep_until(start + period * (id - 1));
+       producerMaxLateMs = std::max(producerMaxLateMs,
+@@ -130,6 +132,7 @@
+       const auto timestamp = nowNs();
+       { std::lock_guard<std::mutex> guard(mutex); if (!failure.empty()) throw std::runtime_error(failure); timestamps[id] = timestamp; }
+       arguments.time = RA_Time(timestamp);
++      steadySends.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+       require(producer.addSingleValue("image", fields, arguments).ok(), "Redis did not accept frame; not retried");
+     }
+     {
+@@ -153,7 +156,9 @@
+            << ",\"unexplained_gaps\":0,\"duplicates\":0,\"elapsed_seconds\":" << seconds
+            << ",\"latency_p50_ms\":" << quantile(.5) << ",\"latency_p95_ms\":" << quantile(.95)
+            << ",\"latency_p99_ms\":" << quantile(.99) << ",\"producer_max_late_ms\":" << producerMaxLateMs
+-           << ",\"monitor_queue_entries\":16,\"redis_history_entries\":16,\"client_peak_rss_bytes\":" << rssBytes << "}\n";
++           << ",\"monitor_queue_entries\":16,\"redis_history_entries\":16,\"client_peak_rss_bytes\":" << rssBytes << ",\"producer_steady_send_ns\":[";
++    for (size_t i = 0; i < steadySends.size(); ++i) { if (i) report << ","; report << steadySends[i]; }
++    report << "],\"timing_instrumentation\":\"steady-send-v1\"}\n";
+     require(report.good(), "unable to write report");
+     std::cout << received << " ordered, exact " << width << 'x' << height << " Mono8 frames passed\n";
+   } catch (const std::exception& error) {

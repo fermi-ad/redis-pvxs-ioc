@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   native:
+    name: native (${{ matrix.runner }}, ${{ matrix.sanitizer }})
     strategy:
       fail-fast: false
       matrix:

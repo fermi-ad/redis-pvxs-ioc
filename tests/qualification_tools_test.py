@@ -940,6 +940,7 @@ class CollectorBoundaryTests(unittest.TestCase):
 
     def test_native_workflow_retains_matrix_bound_qualification_logs(self):
         text = (ROOT / ".github/workflows/native.yml").read_text()
+        self.assertIn("name: native (${{ matrix.runner }}, ${{ matrix.sanitizer }})", text)
         self.assertIn("native-qualification-${{ matrix.evidence }}-${{ github.run_id }}-${{ github.run_attempt }}", text)
         self.assertIn("ctest --test-dir build --output-on-failure 2>&1 | tee -a build/native-qualification.log", text)
         self.assertIn("Retain native qualification evidence", text)

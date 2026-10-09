@@ -44,7 +44,7 @@ preceding v0.8.2 correctness release.
   Allow the intended discovery traffic, choose a non-conflicting port, or set
   `discovery.enabled: false`; see [discovery networking](docs/reccaster.md).
 
-## v0.8.2 - unreleased
+## v0.8.2 - 2026-10-09
 
 - fix native macOS PVA startup by avoiding a second libevent threading state
 - use individually owned upstream redis-adapter subscriptions so replacing or

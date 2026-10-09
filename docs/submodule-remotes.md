@@ -9,25 +9,33 @@ gitlink, verify that its public remote contains the exact pinned commit.
 ### `third_party/epics-base`
 
 - Published `.gitmodules` URL: `https://github.com/derekste/epics-base.git`
-- Pinned commit: `c8ecd7c29d5e8cdd3ee15da2aaf761bda4f37e37`
-- Publish status: ready
-- Current known branch containing the commit: `dev/as-hag-refresh-api-v7.0.10`
-- Verified remote branch: `https://github.com/derekste/epics-base.git` `refs/heads/dev/as-hag-refresh-api-v7.0.10`
-- Upstream relink plan: once these fork changes are merged upstream, point this submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
-- Remaining qualification limitation: this pin holds the access lock during HAG
-  DNS. The separate correction described in [IOC #114](https://github.com/fermi-ad/redis-pvxs-ioc/pull/114)
-  remains local pending dependency publication and independent review.
+- Pinned commit: `64fe4ba7c0aeb384ee68accc80e630a52a7bcd27`
+- Publish status: published correction; final candidate qualification pending
+- Verified remote branch: `https://github.com/derekste/epics-base.git`
+  `refs/heads/dev/hag-dns-staging`
+- Review: [derekste/epics-base #1](https://github.com/derekste/epics-base/pull/1),
+  based directly on the previous IOC pin
+- Upstream relink plan: once these fork changes are merged upstream, point this
+  submodule back to the main `epics-base/epics-base` repo at the merged upstream commit
+- This correction stages HAG DNS work outside the client access lock while
+  retaining the documented synchronous-callback restriction. Independent
+  Instrumentation review and final candidate access/recovery qualification
+  remain required.
 
 ### `third_party/pvxs`
 
-- Published `.gitmodules` URL: `https://github.com/epics-base/pvxs.git`
-- Pinned commit: `8e00eaecdee5ce8a474704e70d820e6f92693fa1`
-- Publish status: ready
-- Release tag: `1.5.2`
-- This pin predates the bounded listener-backlog proposal. [Issue #122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122)
-  retains the burst comparison; backlog 32 remains local pending upstream review
-  and publication approval. Adopt a reviewed merged pin and repeat final burst/
-  reconnect qualification before release.
+- Published `.gitmodules` URL: `https://github.com/derekste/pvxs.git`
+- Pinned commit: `749a8933b7982cb4dd9c16660a53f93bcdd3d67e`
+- Publish status: published bounded-backlog correction; final candidate
+  qualification pending
+- Verified remote branch: `refs/heads/dev/listener-backlog-v0.9`
+- The pin is one commit and one line beyond the previous `1.5.2`-based IOC pin,
+  changing the listener backlog from 4 to 32. [Issue #122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122)
+  retains the burst comparison. Upstream
+  [PVXS #229](https://github.com/epics-base/pvxs/pull/229) remains a follow-up
+  and is not a release gate for this fork pin.
+- Release gate: repeat the final candidate burst, outage and reconnect
+  qualification with strict CI and independent Instrumentation review.
 
 ### `third_party/redis-adapter`
 

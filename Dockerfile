@@ -4,7 +4,7 @@ FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc8
 # The minimal base lacks HTTPS trust roots. BuildKit fetches this Ubuntu
 # package with TLS and checks its pinned hash before APT contacts the snapshot.
 ADD --checksum=sha256:f7025ab9b24cd73215510931037b02d6960d89584d0d00afba81851abdbe6ef1 \
-    https://snapshot.ubuntu.com/ubuntu/20260928T000000Z/pool/main/c/ca-certificates/ca-certificates_20260223_all.deb /tmp/ca-certificates.deb
+    https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260223_all.deb /tmp/ca-certificates.deb
 RUN dpkg-deb --extract /tmp/ca-certificates.deb /tmp/apt-trust && \
     mkdir -p /etc/ssl/certs && \
     cat /tmp/apt-trust/usr/share/ca-certificates/mozilla/*.crt > /etc/ssl/certs/ca-certificates.crt && \

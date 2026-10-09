@@ -409,11 +409,37 @@ class Scope:
 def fixture_config():
     return dict(server=dict(instance="qualification", namespace="Q", interfaces=["0.0.0.0"],
                             tcp_port=5075, udp_port=5075, auto_beacon=False),
-        discovery=dict(enabled=False), redis=dict(host="redis", port=6379, base_key="soak"),
+        discovery=dict(enabled=False),
+        redis_backends=dict(soak=dict(host="redis", port=6379, base_key="soak")),
+        alarms=dict(backend="soak", stream="alarms"),
         access=dict(enabled=True, file="/fixture/access.acf", watch=dict(enabled=False),
                     defaults=dict(pv=dict(asg="QREAD", asl=0), admin_read=dict(asg="QREAD", asl=0), admin_write=dict(asg="QADMIN", asl=0))),
-        pvs=[dict(name="scalar", aliases=["Q:alias"], type="uint32", shape="scalar", read=dict(key="scalar")),
-             dict(name="array", type="uint32", shape="array", read=dict(key="array"))])
+        pvs=[dict(name="scalar", aliases=["Q:alias"], type="uint32", shape="scalar", read=dict(backend="soak", key="scalar")),
+             dict(name="array", type="uint32", shape="array", read=dict(backend="soak", key="array"))])
+
+
+def routed_config(current, axis, index, elements=1):
+    import copy
+    config = copy.deepcopy(current)
+    base = "image-" + str(index) if axis == "imaging" else "capacity-" + str(index)
+    backend = "imaging" if axis == "imaging" else "capacity"
+    config["redis_backends"][backend] = dict(host="redis", port=6379, base_key=base, reader_probe_ms=1000)
+    config["pvs"] = [pv for pv in config["pvs"] if pv["name"] not in ("frame", "capacity")]
+    if axis == "imaging":
+        config["pvs"].append(dict(name="frame", aliases=["Q:image"], kind="ntndarray", max_frame_bytes=1920 * 1080,
+            read=dict(backend=backend, key="image"), source_health=dict(required=False)))
+    else:
+        config["pvs"].append(dict(name="capacity", type="uint32", shape="scalar" if elements == 1 else "array",
+            read=dict(backend=backend, key="data"), source_health=dict(required=False)))
+    return config, base
+
+
+def unrouted_config(current, axis):
+    import copy
+    config = copy.deepcopy(current)
+    config["pvs"] = [pv for pv in config["pvs"] if pv["name"] not in ("frame", "capacity")]
+    config["redis_backends"].pop("imaging" if axis == "imaging" else "capacity")
+    return config
 
 
 class Collector:
@@ -524,19 +550,7 @@ class Collector:
         return event
 
     def route(self, axis, index, elements=1):
-        import copy
-        config = copy.deepcopy(self.config)
-        config.setdefault("redis_backends", {})
-        base = "image-" + str(index) if axis == "imaging" else "capacity-" + str(index)
-        backend = "imaging" if axis == "imaging" else "capacity"
-        config["redis_backends"][backend] = dict(host="redis", port=6379, base_key=base, reader_probe_ms=1000)
-        config["pvs"] = [pv for pv in config["pvs"] if pv["name"] not in ("frame", "capacity")]
-        if axis == "imaging":
-            config["pvs"].append(dict(name="frame", aliases=["Q:image"], kind="ntndarray", max_frame_bytes=1920 * 1080,
-                read=dict(backend=backend, key="image"), source_health=dict(required=False)))
-        else:
-            config["pvs"].append(dict(name="capacity", type="uint32", shape="scalar" if elements == 1 else "array",
-                read=dict(backend=backend, key="data"), source_health=dict(required=False)))
+        config, base = routed_config(self.config, axis, index, elements)
         self.reload(config)
         return base
 
@@ -639,11 +653,7 @@ class Collector:
         # Remove the route after observation, so completed 2 MiB images are not
         # inspected at 1 Hz for the rest of the day. Active sources keep the
         # default 1000 ms policy; image and fan-out traffic recur every hour.
-        import copy
-        config = copy.deepcopy(self.config)
-        config["pvs"] = [pv for pv in config["pvs"] if pv["name"] not in ("frame", "capacity")]
-        config["redis_backends"].pop("imaging" if axis == "imaging" else "capacity")
-        self.reload(config)
+        self.reload(unrouted_config(self.config, axis))
         self.traffic_delete(base, "image" if axis == "imaging" else "data")
         return entry
 
@@ -716,7 +726,7 @@ class Collector:
         self.start_ioc(self.baseline)
         before = self.observation(self.baseline, "baseline-before")
         self.scope.remove("ioc")
-        self.config["redis"]["reader_probe_ms"] = 1000
+        self.config["redis_backends"]["soak"]["reader_probe_ms"] = 1000
         for pv in self.config["pvs"]:
             pv["source_health"] = dict(required=True, stale_after_ms=2000)
         write(self.runtime / "config.json", self.config)

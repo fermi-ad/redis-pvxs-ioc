@@ -323,6 +323,9 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_test(NAME config_cli_tests COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/tests/config_cli_tests.py $<TARGET_FILE:redis-pvxs-ioc>)
   set_tests_properties(config_cli_tests PROPERTIES TIMEOUT 60)
+  add_test(NAME qualification_config_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/qualification_config_tests.py --ioc $<TARGET_FILE:redis-pvxs-ioc>)
+  set_tests_properties(qualification_config_tests PROPERTIES TIMEOUT 30)
   add_test(NAME secret_files_e2e COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
     ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/secret_files_e2e.py

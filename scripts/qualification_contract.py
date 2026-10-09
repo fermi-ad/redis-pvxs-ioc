@@ -29,6 +29,11 @@ HASH = re.compile(r"[0-9a-f]{64}")
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 NATIVE_TESTS = {"config_tests", "access_runtime_tests", "source_health_e2e", "ndarray_transfer_e2e", "discovery_e2e"}
 FULL_TESTS = {"endpoint_rpc_e2e", "rpc_hardening_e2e", "rpc_recovery_e2e", "channelfinder_http_tests"}
+NATIVE_EVIDENCE = {
+    "native (macos-14, none)": "macos-minimal",
+    "native (ubuntu-24.04, none)": "linux-minimal",
+    "native (ubuntu-24.04, address,undefined)": "linux-sanitizer",
+}
 
 
 def require(condition, message):
@@ -39,6 +44,12 @@ def require(condition, message):
 def integer(value, name, minimum=0, maximum=2**63 - 1):
     require(type(value) is int and minimum <= value <= maximum, "invalid " + name)
     return value
+
+
+def native_evidence_name(job_name, run_id, attempt):
+    require(job_name in NATIVE_EVIDENCE, "unknown native evidence job")
+    return "native-qualification-{}-{}-{}".format(
+        NATIVE_EVIDENCE[job_name], integer(run_id, "run ID", 1), integer(attempt, "run attempt", 1))
 
 
 def number(value, name, minimum=0, maximum=1e12):
@@ -285,7 +296,21 @@ def validate_ci(directory, proof, revision, api):
                 selected = [j for j in jobs["jobs"] if j.get("name") == job_name and labels.issubset(j.get("labels", []))]
                 require(len(selected) == 1, "missing native/minimal/sanitizer CI matrix job: " + job_name)
                 successful_steps(selected[0], ["Configure and build service", "Test native runtime and access control",
-                                               "Test with real RecCeiver and its ChannelFinder processor"])
+                                               "Test with real RecCeiver and its ChannelFinder processor",
+                                               "Retain native qualification evidence"])
+                artifact = read(directory, proof[kind].get("artifacts", {}).get(job_name, ""))
+                expected_name = native_evidence_name(job_name, run_info["id"], run_info["run_attempt"])
+                require(type(artifact.get("id")) is int and artifact["id"] > 0
+                        and artifact.get("name") == expected_name
+                        and type(artifact.get("size_in_bytes")) is int
+                        and 0 < artifact["size_in_bytes"] <= MAX_BUNDLE_BYTES
+                        and artifact.get("expired") is False
+                        and artifact.get("workflow_run", {}).get("id") == run_info["id"]
+                        and artifact["workflow_run"].get("head_sha") == revision,
+                        "native qualification artifact identity mismatch")
+                require(artifact.get("digest") is None
+                        or re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]),
+                        "invalid native qualification artifact digest")
                 log = evidence_path(directory, proof[kind].get("logs", {}).get(job_name, "")).read_text()
                 tests = NATIVE_TESTS
                 if "address,undefined" in job_name:

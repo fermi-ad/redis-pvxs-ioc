@@ -192,12 +192,14 @@ class ProofFixture:
         for kind, run_id, workflow in (("native", 12, "native.yml"), ("image", 13, "ci-image.yml")):
             info = self.run(run_id, workflow)
             write(self.directory / ("ci/" + kind + "-run.json"), info)
-            jobs, logs = [], {}
+            jobs, logs, artifacts = [], {}, {}
             cases = [("validate", ["adlinux3"])] if kind == "image" else [
                 ("native (macos-14, none)", ["macos-14"]), ("native (ubuntu-24.04, none)", ["ubuntu-24.04"]),
                 ("native (ubuntu-24.04, address,undefined)", ["ubuntu-24.04"])]
             steps = ["Build validation image", "Validate image metadata", "Validate runtime image", "Validate isolated Redis/PVA and access behavior"] \
-                if kind == "image" else ["Configure and build service", "Test native runtime and access control", "Test with real RecCeiver and its ChannelFinder processor"]
+                if kind == "image" else ["Configure and build service", "Test native runtime and access control",
+                                         "Test with real RecCeiver and its ChannelFinder processor",
+                                         "Retain native qualification evidence"]
             for index, (name, labels) in enumerate(cases):
                 job = dict(id=run_id * 10 + index, run_id=run_id, head_sha=SHA, name=name, labels=labels,
                     status="completed", conclusion="success", steps=[dict(name=s, status="completed", conclusion="success") for s in steps])
@@ -211,10 +213,17 @@ class ProofFixture:
                     (self.directory / path).write_text(flags + "\n".join(f"Test #{i}: {n} .... Passed" for i, n in enumerate(tests)) +
                         "\nreal RecCeiver with in-memory ChannelFinder client: registration, aliases, metadata, removal and receiver restart passed\n")
                     logs[name] = path
+                    artifact_path = f"ci/job-{job['id']}-artifact.json"
+                    write(self.directory / artifact_path, dict(id=run_id * 100 + index,
+                        name=contract.native_evidence_name(name, run_id, 1), size_in_bytes=4096,
+                        digest="sha256:" + "a" * 64, expired=False,
+                        workflow_run=dict(id=run_id, head_sha=SHA)))
+                    artifacts[name] = artifact_path
             data = dict(total_count=len(jobs), jobs=jobs)
             write(self.directory / ("ci/" + kind + "-jobs.json"), data)
             self.remote[f"repos/{contract.REPOSITORY}/actions/runs/{run_id}/attempts/1/jobs?per_page=100"] = data
-            result[kind] = dict(run="ci/" + kind + "-run.json", jobs="ci/" + kind + "-jobs.json", logs=logs)
+            result[kind] = dict(run="ci/" + kind + "-run.json", jobs="ci/" + kind + "-jobs.json",
+                                logs=logs, artifacts=artifacts)
         return result
 
     def event(self, kind, seconds):
@@ -588,6 +597,18 @@ class QualificationContractTests(unittest.TestCase):
         path.write_text(path.read_text().replace("INTEGRATIONS: ON", "INTEGRATIONS: OFF"))
         self.reject("full integrations")
 
+    def test_native_evidence_artifact_is_bound_to_run_source_and_matrix(self):
+        name = "native (ubuntu-24.04, address,undefined)"
+        path = self.fixture.proof["ci"]["native"]["artifacts"][name]
+        self.fixture.mutate(path, lambda value: value.update(name="native-qualification-wrong-12-1"))
+        self.reject("artifact identity")
+
+    def test_expired_or_malformed_native_evidence_artifact_is_rejected(self):
+        name = "native (ubuntu-24.04, none)"
+        path = self.fixture.proof["ci"]["native"]["artifacts"][name]
+        self.fixture.mutate(path, lambda value: value.update(expired=True))
+        self.reject("artifact identity")
+
     def test_wrong_platform_or_native_matrix_job_is_rejected(self):
         data = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12/attempts/1/jobs?per_page=100"]
         data["jobs"][0]["labels"] = ["ubuntu-24.04"]
@@ -771,6 +792,32 @@ class QualificationContractTests(unittest.TestCase):
 
 
 class ArtifactSafetyTests(unittest.TestCase):
+    def test_named_artifact_binds_metadata_and_downloaded_archive_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            archive = folder / "source.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("native-qualification.log", b"validated\n")
+            run = dict(id=12, run_attempt=1, head_sha=SHA)
+            value = dict(id=99, name="native-qualification-linux-minimal-12-1",
+                         size_in_bytes=archive.stat().st_size,
+                         digest="sha256:" + contract.digest(archive), expired=False,
+                         workflow_run=dict(id=12, head_sha=SHA))
+            response = dict(total_count=1, artifacts=[value])
+            def download(endpoint, output, *args, **kwargs):
+                output.write_bytes(archive.read_bytes())
+            destination = folder / "output"
+            with patch.object(collector.github, "api", return_value=response), \
+                    patch.object(collector.github, "download", side_effect=download):
+                metadata = collector.github.named_artifact(run, value["name"], destination)
+            self.assertEqual(metadata["digest"], value["digest"])
+            self.assertEqual((destination / "native-qualification.log").read_text(), "validated\n")
+            response["artifacts"][0]["digest"] = "sha256:" + "0" * 64
+            with patch.object(collector.github, "api", return_value=response), \
+                    patch.object(collector.github, "download", side_effect=download), \
+                    self.assertRaisesRegex(ValueError, "digest mismatch"):
+                collector.github.named_artifact(run, value["name"], folder / "changed")
+
     def test_unsafe_zip_paths_links_duplicates_and_file_collisions_rejected_before_writing(self):
         for kind in ("absolute", "traversal", "backslash", "symlink", "duplicate", "collision"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
@@ -890,6 +937,17 @@ class CollectorBoundaryTests(unittest.TestCase):
         import re
         self.assertTrue(all(re.fullmatch(r"[a-zA-Z0-9_./-]+@[0-9a-f]{40}", action) for action in re.findall(r"uses:\s+(\S+)", text)))
         self.assertNotIn("--push", text)
+
+    def test_native_workflow_retains_matrix_bound_qualification_logs(self):
+        text = (ROOT / ".github/workflows/native.yml").read_text()
+        self.assertIn("name: native (${{ matrix.runner }}, ${{ matrix.sanitizer }})", text)
+        self.assertIn("native-qualification-${{ matrix.evidence }}-${{ github.run_id }}-${{ github.run_attempt }}", text)
+        self.assertIn("ctest --test-dir build --output-on-failure 2>&1 | tee -a build/native-qualification.log", text)
+        self.assertIn("Retain native qualification evidence", text)
+        self.assertEqual(text.count("shell: bash"), 2)
+        import re
+        uploads = re.findall(r"uses:\s+(actions/upload-artifact@\S+)", text)
+        self.assertEqual(uploads, ["actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"])
 
 
 if __name__ == "__main__":

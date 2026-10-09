@@ -93,7 +93,8 @@ class ProofFixture:
         self.candidate("rollback", old_run, "0.8.2", OLD_SHA, OLD_IMAGE)
         write(directory / "rollback/run.json", old_run)
         released = dict(id=5, tag_name="v0.8.2", draft=False, prerelease=False, published_at=utc(-3600),
-                        assets=[dict(id=41, name="candidate.json"), dict(id=42, name="release-evidence.tar.gz")])
+                        assets=[dict(id=41, name="candidate.json", size=1024, digest="sha256:" + "1" * 64),
+                                dict(id=42, name="release-evidence.tar.gz", size=4096, digest="sha256:" + "2" * 64)])
         write(directory / "rollback/release.json", released)
         self.remote[f"repos/{contract.REPOSITORY}/releases/tags/v0.8.2"] = released
         tag = dict(type="commit", sha=OLD_SHA)
@@ -104,7 +105,7 @@ class ProofFixture:
         write(directory / "rollback/restored-config.json", config)
         for filename in ("saved.acf", "restored.acf"):
             (directory / "rollback" / filename).write_text("ASG(QREAD) { RULE(0, READ) }\n")
-        config["redis"]["reader_probe_ms"] = 1000
+        config["redis_backends"]["soak"]["reader_probe_ms"] = 1000
         write(directory / "soak/config.json", config)
         self.proof = dict(identity=self.identity, policy="policy.json", instrumentation=instrument,
             candidate=dict(record="candidate/candidate.json", run="ci/candidate-run.json"), ci=ci, capacity=[],
@@ -440,8 +441,21 @@ class QualificationContractTests(unittest.TestCase):
         self.fixture.mutate(entry["report"], lambda r: r.update(received=9999, missed_updates=1))
         self.reject("lossy accepted")
         entry["classification"] = "exploration"
+        self.reject("lossless point")
+
+    def test_mutable_release_and_job_observation_fields_do_not_invalidate_identity(self):
+        release = self.fixture.remote[f"repos/{contract.REPOSITORY}/releases/tags/v0.8.2"]
+        release.update(updated_at=utc(10), body="clarified release notes")
+        release["assets"][0].update(download_count=99, updated_at=utc(20))
+        jobs = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12/attempts/1/jobs?per_page=100"]
+        jobs["jobs"][0].update(started_at=utc(-500), completed_at=utc(-400), runner_name="replacement-runner")
         self.fixture.refresh()
         self.fixture.verify()
+
+    def test_changed_release_asset_identity_is_rejected(self):
+        release = self.fixture.remote[f"repos/{contract.REPOSITORY}/releases/tags/v0.8.2"]
+        release["assets"][0]["digest"] = "sha256:" + "9" * 64
+        self.reject("published qualified")
 
     def test_idle_or_partial_hourly_work_is_not_representative_soak(self):
         self.fixture.mutate("soak/collector.json", lambda r: r["workloads"].pop())

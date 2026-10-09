@@ -226,6 +226,17 @@ def successful_steps(job, names):
                 and steps[name].get("conclusion") == "success" for name in names), "required CI steps did not succeed")
 
 
+def stable_jobs(payload):
+    """Keep only immutable job identity and the results used by this contract."""
+    jobs = []
+    for job in payload.get("jobs", []):
+        jobs.append(dict(id=job.get("id"), run_id=job.get("run_id"), head_sha=job.get("head_sha"),
+            name=job.get("name"), labels=sorted(job.get("labels", [])), status=job.get("status"),
+            conclusion=job.get("conclusion"), steps=[dict(name=step.get("name"), number=step.get("number"),
+                status=step.get("status"), conclusion=step.get("conclusion")) for step in job.get("steps", [])]))
+    return dict(total_count=payload.get("total_count"), jobs=sorted(jobs, key=lambda job: (job["id"] or 0, job["name"] or "")))
+
+
 def validate_ci(directory, proof, revision, api):
     import base64
     cmake = api(f"repos/{REPOSITORY}/contents/CMakeLists.txt?ref={revision}")
@@ -243,7 +254,8 @@ def validate_ci(directory, proof, revision, api):
         run_info = authenticated_run(retained, api, revision, workflow)
         jobs = read(directory, proof[kind]["jobs"])
         live = api(f"repos/{REPOSITORY}/actions/runs/{run_info['id']}/attempts/{run_info['run_attempt']}/jobs?per_page=100")
-        require(jobs == live and jobs.get("total_count") == len(jobs.get("jobs", [])), "CI jobs stale, partial, or mismatched")
+        require(stable_jobs(jobs) == stable_jobs(live)
+                and jobs.get("total_count") == len(jobs.get("jobs", [])), "CI jobs stale, partial, or mismatched")
         for job in jobs["jobs"]:
             require(job.get("run_id") == run_info["id"] and job.get("head_sha") == revision, "CI job source mismatch")
         if kind == "image":
@@ -346,7 +358,7 @@ def latency(report):
 
 def validate_capacity(directory, entries, identity, policy, events):
     require(isinstance(entries, list) and 6 <= len(entries) <= 64, "capacity sweep evidence missing")
-    axes = set()
+    axes, lossless_axes = set(), set()
     for entry in entries:
         axis = entry.get("axis")
         require(axis in {"scalar", "array", "imaging", "fan-out", "reload", "backend-delay"}, "unknown capacity axis")
@@ -372,6 +384,7 @@ def validate_capacity(directory, entries, identity, policy, events):
         require(entry.get("classification") in {"lossless", "exploration"}, "capacity point requires explicit classification")
         if entry["classification"] == "lossless":
             require(missed == 0 and duplicates == 0 and received == samples * clients, "lossy accepted capacity point")
+            lossless_axes.add(axis)
         if axis == "scalar":
             require(elements == 1 and clients == 1, "scalar capacity axis mismatch")
         if axis == "array":
@@ -383,6 +396,17 @@ def validate_capacity(directory, entries, identity, policy, events):
             require(event and event["kind"] == axis and event["start_mono_ns"] >= executed["start_mono_ns"]
                     and event["end_mono_ns"] <= executed["end_mono_ns"], "capacity action not observed during actual workload")
     require(axes == {"scalar", "array", "imaging", "fan-out", "reload", "backend-delay"}, "capacity sweep requires all six axes")
+    require(lossless_axes == {"scalar", "array", "fan-out", "reload", "backend-delay"},
+            "capacity sweep requires a lossless point for every non-imaging axis")
+
+
+def stable_release(release):
+    """Exclude mutable download counters and timestamps from release identity."""
+    assets = [dict(id=asset.get("id"), name=asset.get("name"), size=asset.get("size"), digest=asset.get("digest"))
+              for asset in release.get("assets", [])]
+    return dict(id=release.get("id"), tag_name=release.get("tag_name"), draft=release.get("draft"),
+                prerelease=release.get("prerelease"), published_at=release.get("published_at"),
+                assets=sorted(assets, key=lambda asset: (asset["name"] or "", asset["id"] or 0)))
 
 
 def validate_probe(probe, legacy=False, ready=True):
@@ -604,7 +628,8 @@ def validate_rollback(directory, item, identity, api, qualification_run):
     validate_candidate(baseline, directory, item["candidate"].removesuffix("candidate.json"), run_info, "0.8.2", revision)
     release = read(directory, item["release"])
     live = api(f"repos/{REPOSITORY}/releases/tags/v0.8.2")
-    require(release == live and live.get("draft") is False and live.get("prerelease") is False
+    require(stable_release(release) == stable_release(live)
+            and live.get("draft") is False and live.get("prerelease") is False
             and live.get("tag_name") == "v0.8.2" and live.get("published_at"), "rollback image is not the published qualified 0.8.2")
     assets = {a["name"]: a for a in live.get("assets", [])}
     require("candidate.json" in assets and "release-evidence.tar.gz" in assets, "rollback release lacks candidate qualification assets")

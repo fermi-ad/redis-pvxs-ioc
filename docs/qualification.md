@@ -1,12 +1,12 @@
 # Candidate qualification for v0.9.0
 
-This workflow and proof contract are draft preparation. They are not evidence
-that a candidate, development image, or release has passed qualification. The
-current 0.8.x preparation source cannot start qualification: the collector
-requires exact final `VERSION=0.9.0`, all merged feature tools, successful CI on
-that same main revision, an attested candidate digest, and a published qualified
-v0.8.2 rollback release. Upstream dependency changes and this procedure require
-independent Instrumentation review and protected-main merge before execution.
+This workflow and proof contract define the candidate qualification procedure.
+The tooling alone is not evidence that a candidate, development image, or release
+has passed qualification. The collector requires exact final `VERSION=0.9.0`,
+all merged feature tools, successful CI on that same main revision, an attested
+candidate digest, and a published qualified v0.8.2 rollback release. The final
+runtime, dependency pins and representative policy choices require independent
+Instrumentation review and protected-main merge before execution.
 No final soak or 600-frame acceptance is run as part of tooling unit tests.
 
 ## Run and retain evidence
@@ -76,18 +76,19 @@ only, capabilities are dropped, and processes use the runner's non-root UID.
 | Redis/PVA and discovery/catalog | Candidate smoke/access checks and native Redis/PVA test logs; real RecCeiver using its ChannelFinder processor in the existing in-memory client acceptance fixture | This reuses the accepted native receiver procedure; it does not claim a production ChannelFinder deployment was qualified. |
 | 600-frame imaging | Existing external C++ producer/PVA monitor validates all 1,244,160,000 pixels, ordered unique IDs and exact acquisition timestamps; zero gaps/duplicates; all 600 steady-clock send times | Exact 1920x1080 Mono8, nominal 10 fps, existing 90-second whole-run bound. Source cursors are ordering/acquisition metadata, not an independently measured producer clock. |
 | Capacity | Scalar 1k/10k Hz, 4096-element array 100/2500 Hz, 16-client fan-out 100/1000/5000 Hz; exact-content client reports with actual rate/latency/loss/coalescing/queue/RSS; imaging report; actual reload and 250 ms Redis-delay actions while capacity clients run | All six axes are required. Lossy exploratory points remain visible and never become lossless capacity claims. This is steady fan-out, not a connection-burst benchmark. |
-| 24-hour representative amd64 soak | Actual monotonic start/end, 30-second CPU/RSS/Docker/PVA/producer observations; exact source-cursor/content checks, continuing 100 Hz scalar + 4096-element array; every hour a full 600-frame transfer and 16-client 1000 Hz run; actual SIGHUP reload, backend delay and paused-Redis outage/recovery | Unobserved intervals over 45 seconds, unexplained write/probe/read failures, missing hourly work, non-progressing values, OOM/restarts, invalid readiness or resource-bound changes fail. The profile is a representative fixture proposed for review, not universal fleet capacity. |
+| 24-hour representative amd64 soak | Actual monotonic start/end, 30-second CPU/RSS/Docker/PVA/producer observations; exact source-cursor/content checks, continuing 100 Hz scalar + 4096-element array; every hour a full 600-frame transfer and 16-client 1000 Hz run; actual SIGHUP reload, backend delay and paused-Redis outage/recovery | Unobserved intervals over 45 seconds, unexplained write/probe/read failures, missing hourly work, non-progressing values, OOM/restarts, invalid readiness or resource-bound changes fail. The profile is the 0.9.0 release fixture, not universal fleet capacity. |
 | Qualified 0.8.2 rollback | Published non-prerelease release/tag/candidate provenance, saved compatible JSON/YAML and ACF bytes, both images' actual check-config exits, running binary/digest/platform/inspect evidence, actual exact PVA source content before candidate and after restore | Restores original saved bytes and recreates only the owned IOC. A version label, file hash without runtime content, or old image with new configuration is insufficient. |
 
-The checked-in [qualification policy](qualification-policy.json) is a proposal
-for independent Instrumentation review before merging this draft. It allows
+The checked-in [qualification policy](qualification-policy.json) is the 0.9.0
+acceptance profile submitted for independent Instrumentation approval in this
+release PR. It allows
 0.1% average cadence variation (9.99–10.01 Hz) measured across all 599 producer
 steady-clock intervals, with the existing 90-second total bound. It records
 every send time, interval and maximum scheduling lateness; there is no invented
 100 ms maximum-lateness acceptance requirement. The roadmap's nominal 10 fps
-requirement did not specify this tolerance. Review must accept or change this
-choice explicitly. The 64 MiB final RSS-growth limit is likewise a proposed
-resource acceptance choice; the full trace/peaks remain available for review.
+requirement did not specify this tolerance. Approval of this release PR accepts
+the choice explicitly. The 64 MiB final RSS-growth limit is likewise a release
+acceptance choice; the full trace/peaks remain available for review.
 
 Active sources retain the IOC's default 1000 ms inspection policy. The collector
 does not disable inspection or change payload semantics to ease qualification.
@@ -118,7 +119,7 @@ different config bytes while continuous sources stay valid. No percentage of
 unexplained failures or stalls is accepted.
 
 The hourly fan-out gate checks measured `produced_hz`, not only the requested
-1000 Hz label. The proposed acceptance interval is 999–1002 Hz. Its small
+1000 Hz label. The release acceptance interval is 999–1002 Hz. Its small
 asymmetry includes the existing capacity client's sample-count/span convention
 (10000 samples span 9999 scheduled intervals). Slower exploratory capacity
 points remain in the curve but cannot replace this representative hourly load.
@@ -127,7 +128,7 @@ they are not a claim that every scalar/array monitor update was delivered or
 that sub-observation transients cannot occur. Exact delivery is separately
 checked by the imaging and hourly fan-out clients.
 
-No manual boolean attestation closes any gate. This draft automates the bounded
+No manual boolean attestation closes any gate. This procedure automates the bounded
 private actions needed for this fixture. Existing manual production cutover and
 rollback procedures remain separate operational tasks. Operator judgment still
 matters when reviewing the retained traces and whether this profile represents
@@ -145,6 +146,17 @@ partial or mismatched evidence fails before writing or using a successful record
 It cross-checks measured UTC/monotonic duration with the eventual successful
 GitHub run's authenticated elapsed interval. The same-run collector is trusted
 reviewed code; file hashes are integrity checks, not independent attestations.
+
+Before collection starts, the workflow authenticates and seals the exact GitHub
+responses needed to validate its source, candidate, CI and published v0.8.2
+rollback evidence. `proof.json` binds that closed endpoint set, its SHA-256,
+source revision, run attempt and capture time. Post-soak verification has no
+network fallback: a missing, extra, changed or stale response fails. This keeps
+the mandatory 24-hour soak independent of the self-hosted job's 24-hour
+[`GITHUB_TOKEN` refresh limit](https://docs.github.com/en/actions/concepts/security/github_token).
+Release promotion separately reauthenticates the completed qualification run and
+all external evidence live with a fresh token. Final artifact upload remains a
+required fail-closed workflow step; an upload failure cannot authorize promotion.
 
 Downloads are size-limited and extracted only after preflighting all member
 names, duplicate paths, link/type collisions and expanded sizes. Absolute paths,

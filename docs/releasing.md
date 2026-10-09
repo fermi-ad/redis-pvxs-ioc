@@ -115,7 +115,8 @@ manual build/push. The same checked-in promotion tool may be run by a maintainer
 with `GH_TOKEN`, registry authentication, and a checkout of the reviewed tag:
 
 ```sh
-python3 scripts/release-image.py promote --tag v0.8.2 --candidate-run RUN_ID
+python3 scripts/release-image.py promote --tag v0.9.0 \
+  --candidate-run CANDIDATE_RUN_ID --qualification-run QUALIFICATION_RUN_ID
 ```
 
 Stable 0.9.0 additionally requires `--qualification-run RUN_ID`. The promotion

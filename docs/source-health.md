@@ -116,20 +116,17 @@ and real PVA to verify partial transport outage, unaffected alias/read access,
 unavailable-backend startup, recovery without cursor rewind, rejected and retained-policy reloads, aggregate
 required/optional readiness, and confirmation cancellation across source epochs.
 
-This development branch pins adapter `94470f5918c4bb544312f32f0e4a09847a122572`
-for the pending upstream repair/API work. It does not assert that upstream is
-merged or independently approved. Native regressions do not qualify a stable
-release, the configured inspection traffic, capacity or the 24-hour Linux soak.
-Repeat qualified image/capacity/soak gates against the reviewed merged adapter
-pin and final candidate. None of these continuity fixes establishes a root cause
-for the historical allocator/cache report.
+The IOC pins merged adapter `69bf18ec403c21ce396759172b24a91506283155`,
+including the upstream source-recovery API changes. Native regressions do not
+qualify a stable release, the configured inspection traffic, capacity or the
+24-hour Linux soak. Repeat qualified image/capacity/soak gates against this
+merged adapter pin and the final candidate, with independent Instrumentation
+review. None of these continuity fixes establishes a root cause for the
+historical allocator/cache report.
 
-That exact development revision includes immutable batch-admission metadata
-for recovery after ACL read rejection. The repaired native validation used the
-same four-file change before it was committed; its source contents now match
-this pin. Delayed scalar or NDArray callbacks cannot acknowledge a later read
-rejection. The upstream PR and this development pin still require independent
-review and merge before release qualification.
+This revision includes immutable batch-admission metadata for recovery after
+ACL read rejection. Delayed scalar or NDArray callbacks cannot acknowledge a
+later read rejection. Final release qualification remains required.
 
 Use a private loopback Redis and identical immutable IOC image/source for each
 inspection comparison. Retain revision, adapter pin, image identity, Redis

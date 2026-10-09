@@ -90,6 +90,7 @@ class ProofFixture:
         write(directory / "ci/candidate-run.json", candidate_run)
         ci = self.ci()
         old_run = self.run(14, "candidate-image.yml", revision=OLD_SHA)
+        old_run["head_branch"] = "dev/runtime-correctness-v0.8.2"
         self.candidate("rollback", old_run, "0.8.2", OLD_SHA, OLD_IMAGE)
         write(directory / "rollback/run.json", old_run)
         released = dict(id=5, tag_name="v0.8.2", draft=False, prerelease=False, published_at=utc(-3600),
@@ -145,7 +146,18 @@ class ProofFixture:
         manifest["observations_sha256"] = contract.digest(journal)
         write(directory / "soak/collector.json", manifest)
         self.rollback()
+        self.seal_preflight()
         self.refresh()
+
+    def seal_preflight(self):
+        def api(endpoint):
+            response = self.api(endpoint)
+            if endpoint == f"repos/{contract.REPOSITORY}/actions/runs/{self.identity['run_id']}":
+                response.update(status="in_progress", conclusion=None, updated_at=utc(-1))
+            return response
+        with patch.object(collector.github, "api", side_effect=api), \
+                patch.object(collector.github, "utc", return_value=utc(-1)):
+            collector.github.seal_preflight(self.directory, self.proof)
 
     def content(self, data):
         return dict(encoding="base64", content=base64.b64encode(data).decode())
@@ -326,6 +338,165 @@ class QualificationContractTests(unittest.TestCase):
         self.assertEqual(record["checks"], sorted(contract.CHECKS))
         self.assertFalse((self.fixture.directory / "qualification.json").exists())
 
+    def change_snapshot(self, function):
+        path = self.fixture.directory / self.fixture.proof["github_snapshot"]["path"]
+        snapshot = contract.parse_json(path.read_bytes())
+        function(snapshot)
+        write(path, snapshot)
+        self.fixture.proof["github_snapshot"]["sha256"] = contract.digest(path)
+        self.fixture.refresh()
+
+    def test_post_soak_verification_uses_sealed_snapshot_with_expired_token(self):
+        with patch.dict("os.environ", {"GH_TOKEN": "expired-token"}), \
+                patch.object(collector.github, "api", side_effect=AssertionError("post-soak API call")), \
+                patch.object(collector.github, "download", side_effect=AssertionError("post-soak download")):
+            record = contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+        self.assertEqual(record["soak_seconds"], 86400)
+        self.assertEqual(record["checks"], sorted(contract.CHECKS))
+
+    def test_collector_finalizes_after_full_soak_without_touching_github(self):
+        from types import SimpleNamespace
+        baseline = contract.read(self.fixture.directory, "rollback/candidate.json")
+        policy = contract.read(self.fixture.directory, "policy.json")
+        ready = (self.fixture.identity, baseline, policy, self.fixture.proof)
+        with patch.object(collector, "prepare", return_value=ready), \
+                patch.object(collector, "Scope"), patch.object(collector, "Collector") as runtime, \
+                patch.object(collector, "command", return_value=json.dumps([dict(Os="linux", Architecture="amd64")])), \
+                patch.object(collector.github, "api", side_effect=AssertionError("post-soak API call")), \
+                patch.object(collector.github, "download", side_effect=AssertionError("post-soak download")), \
+                patch("builtins.print"):
+            runtime.return_value.collect.return_value = 86400.0
+            collector.run(SimpleNamespace(output=self.fixture.directory))
+        record = contract.read(self.fixture.directory, "qualification.json")
+        self.assertEqual(record["soak_seconds"], 86400)
+        self.assertEqual(record["checks"], sorted(contract.CHECKS))
+
+    def test_snapshot_capture_authenticates_before_sealing_and_fails_closed(self):
+        path = self.fixture.directory / "ci/github-preflight.json"
+        path.unlink()
+        self.fixture.proof.pop("github_snapshot")
+        with patch.object(collector.github, "api", side_effect=RuntimeError("authentication failed")):
+            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                collector.github.seal_preflight(self.fixture.directory, self.fixture.proof)
+        self.assertFalse(path.exists())
+        self.assertFalse((self.fixture.directory / "qualification.json").exists())
+
+    def test_missing_snapshot_response_cannot_use_live_fallback(self):
+        self.change_snapshot(lambda data: data["responses"].pop(
+            f"repos/{contract.REPOSITORY}/contents/VERSION?ref={SHA}"))
+        with patch.object(collector.github, "api", side_effect=AssertionError("network fallback")):
+            with self.assertRaisesRegex(ValueError, "missing or extra"):
+                contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_extra_snapshot_endpoint_is_rejected(self):
+        self.change_snapshot(lambda data: data["responses"].update({"repos/other/repository": {}}))
+        with self.assertRaisesRegex(ValueError, "missing or extra"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_snapshot_attempt_and_capture_time_are_bound_to_collection(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/{self.fixture.identity['run_id']}"
+        self.change_snapshot(lambda data: data["responses"][endpoint].update(run_attempt=3))
+        with self.assertRaisesRegex(ValueError, "stale.*attempt"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+        self.change_snapshot(lambda data: (data["responses"][endpoint].update(run_attempt=2),
+                                          data.update(captured_at=utc(1))))
+        with self.assertRaisesRegex(ValueError, "before collection"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_snapshot_run_and_source_identity_cannot_replace_retained_evidence(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/11"
+        self.change_snapshot(lambda data: data["responses"][endpoint].update(run_attempt=2))
+        with self.assertRaisesRegex(ValueError, "stale or mismatched"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_snapshot_source_contents_and_main_branch_are_revalidated_locally(self):
+        endpoint = f"repos/{contract.REPOSITORY}/contents/VERSION?ref={SHA}"
+        self.change_snapshot(lambda data: data["responses"].update({endpoint: self.fixture.content(b"0.9.0-rc.1")}))
+        with self.assertRaisesRegex(ValueError, "VERSION"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+        self.change_snapshot(lambda data: (data["responses"].update({endpoint: self.fixture.content(b"0.9.0")}),
+            data["responses"][f"repos/{contract.REPOSITORY}/actions/runs/11"].update(head_branch="dev/release")))
+        with self.assertRaisesRegex(ValueError, "trusted-main"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_completed_snapshot_cannot_pose_as_in_progress_preflight(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/{self.fixture.identity['run_id']}"
+        self.change_snapshot(lambda data: data["responses"][endpoint].update(status="completed", conclusion="success"))
+        with self.assertRaisesRegex(ValueError, "stale.*attempt"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_annotated_rollback_tag_is_sealed_with_its_exact_object_endpoint(self):
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/git/ref/tags/v0.8.2"] = dict(
+            object=dict(type="tag", sha="f" * 40))
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/git/tags/{'f' * 40}"] = dict(
+            object=dict(type="commit", sha=OLD_SHA))
+        (self.fixture.directory / "ci/github-preflight.json").unlink()
+        self.fixture.seal_preflight()
+        self.fixture.refresh()
+        with patch.object(collector.github, "api", side_effect=AssertionError("post-soak API call")):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+        self.change_snapshot(lambda data: data["responses"].pop(f"repos/{contract.REPOSITORY}/git/tags/{'f' * 40}"))
+        with self.assertRaisesRegex(ValueError, "missing or extra"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_snapshot_bytes_and_unknown_endpoints_are_closed(self):
+        cached = contract.sealed_snapshot_api(self.fixture.directory, self.fixture.proof)
+        with self.assertRaisesRegex(ValueError, "absent from sealed snapshot"):
+            cached("repos/unknown/actions/runs/1")
+        path = self.fixture.directory / "ci/github-preflight.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+        self.fixture.refresh()
+        with self.assertRaisesRegex(ValueError, "changed sealed"):
+            contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+
+    def test_promotion_still_reauthenticates_live_with_no_snapshot_fallback(self):
+        contract.verify_collected_bundle(self.fixture.directory, self.fixture.record)
+        with self.assertRaisesRegex(RuntimeError, "fresh authentication required"):
+            contract.verify_bundle(self.fixture.directory, self.fixture.record, self.fixture.own_run,
+                lambda endpoint: (_ for _ in ()).throw(RuntimeError("fresh authentication required")))
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/11"]["run_attempt"] = 2
+        self.reject("stale or mismatched")
+
+    def test_published_baseline_acquisition_accepts_release_branch(self):
+        with tempfile.TemporaryDirectory(prefix="baseline-acquisition-") as temporary:
+            root = Path(temporary)
+            assets = root / "assets"
+            assets.mkdir()
+            candidate_asset = assets / "candidate.json"
+            candidate_asset.write_bytes((self.fixture.directory / "rollback/candidate.json").read_bytes())
+            archive = assets / "release-evidence.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                for name in ("candidate.json", *contract.ATTESTATIONS):
+                    bundle.add(self.fixture.directory / "rollback" / name, arcname="candidate/" + name)
+            release = dict(id=5, tag_name="v0.8.2", draft=False, prerelease=False,
+                published_at=utc(-3600), assets=[
+                    dict(id=41, name="candidate.json", size=candidate_asset.stat().st_size,
+                         digest="sha256:" + contract.digest(candidate_asset)),
+                    dict(id=42, name="release-evidence.tar.gz", size=archive.stat().st_size,
+                         digest="sha256:" + contract.digest(archive))])
+            endpoints = {
+                f"repos/{contract.REPOSITORY}/releases/tags/v0.8.2": release,
+                f"repos/{contract.REPOSITORY}/actions/runs/14":
+                    self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"],
+                f"repos/{contract.REPOSITORY}/git/ref/tags/v0.8.2":
+                    dict(object=dict(type="commit", sha=OLD_SHA)),
+            }
+            sources = {
+                f"repos/{contract.REPOSITORY}/releases/assets/41": candidate_asset,
+                f"repos/{contract.REPOSITORY}/releases/assets/42": archive,
+            }
+            def download(endpoint, output, limit=None, binary=False):
+                output.write_bytes(sources[endpoint].read_bytes())
+            destination = root / "collected"
+            destination.mkdir()
+            with patch.object(collector.github, "api",
+                              side_effect=lambda endpoint: copy.deepcopy(endpoints[endpoint])), \
+                    patch.object(collector.github, "download", side_effect=download):
+                candidate = collector.baseline_evidence(destination)
+            self.assertEqual(candidate["revision"], OLD_SHA)
+            self.assertEqual(contract.read(destination, "rollback/run.json")["head_branch"],
+                             "dev/runtime-correctness-v0.8.2")
+
     def reject(self, message=None):
         self.fixture.refresh()
         with self.assertRaisesRegex(ValueError, message or "."):
@@ -343,6 +514,32 @@ class QualificationContractTests(unittest.TestCase):
     def test_same_source_pr_or_fork_evidence_is_rejected(self):
         self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12"]["event"] = "pull_request"
         self.reject("trusted-main")
+
+    def test_final_candidate_remains_main_only(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/11"
+        self.fixture.remote[endpoint]["head_branch"] = "dev/release-0.9.0"
+        self.reject("trusted-main")
+
+    def test_release_branch_override_is_published_candidate_only(self):
+        baseline = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"]
+        with self.assertRaisesRegex(ValueError, "trusted-main"):
+            contract.validate_run(baseline, OLD_SHA, "candidate-image.yml", dispatch_only=True)
+        contract.validate_run(baseline, OLD_SHA, "candidate-image.yml", dispatch_only=True,
+                              published_baseline=True)
+        native = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12"]
+        with self.assertRaisesRegex(ValueError, "candidate-only"):
+            contract.validate_run(native, SHA, "native.yml", published_baseline=True)
+        with self.assertRaisesRegex(ValueError, "candidate-only"):
+            contract.validate_run(self.fixture.own_run, SHA, "qualify-image.yml", dispatch_only=True,
+                                  active=True, published_baseline=True)
+
+    def test_published_baseline_live_metadata_cannot_change(self):
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"]["head_branch"] = "dev/other"
+        self.reject("stale or mismatched")
+
+    def test_published_baseline_still_requires_dispatch_evidence(self):
+        self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/14"]["event"] = "pull_request"
+        self.reject("published-baseline")
 
     def test_rerun_attempt_invalidates_retained_ci(self):
         self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12"]["run_attempt"] = 2
@@ -400,7 +597,7 @@ class QualificationContractTests(unittest.TestCase):
     def test_another_candidate_digest_is_rejected(self):
         self.fixture.proof["identity"]["image"] = OLD_IMAGE
         self.fixture.mutate("runtime-ownership.json", lambda r: r.update(identity=self.fixture.identity))
-        self.reject("different candidate")
+        self.reject("different candidate|snapshot attempt/source identity")
 
     def test_partial_or_lost_imaging_is_rejected(self):
         self.fixture.mutate(self.fixture.proof["frames"]["report"], lambda r: r.update(frames=599, pixels_checked=599 * 1920 * 1080))

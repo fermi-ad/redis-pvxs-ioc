@@ -11,6 +11,8 @@ is the release checklist and maps each review finding to an outcome.
 
 - PVA-only serving without an EPICS database layer
 - `NTScalar` and `NTScalarArray` values
+- read-only Redis-backed `NTNDArray` image values with envelope/pixel validation
+  and last-good-frame preservation
 - Redis-backed read, write, and confirmed readback routes
 - one or many standalone Redis backends per config generation
 - metadata, display/control limits, scalar alarms, and linear transforms
@@ -34,7 +36,8 @@ is the release checklist and maps each review finding to an outcome.
 
 - Redis-backed PV definitions or metadata; definitions still come from YAML
 - Channel Access in the main runtime
-- normative types beyond `NTScalar` and `NTScalarArray`
+- normative types beyond `NTScalar`, `NTScalarArray`, and the supported read-only
+  `NTNDArray` adapter
 - Redis Cluster
 - general-purpose IOC hosting or in-process support-module loading
 - hot changes to server instance, namespace, interfaces, ports, or beacon settings

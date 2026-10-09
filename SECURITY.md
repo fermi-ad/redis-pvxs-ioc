@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest `0.6.x` release line. Older releases may
+Security fixes are applied to the latest stable release. Older releases may
 be assessed when an affected deployment cannot upgrade immediately, but they do
 not receive routine fixes.
 

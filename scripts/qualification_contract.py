@@ -164,11 +164,21 @@ def immutable_image(value):
     return value
 
 
-def validate_run(info, revision, workflow, dispatch_only=False, active=False):
-    require(info.get("head_sha") == revision and info.get("head_branch") == "main"
+def validate_run(info, revision, workflow, dispatch_only=False, active=False, *,
+                 published_baseline=False):
+    if published_baseline:
+        require(workflow == "candidate-image.yml" and dispatch_only and not active,
+                "published baseline run validation is candidate-only")
+    # The published v0.8.2 release binds its exact candidate run to an immutable
+    # tag, asset checksums and source revision. Only that rollback path may use
+    # its historical release branch; all current release evidence remains main-only.
+    branch = info.get("head_branch")
+    branch_matches = branch == "main" or (
+        published_baseline and isinstance(branch, str) and bool(branch.strip()))
+    require(info.get("head_sha") == revision and branch_matches
             and info.get("path") == ".github/workflows/" + workflow
             and info.get("event") in ({"workflow_dispatch"} if dispatch_only else {"push", "workflow_dispatch"}),
-            "run is not matching trusted-main evidence")
+            "run is not matching trusted-main or published-baseline evidence")
     require(info.get("repository", {}).get("full_name") == REPOSITORY
             and info.get("head_repository", {}).get("full_name") == REPOSITORY,
             "run repository identity mismatch")
@@ -182,12 +192,15 @@ def validate_run(info, revision, workflow, dispatch_only=False, active=False):
     return info
 
 
-def authenticated_run(retained, api, revision, workflow, dispatch_only=False, active=False):
+def authenticated_run(retained, api, revision, workflow, dispatch_only=False, active=False, *,
+                      published_baseline=False):
     live = api(f"repos/{REPOSITORY}/actions/runs/{integer(retained.get('id'), 'run ID', 1)}")
-    validate_run(live, revision, workflow, dispatch_only, active)
+    validate_run(live, revision, workflow, dispatch_only=dispatch_only, active=active,
+                 published_baseline=published_baseline)
     for field in ("id", "run_attempt", "head_sha", "head_branch", "event", "path", "run_started_at"):
         require(retained.get(field) == live.get(field), "stale or mismatched run metadata: " + field)
-    validate_run(retained, revision, workflow, dispatch_only, active)
+    validate_run(retained, revision, workflow, dispatch_only=dispatch_only, active=active,
+                 published_baseline=published_baseline)
     return live
 
 
@@ -618,13 +631,14 @@ def validate_soak(directory, item, identity, policy, run_info):
     return seconds, events
 
 
-def validate_rollback(directory, item, identity, api, qualification_run):
-    report = read(directory, item["report"])
+def validate_baseline_evidence(directory, item, api):
+    """Authenticate the published rollback identity before running workloads."""
     baseline = read(directory, item["candidate"])
     revision = baseline.get("revision", "")
     require(SHA.fullmatch(revision), "invalid rollback source revision")
     retained = read(directory, item["run"])
-    run_info = authenticated_run(retained, api, revision, "candidate-image.yml", dispatch_only=True)
+    run_info = authenticated_run(retained, api, revision, "candidate-image.yml", dispatch_only=True,
+                                 published_baseline=True)
     validate_candidate(baseline, directory, item["candidate"].removesuffix("candidate.json"), run_info, "0.8.2", revision)
     release = read(directory, item["release"])
     live = api(f"repos/{REPOSITORY}/releases/tags/v0.8.2")
@@ -638,6 +652,12 @@ def validate_rollback(directory, item, identity, api, qualification_run):
     if live_tag.get("type") == "tag":
         live_tag = api(f"repos/{REPOSITORY}/git/tags/{live_tag['sha']}")["object"]
     require(tag == live_tag and tag.get("type") == "commit" and tag.get("sha") == revision, "rollback release tag/source mismatch")
+    return baseline
+
+
+def validate_rollback(directory, item, identity, api, qualification_run):
+    report = read(directory, item["report"])
+    baseline = validate_baseline_evidence(directory, item, api)
     require(report.get("baseline_candidate_sha256") == digest(evidence_path(directory, item["candidate"]))
             and report.get("candidate_image") == identity["image"] and report.get("baseline_image") == baseline["image"]
             and report.get("baseline_version") == "0.8.2", "rollback image identity mismatch")
@@ -686,27 +706,9 @@ def validate_rollback(directory, item, identity, api, qualification_run):
             sequence[2]["pva"]["array"] > sequence[1]["pva"]["array"], "rollback lacks fresh restored PVA content")
 
 
-def verify_bundle(directory, record, run_info, api, active=False):
-    require(type(record.get("schema")) is int and record.get("schema") == 1, "missing qualification proof schema")
-    version, revision = record.get("version", ""), record.get("revision", "")
-    require(version == "0.9.0" and SHA.fullmatch(revision),
-            "qualification policy supports only exact final merged VERSION 0.9.0")
-    validate_run(run_info, revision, "qualify-image.yml", dispatch_only=True, active=active)
-    require(record.get("run_id") == run_info["id"] and record.get("run_attempt") == run_info["run_attempt"]
-            and record.get("platform") == "linux/amd64", "qualification run/platform mismatch")
-    immutable_image(record.get("image"))
-    require(record.get("evidence") == inventory(directory, {"qualification.json"}), "qualification evidence missing, extra, or changed")
-    proof = read(directory, "proof.json")
-    identity = proof["identity"]
-    for key in ("version", "revision", "image", "run_id", "run_attempt", "platform"):
-        require(identity.get(key) == record[key], "qualification proof identity mismatch")
-    require(re.fullmatch(r"qualification-[0-9]+-[0-9]+-[0-9a-f]{12}", identity.get("scope", "")), "invalid private scope")
-    ownership = read(directory, "runtime-ownership.json")
-    require(ownership.get("identity") == identity and ownership.get("closed") is True and ownership.get("containers") == {}
-            and ownership.get("network") is None and ownership.get("builder") is None and ownership.get("images") == [],
-            "qualification private resources were not cleaned up")
-    require(ownership.get("planned") == dict(containers={}, network=None, builder=None, images=[]),
-            "qualification has unresolved planned resources")
+def validate_external_evidence(directory, proof, identity, api):
+    """Validate source, CI and candidate identities using an explicit API source."""
+    revision, version = identity["revision"], identity["version"]
     comparison = api(f"repos/{REPOSITORY}/compare/{revision}...main")
     require(comparison.get("status") in {"ahead", "identical"} and comparison.get("merge_base_commit", {}).get("sha") == revision,
             "candidate source is not merged into main")
@@ -720,8 +722,7 @@ def verify_bundle(directory, record, run_info, api, active=False):
     require(policy_source.get("encoding") == "base64" and
             hashlib.sha256(base64.b64decode(policy_source["content"])).hexdigest() == digest(evidence_path(directory, proof["policy"])),
             "qualification policy is not the reviewed source policy")
-    instrument = read(directory, "proof.json").get("instrumentation")
-    instrumentation_hash = digest(evidence_path(directory, instrument))
+    instrumentation_hash = digest(evidence_path(directory, proof["instrumentation"]))
     instrumentation_source = api(f"repos/{REPOSITORY}/contents/scripts/qualification-timings.patch?ref={revision}")
     require(instrumentation_source.get("encoding") == "base64" and
             hashlib.sha256(base64.b64decode(instrumentation_source["content"])).hexdigest() == instrumentation_hash,
@@ -729,9 +730,108 @@ def verify_bundle(directory, record, run_info, api, active=False):
     candidate_run = authenticated_run(read(directory, proof["candidate"]["run"]), api, revision, "candidate-image.yml", dispatch_only=True)
     candidate = read(directory, proof["candidate"]["record"])
     validate_candidate(candidate, directory, "candidate/", candidate_run, version, revision)
-    require(candidate["image"] == record["image"] and record.get("candidate_run") == candidate_run["id"]
-            and record.get("candidate_attempt") == candidate_run["run_attempt"], "qualification tested a different candidate run/digest")
+    require(candidate["image"] == identity["image"], "qualification tested a different candidate run/digest")
     validate_ci(directory, proof["ci"], revision, api)
+    return candidate_run, policy, instrumentation_hash
+
+
+def snapshot_endpoints(directory, proof, tag_object):
+    """Closed endpoint set derived from this attempt's retained evidence."""
+    identity = proof["identity"]
+    revision = identity["revision"]
+    require(SHA.fullmatch(revision), "invalid snapshot source revision")
+    prefix = f"repos/{REPOSITORY}/"
+    endpoints = {prefix + f"compare/{revision}...main", prefix + "releases/tags/v0.8.2",
+                 prefix + "git/ref/tags/v0.8.2",
+                 prefix + f"actions/runs/{integer(identity['run_id'], 'run ID', 1)}"}
+    for path in ("VERSION", "docs/qualification-policy.json", "scripts/qualification-timings.patch",
+                 "CMakeLists.txt", ".github/workflows/native.yml"):
+        endpoints.add(prefix + f"contents/{path}?ref={revision}")
+    for path in (proof["candidate"]["run"], proof["rollback"]["run"],
+                 proof["ci"]["native"]["run"], proof["ci"]["image"]["run"]):
+        retained = read(directory, path)
+        run_id = integer(retained.get("id"), "run ID", 1)
+        endpoints.add(prefix + f"actions/runs/{run_id}")
+    for kind in ("native", "image"):
+        retained = read(directory, proof["ci"][kind]["run"])
+        attempt = integer(retained.get("run_attempt"), "run attempt", 1)
+        endpoints.add(prefix + f"actions/runs/{retained['id']}/attempts/{attempt}/jobs?per_page=100")
+    require(isinstance(tag_object, dict) and tag_object.get("type") in {"tag", "commit"}
+            and SHA.fullmatch(tag_object.get("sha", "")), "invalid snapshot rollback tag")
+    if tag_object["type"] == "tag":
+        endpoints.add(prefix + f"git/tags/{tag_object['sha']}")
+    return endpoints
+
+
+def sealed_snapshot_api(directory, proof):
+    """No network fallback: this snapshot is collector evidence, not promotion authentication."""
+    import copy
+    binding = proof.get("github_snapshot", {})
+    require(binding.get("path") == "ci/github-preflight.json" and
+            binding.get("sha256") == digest(evidence_path(directory, binding.get("path", ""))),
+            "missing or changed sealed GitHub snapshot")
+    snapshot = read(directory, binding["path"])
+    require(type(snapshot.get("schema")) is int and snapshot["schema"] == 1
+            and snapshot.get("identity") == proof["identity"], "GitHub snapshot attempt/source identity mismatch")
+    responses = snapshot.get("responses")
+    require(isinstance(responses, dict), "missing GitHub snapshot responses")
+    tag_endpoint = f"repos/{REPOSITORY}/git/ref/tags/v0.8.2"
+    require(isinstance(responses.get(tag_endpoint), dict), "missing GitHub snapshot rollback tag")
+    expected = snapshot_endpoints(directory, proof, responses[tag_endpoint].get("object"))
+    require(set(responses) == expected and all(isinstance(value, dict) for value in responses.values()),
+            "missing or extra GitHub snapshot endpoints")
+    own = responses[f"repos/{REPOSITORY}/actions/runs/{proof['identity']['run_id']}"]
+    validate_run(own, proof["identity"]["revision"], "qualify-image.yml", dispatch_only=True, active=True)
+    require(own["status"] == "in_progress" and own["id"] == proof["identity"]["run_id"]
+            and own["run_attempt"] == proof["identity"]["run_attempt"],
+            "stale GitHub snapshot qualification attempt")
+    captured = timestamp(snapshot.get("captured_at"))
+    require(timestamp(own["run_started_at"]) <= captured <= dt.datetime.now(dt.timezone.utc).timestamp(),
+            "invalid GitHub snapshot capture time")
+    if (Path(directory) / proof["soak"]["manifest"]).exists():
+        require(captured <= timestamp(read(directory, proof["soak"]["manifest"])["started_at"]),
+                "GitHub snapshot was not sealed before collection")
+    def cached(endpoint):
+        require(endpoint in responses, "GitHub endpoint absent from sealed snapshot")
+        return copy.deepcopy(responses[endpoint])
+    return cached
+
+
+def verify_collected_bundle(directory, record):
+    """Collector-only active verification after the mandatory day, without credentials."""
+    proof = read(directory, "proof.json")
+    cached = sealed_snapshot_api(directory, proof)
+    own = cached(f"repos/{REPOSITORY}/actions/runs/{proof['identity']['run_id']}")
+    return verify_bundle(directory, record, own, cached, active=True)
+
+
+def verify_bundle(directory, record, run_info, api, active=False):
+    require(type(record.get("schema")) is int and record.get("schema") == 1, "missing qualification proof schema")
+    version, revision = record.get("version", ""), record.get("revision", "")
+    require(version == "0.9.0" and SHA.fullmatch(revision),
+            "qualification policy supports only exact final merged VERSION 0.9.0")
+    validate_run(run_info, revision, "qualify-image.yml", dispatch_only=True, active=active)
+    require(record.get("run_id") == run_info["id"] and record.get("run_attempt") == run_info["run_attempt"]
+            and record.get("platform") == "linux/amd64", "qualification run/platform mismatch")
+    immutable_image(record.get("image"))
+    require(record.get("evidence") == inventory(directory, {"qualification.json"}), "qualification evidence missing, extra, or changed")
+    proof = read(directory, "proof.json")
+    # Promotion still uses its live API below. The preflight snapshot is bound
+    # evidence and cannot authorize a completed workflow or replace live checks.
+    sealed_snapshot_api(directory, proof)
+    identity = proof["identity"]
+    for key in ("version", "revision", "image", "run_id", "run_attempt", "platform"):
+        require(identity.get(key) == record[key], "qualification proof identity mismatch")
+    require(re.fullmatch(r"qualification-[0-9]+-[0-9]+-[0-9a-f]{12}", identity.get("scope", "")), "invalid private scope")
+    ownership = read(directory, "runtime-ownership.json")
+    require(ownership.get("identity") == identity and ownership.get("closed") is True and ownership.get("containers") == {}
+            and ownership.get("network") is None and ownership.get("builder") is None and ownership.get("images") == [],
+            "qualification private resources were not cleaned up")
+    require(ownership.get("planned") == dict(containers={}, network=None, builder=None, images=[]),
+            "qualification has unresolved planned resources")
+    candidate_run, policy, instrumentation_hash = validate_external_evidence(directory, proof, identity, api)
+    require(record.get("candidate_run") == candidate_run["id"]
+            and record.get("candidate_attempt") == candidate_run["run_attempt"], "qualification tested a different candidate run/digest")
     seconds, events = validate_soak(directory, proof["soak"], identity, policy, run_info)
     frame_report, frame_run = execution(directory, proof["frames"], identity)
     validate_frames(frame_report, frame_run, policy)

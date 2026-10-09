@@ -1,12 +1,12 @@
 # Candidate qualification for v0.9.0
 
-This workflow and proof contract are draft preparation. They are not evidence
-that a candidate, development image, or release has passed qualification. The
-current 0.8.x preparation source cannot start qualification: the collector
-requires exact final `VERSION=0.9.0`, all merged feature tools, successful CI on
-that same main revision, an attested candidate digest, and a published qualified
-v0.8.2 rollback release. Upstream dependency changes and this procedure require
-independent Instrumentation review and protected-main merge before execution.
+This workflow and proof contract define the candidate qualification procedure.
+The tooling alone is not evidence that a candidate, development image, or release
+has passed qualification. The collector requires exact final `VERSION=0.9.0`,
+all merged feature tools, successful CI on that same main revision, an attested
+candidate digest, and a published qualified v0.8.2 rollback release. The final
+runtime, dependency pins and representative policy choices require independent
+Instrumentation review and protected-main merge before execution.
 No final soak or 600-frame acceptance is run as part of tooling unit tests.
 
 ## Run and retain evidence

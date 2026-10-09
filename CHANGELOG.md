@@ -2,6 +2,20 @@
 
 ## v0.9.0 - unreleased
 
+- add native RecCeiver discovery with catalog updates after successful reloads
+  and recovery after receiver restarts; retire the conventional IOC sidecar
+- validate versioned configuration strictly, report offline configuration
+  differences, and reserve canonical, alias, admin and reflected RPC names
+- make runtime reload transactional while retaining unchanged backends and
+  subscriptions; expose structured reload phase, outcome and timing diagnostics
+- bound asynchronous writes, RPC and alarm publication; enforce finite operation
+  deadlines and dispatch-time authorization, and reconcile alarms after recovery
+- add read-only Redis-backed NTNDArray PVs with validated envelope/pixel data,
+  last-good-frame preservation and malformed-input recovery
+- separate optional gRPC and ChannelFinder integrations, bound HTTP requests,
+  and support mounted credentials with a non-root container runtime
+- pin build inputs and retain source inventory, SBOM and provenance; require
+  measured candidate qualification and immutable digest promotion for v0.9.0
 - report Redis source readiness, monotonic freshness, exact cursors and stream
   epochs; retain last-good values/time through source failures and fence
   confirmations across stream replacement

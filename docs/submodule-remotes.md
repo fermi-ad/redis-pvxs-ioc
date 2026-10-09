@@ -32,15 +32,15 @@ gitlink, verify that its public remote contains the exact pinned commit.
 ### `third_party/redis-adapter`
 
 - Published `.gitmodules` URL: `https://github.com/fermi-ad/redis-adapter.git`
-- Pinned commit: `94470f5918c4bb544312f32f0e4a09847a122572`
-- Publish status: published development commit; merge and release qualification pending
-- Verified remote branch: `dev/stream-recovery-status`
+- Pinned commit: `69bf18ec403c21ce396759172b24a91506283155`
+- Publish status: merged source; final candidate release qualification pending
+- Upstream merge: [redis-adapter #132](https://github.com/fermi-ad/redis-adapter/pull/132)
 - Upstream change: [redis-adapter #111](https://github.com/fermi-ad/redis-adapter/pull/111),
   following #127 → #108 → #109. Source-health callbacks use its immutable batch
   epoch/rejection metadata; the earlier callback API remains compatible.
-- Release gate: keep source-health preparation in draft until the upstream
-  sequence is reviewed and merged, replace this development pin with the exact
-  reviewed merged revision, and pass strict CI plus Instrumentation review.
+- Release gate: qualify the final IOC candidate against this merged revision,
+  with strict CI and independent Instrumentation review. Merged source alone is
+  not release qualification evidence.
 
 ### `third_party/yaml-cpp`
 

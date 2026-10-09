@@ -18,12 +18,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             sanitizer: none
+            evidence: linux-minimal
           - runner: ubuntu-24.04-arm
             sanitizer: none
+            evidence: linux-arm-informational
           - runner: macos-14
             sanitizer: none
+            evidence: macos-minimal
           - runner: ubuntu-24.04
             sanitizer: address,undefined
+            evidence: linux-sanitizer
     runs-on: ${{ matrix.runner }}
     # Linux ARM is a portability signal, not a 0.9.0 release platform.
     continue-on-error: ${{ matrix.runner == 'ubuntu-24.04-arm' }}
@@ -56,6 +60,8 @@ jobs:
           SANITIZERS: ${{ matrix.sanitizer }}
           INTEGRATIONS: ${{ matrix.sanitizer == 'none' && 'OFF' || 'ON' }}
         run: |
+          mkdir -p build
+          printf 'INTEGRATIONS: %s\nSANITIZERS: %s\n' "$INTEGRATIONS" "$SANITIZERS" > build/native-qualification.log
           flags=""
           if test "$SANITIZERS" != none; then flags="-fsanitize=$SANITIZERS -fno-omit-frame-pointer"; fi
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
@@ -66,7 +72,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure 2>&1 | tee -a build/native-qualification.log
       - name: Check out the receiver acceptance dependency
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -80,4 +86,12 @@ jobs:
           build/recceiver-venv/bin/python scripts/run-with-redis.py --redis-server "$(command -v redis-server)" -- \
             build/recceiver-venv/bin/python tests/recceiver_acceptance.py \
             --source build/recceiver-source/server --ioc build/redis-pvxs-ioc \
-            --pvxget "third_party/pvxs/bin/$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)/pvxget"
+            --pvxget "third_party/pvxs/bin/$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)/pvxget" \
+            2>&1 | tee -a build/native-qualification.log
+      - name: Retain native qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-qualification-${{ matrix.evidence }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/native-qualification.log
+          retention-days: 90
+          if-no-files-found: error

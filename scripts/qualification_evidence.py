@@ -4,6 +4,7 @@ import datetime as dt
 import os
 from pathlib import Path
 import selectors
+import shutil
 import subprocess
 import tempfile
 import time
@@ -89,11 +90,12 @@ def seal_preflight(directory, proof):
     contract.sealed_snapshot_api(directory, proof)
 
 
-def artifact(run_info, kind, destination):
+def named_artifact(run_info, name, destination):
     run_id, attempt = run_info["id"], run_info["run_attempt"]
+    require(isinstance(name, str) and len(name) <= 200, "invalid evidence artifact name")
     response = api(f"repos/{REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100")
     require(response.get("total_count") == len(response.get("artifacts", [])), "artifact list incomplete")
-    selected = [a for a in response["artifacts"] if a.get("name") == f"release-{kind}-{run_id}-{attempt}"]
+    selected = [a for a in response["artifacts"] if a.get("name") == name]
     require(len(selected) == 1, "missing or ambiguous named evidence artifact")
     value = selected[0]
     require(value.get("expired") is False and value.get("workflow_run", {}).get("id") == run_id
@@ -103,8 +105,16 @@ def artifact(run_info, kind, destination):
     with tempfile.TemporaryDirectory(prefix="qualification-artifact-") as temporary:
         archive = Path(temporary) / "artifact.zip"
         download(f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip", archive)
+        if value.get("digest") is not None:
+            require(value["digest"] == "sha256:" + contract.digest(archive),
+                    "evidence artifact digest mismatch")
         extract_archive(archive, destination)
-    return value
+    return dict(id=artifact_id, name=value["name"], size_in_bytes=value["size_in_bytes"],
+                digest=value.get("digest"), expired=value["expired"], workflow_run=value["workflow_run"])
+
+
+def artifact(run_info, kind, destination):
+    return named_artifact(run_info, f"release-{kind}-{run_info['id']}-{run_info['run_attempt']}", destination)
 
 
 def retained_run(run_id, revision, workflow, destination, dispatch_only=False, *,
@@ -124,11 +134,23 @@ def retained_ci(kind, run_id, revision, directory):
     jobs = api(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{run_info['run_attempt']}/jobs?per_page=100")
     require(jobs.get("total_count") == len(jobs.get("jobs", [])), "CI job list incomplete")
     job_path.write_text(json.dumps(jobs, indent=2) + "\n")
-    logs = {}
+    logs, artifacts = {}, {}
     for job in jobs["jobs"]:
-        if kind == "native" and job.get("name") in {
-                "native (macos-14, none)", "native (ubuntu-24.04, none)", "native (ubuntu-24.04, address,undefined)"}:
+        if kind == "native" and job.get("name") in contract.NATIVE_EVIDENCE:
             path = directory / ("job-" + str(integer(job["id"], "job ID", 1)) + ".log")
-            download(f"repos/{REPOSITORY}/actions/jobs/{job['id']}/logs", path, 32 * 1024**2)
+            artifact_path = directory / ("job-" + str(job["id"]) + "-artifact.json")
+            name = contract.native_evidence_name(job["name"], run_info["id"], run_info["run_attempt"])
+            with tempfile.TemporaryDirectory(prefix="qualification-native-") as temporary:
+                extracted = Path(temporary) / "evidence"
+                metadata = named_artifact(run_info, name, extracted)
+                source = extracted / "native-qualification.log"
+                require(source.is_file() and not source.is_symlink()
+                        and source.stat().st_size <= contract.MAX_FILE_BYTES,
+                        "missing or oversized native qualification log")
+                require({item.relative_to(extracted).as_posix() for item in extracted.rglob("*") if item.is_file()}
+                        == {"native-qualification.log"}, "native qualification artifact has extra files")
+                shutil.copyfile(source, path)
+            artifact_path.write_text(json.dumps(metadata, indent=2) + "\n")
             logs[job["name"]] = "ci/" + path.name
-    return dict(run="ci/" + run_path.name, jobs="ci/" + job_path.name, logs=logs)
+            artifacts[job["name"]] = "ci/" + artifact_path.name
+    return dict(run="ci/" + run_path.name, jobs="ci/" + job_path.name, logs=logs, artifacts=artifacts)

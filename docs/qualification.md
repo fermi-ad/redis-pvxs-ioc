@@ -124,6 +124,22 @@ content after recovery. A reload must publish the observed next generation and
 different config bytes while continuous sources stay valid. No percentage of
 unexplained failures or stalls is accepted.
 
+The continuous producer keeps its atomic progress snapshot and bounded failure
+ledger in the helper's existing 16 MiB `/tmp` tmpfs. Host evidence-disk latency
+therefore cannot block the 100 Hz source loop. Observations and fault boundaries
+read the original producer timestamps through the owned helper; after stopping
+the producer, both files are retained in the evidence bundle before helper
+cleanup, on success and failure. The two-second scheduling, three-second
+progress freshness, four-second request and 45-second observation bounds are
+unchanged. Real producer stalls stop collection immediately, and the initial
+capacity sweep is verified before collecting the rest of the day.
+
+Capacity monitors distinguish sample publications from metadata-only PVA
+notifications using the payload and acquisition-timestamp delta marks. A
+description-only reload retains the current sample and reports its notification
+as `metadata_only_updates`. A repeated update with sample marks still counts as
+a duplicate and fails the lossless acceptance requirement.
+
 The hourly fan-out gate checks measured `produced_hz`, not only the requested
 1000 Hz label. The release acceptance interval is 999–1002 Hz. Its small
 asymmetry includes the existing capacity client's sample-count/span convention

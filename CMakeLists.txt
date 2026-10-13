@@ -339,6 +339,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     -- $<TARGET_FILE:runtime_tests>)
   set_tests_properties(runtime_tests PROPERTIES TIMEOUT 75)
 
+  add_executable(reload_monitor_tests tests/reload_monitor_tests.cpp)
+  target_link_libraries(reload_monitor_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(reload_monitor_tests PRIVATE -UNDEBUG)
+  add_test(NAME reload_monitor_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:reload_monitor_tests>)
+  set_tests_properties(reload_monitor_tests PROPERTIES TIMEOUT 30)
+
   add_executable(source_health_tests tests/source_health_tests.cpp)
   target_link_libraries(source_health_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(source_health_tests PRIVATE -UNDEBUG)

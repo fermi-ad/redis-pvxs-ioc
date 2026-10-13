@@ -1,6 +1,7 @@
 // Bounded Redis -> external IOC -> PVA measurement. Fan-out uses independent
 // client contexts monitoring one canonical PV from a private Redis stream.
 #include "RedisAdapter.hpp"
+#include "redis_pvxs_ioc/monitor_sample.h"
 #include <pvxs/client.h>
 #include <pvxs/log.h>
 #include <algorithm>
@@ -66,7 +67,7 @@ int main(int argc, char** argv) {
     std::string failure;
     struct Observations {
       bool initial = false;
-      uint32_t last = 0, received = 0, duplicates = 0;
+      uint32_t last = 0, received = 0, duplicates = 0, metadataOnly = 0;
       std::vector<double> latency;
       pvxs::client::SubscriptionStat queue;
     };
@@ -114,6 +115,10 @@ int main(int argc, char** argv) {
             }
             require(id <= samples && id >= observed.last && sent[id] != Clock::time_point{}, "invalid sample order/identity");
             require(value["alarm.severity"].as<int32_t>() == 0, "sample has invalid alarm");
+            if (!redis_pvxs_ioc::monitorPublishesSample(value)) {
+              require(id == observed.last, "metadata update changed sample identity");
+              ++observed.metadataOnly; continue;
+            }
             if (id == observed.last) { ++observed.duplicates; continue; }
             observed.last = id; ++observed.received;
             observed.latency.push_back(std::chrono::duration<double, std::milli>(arrived - sent[id]).count());
@@ -159,12 +164,13 @@ int main(int argc, char** argv) {
       if (!failure.empty()) throw std::runtime_error(failure);
     }
     const auto seconds = std::chrono::duration<double>(Clock::now() - start).count();
-    uint64_t received = 0, duplicates = 0, serverSquash = 0, clientSquash = 0, maxQueue = 0;
+    uint64_t received = 0, duplicates = 0, metadataOnly = 0, serverSquash = 0, clientSquash = 0, maxQueue = 0;
     std::vector<double> latency;
     for (uint32_t i = 0; i < count; ++i) {
       monitors[i]->cancel(); monitors[i]->stats(observations[i].queue);
       const auto& o = observations[i];
       received += o.received; duplicates += o.duplicates;
+      metadataOnly += o.metadataOnly;
       serverSquash += o.queue.nSrvSquash; clientSquash += o.queue.nCliSquash;
       maxQueue = std::max(maxQueue, uint64_t(o.queue.maxQueue));
       latency.insert(latency.end(), o.latency.begin(), o.latency.end());
@@ -185,6 +191,7 @@ int main(int argc, char** argv) {
            << ",\"connection_setup_seconds\":" << connectionSeconds << ",\"produced_hz\":" << samples / producedSeconds << ",\"elapsed_seconds\":" << seconds
            << ",\"received\":" << received << ",\"missed_updates\":" << uint64_t(samples) * count - received
            << ",\"duplicate_updates\":" << duplicates << ",\"final_values_converged\":true"
+           << ",\"metadata_only_updates\":" << metadataOnly
            << ",\"latency_p50_ms\":" << quantile(.5) << ",\"latency_p95_ms\":" << quantile(.95)
            << ",\"latency_p99_ms\":" << quantile(.99) << ",\"producer_max_late_ms\":" << maxLate
            << ",\"monitor_queue_limit\":16,\"monitor_queue_peak\":" << maxQueue

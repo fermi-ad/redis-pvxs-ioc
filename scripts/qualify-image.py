@@ -27,6 +27,7 @@ BUILDER_OWNER = "REDIS_PVXS_QUALIFICATION_SCOPE"
 REDIS_IMAGE = "redis:7.4.2@sha256:fbdbaea47b9ae4ecc2082ecdb4e1cea81e32176ffb1dcf643d422ad07427e5d9"
 BUILDKIT_IMAGE = "moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
 WORK = "/opt/redis-pvxs-ioc"
+PRODUCER_DIRECTORY = "/tmp/qualification-producer"
 
 
 def utc():
@@ -531,9 +532,28 @@ class Collector:
         self.scope.own(container)
         self.producer = subprocess.Popen(["docker", "exec", container, "/usr/bin/python3",
             WORK + "/scripts/qualification-traffic.py", "producer", "--host", "redis", "--base", "soak",
-            "--output", "/evidence/runtime/producer.json", "--duration", "93600"],
+            "--output", PRODUCER_DIRECTORY + "/producer.json", "--duration", "93600"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.eventually(lambda: (self.runtime / "producer.json").is_file())
+        self.eventually(self.producer_progress)
+
+    def producer_progress(self):
+        # Keep 100 Hz production independent of host evidence-disk latency.
+        # /tmp is the helper's existing bounded tmpfs. The timestamp comes from
+        # the producer, never from this read or a subsequent evidence write.
+        return contract.parse_json(self.scope.exec("tools", "/bin/cat", PRODUCER_DIRECTORY + "/producer.json"))
+
+    def retain_producer_evidence(self):
+        # Called after stopping the producer and before removing the helper,
+        # including failure cleanup. Preserve the complete original ledger.
+        errors = []
+        for name in ("producer-events.jsonl", "producer.json"):
+            try:
+                text = self.scope.exec("tools", "/bin/cat", PRODUCER_DIRECTORY + "/" + name)
+                contract.require(len(text.encode()) <= contract.MAX_FILE_BYTES, "producer evidence exceeds bound")
+                (self.runtime / name).write_text(text + "\n")
+            except Exception as error:
+                errors.append(name + ": " + str(error))
+        contract.require(not errors, "incomplete producer evidence: " + "; ".join(errors))
 
     def reload(self, new_config):
         before = self.probe()
@@ -558,7 +578,7 @@ class Collector:
     def action(self, kind):
         before = self.probe()
         event = dict(id=kind + "-" + str(len(self.events)), kind=kind, container=self.scope.containers["redis"],
-                     start_mono_ns=time.monotonic_ns(), before=before, producer_before=contract.read(self.runtime, "producer.json"))
+                     start_mono_ns=time.monotonic_ns(), before=before, producer_before=self.producer_progress())
         with self.lock:
             self.current_event = event
         try:
@@ -568,7 +588,7 @@ class Collector:
                 self.scope.pause(True)
                 try:
                     event["during"] = self.eventually(lambda: (p if (p := self.probe(source=False))["ready"] is False else None), seconds=20)
-                    event["producer_during"] = contract.read(self.runtime, "producer.json")
+                    event["producer_during"] = self.producer_progress()
                     time.sleep(3)
                 finally:
                     self.scope.pause(False)
@@ -580,10 +600,10 @@ class Collector:
                 event["operation_end_mono_ns"] = time.monotonic_ns()
                 event.update(measured)
                 event["during"] = self.probe()
-                event["producer_during"] = contract.read(self.runtime, "producer.json")
+                event["producer_during"] = self.producer_progress()
             after = self.eventually(lambda: (p if (p := self.probe())["scalar"] > before["scalar"]
                 and p["array"] > before["array"] else None))
-            event.update(after=after, producer_after=contract.read(self.runtime, "producer.json"))
+            event.update(after=after, producer_after=self.producer_progress())
             with self.lock:
                 event["end_mono_ns"] = time.monotonic_ns()
                 self.events.append(event)
@@ -677,7 +697,7 @@ class Collector:
         rss = int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:"))) * 1024
         fields = statistics[statistics.rfind(")") + 2:].split()
         ticks = int(fields[11]) + int(fields[12])
-        progress = contract.read(self.runtime, "producer.json")
+        progress = self.producer_progress()
         contract.require(time.monotonic_ns() - progress["mono_ns"] < 3 * 10**9 and self.producer.poll() is None,
                          "producer progress observation stopped")
         self.scope.exec("tools", "/bin/kill", "-0", str(progress["pid"]))
@@ -718,6 +738,10 @@ class Collector:
                         self.proof["capacity"].append(self.workload(axis, index, rate=1000, action=axis))
                         index += 1
                     self.action("outage")
+                    # Reject a failed acceptance axis now, rather than spend
+                    # the rest of a day collecting a bundle that cannot pass.
+                    contract.validate_capacity(self.folder, self.proof["capacity"], self.identity,
+                                               self.policy, {e["id"]: e for e in self.events})
         except Exception as error:
             self.failure = error
 
@@ -788,18 +812,35 @@ class Collector:
 
     def stop(self):
         self.cancelled.set()
-        if self.worker and self.worker.is_alive():
-            self.worker.join(timeout=30)
-            contract.require(not self.worker.is_alive(), "qualification worker failed to stop")
-        if self.producer and self.producer.poll() is None:
-            try:
-                progress = contract.read(self.runtime, "producer.json")
-                self.scope.exec("tools", "/bin/kill", "-TERM", str(progress["pid"]))
-                self.producer.wait(timeout=5)
-            finally:
-                if self.producer.poll() is None:
-                    self.producer.kill()
-                    self.producer.wait(timeout=5)
+        try:
+            if self.worker and self.worker.is_alive():
+                self.worker.join(timeout=30)
+                contract.require(not self.worker.is_alive(), "qualification worker failed to stop")
+        finally:
+            if self.producer:
+                pid = None
+                try:
+                    if self.producer.poll() is None:
+                        progress = self.producer_progress()
+                        pid = contract.integer(progress["pid"], "producer PID", 2)
+                        self.scope.exec("tools", "/bin/kill", "-TERM", str(pid))
+                        self.producer.wait(timeout=5)
+                finally:
+                    try:
+                        if self.producer.poll() is None:
+                            try:
+                                # Killing docker exec alone does not stop its
+                                # in-container source. A timeout remains fatal.
+                                if pid is not None:
+                                    self.scope.exec("tools", "/bin/kill", "-KILL", str(pid))
+                            finally:
+                                self.producer.kill()
+                                self.producer.wait(timeout=5)
+                    finally:
+                        try:
+                            self.retain_producer_evidence()
+                        finally:
+                            self.producer = None
 
 
 def run(args):

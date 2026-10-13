@@ -113,6 +113,7 @@ def produce(host, base, output, duration, port=6379):
             last_attempt_ns = time.monotonic_ns()
             if last_attempt_end and last_attempt_ns - last_attempt_end > 2 * 10**9:
                 event(dict(kind="stall", start_mono_ns=last_attempt_end, end_mono_ns=last_attempt_ns, attempt=value))
+                raise ValueError("producer scheduling stall exceeds source freshness bound")
             max_late_ms = max(max_late_ms, (last_attempt_ns - (schedule_start_ns + (value - 1) * 10000000)) / 1e6)
             try:
                 if redis is None:
@@ -136,6 +137,7 @@ def produce(host, base, output, duration, port=6379):
             last_attempt_end = time.monotonic_ns()
             if last_attempt_end - last_attempt_ns > 4 * 10**9:
                 event(dict(kind="unbounded-request", start_mono_ns=last_attempt_ns, end_mono_ns=last_attempt_end, attempt=value))
+                raise ValueError("producer request exceeds qualification bound")
             if time.monotonic() - last_flush >= 0.5 or stop.is_set():
                 temporary = output.with_suffix(".tmp")
                 temporary.write_text(json.dumps(dict(pid=os.getpid(), pid_alive=True, mono_ns=time.monotonic_ns(),

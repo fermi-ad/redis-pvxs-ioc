@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -408,7 +409,14 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       if (!alive_) return;
       auto value = pv_.fetch();
+      const auto priorPayload = value["value"].clone();
+      value.unmark();
       state = populateValue(value);
+      // Reload changes presentation, not acquisition. fetch() carries cached
+      // marks, and populateValue() assigns even unchanged fields. Preserve a
+      // real transform change, but do not publish the retained sample again.
+      if (samePresentedPayload(priorPayload, value["value"])) value["value"].unmark();
+      value["timeStamp"].unmark();
       pv_.post(value);
       recordAlarmLocked(state);
     }
@@ -461,6 +469,21 @@ public:
   }
 
 private:
+  static bool samePresentedPayload(const pvxs::Value& prior, const pvxs::Value& next) {
+    const auto equal = [](T lhs, T rhs) {
+      // Presentation equality must retain signed-zero/NaN representation
+      // changes and must not reuse the tolerance for write confirmations.
+      if constexpr (std::is_floating_point_v<T>)
+        return std::memcmp(&lhs, &rhs, sizeof(T)) == 0;
+      else return lhs == rhs;
+    };
+    if constexpr (Array) {
+      const auto before = prior.as<pvxs::shared_array<const T>>();
+      const auto after = next.as<pvxs::shared_array<const T>>();
+      return before.size() == after.size() && std::equal(before.begin(), before.end(), after.begin(), equal);
+    } else return equal(prior.as<T>(), next.as<T>());
+  }
+
   struct PendingPut {
     uint64_t id = 0;
     ValueType expectedRaw{};

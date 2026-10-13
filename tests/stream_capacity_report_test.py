@@ -28,6 +28,8 @@ class FixtureLossTests(unittest.TestCase):
             check_fixture_report(self.report(1), 64, 16)
         with self.assertRaises(ValueError):
             check_fixture_report(dict(self.report(), duplicate_updates=1), 64, 1)
+        with self.assertRaises(ValueError):
+            check_fixture_report(dict(self.report(), duplicate_updates=1, metadata_only_updates=100), 64, 1)
 
 
 if __name__ == "__main__":

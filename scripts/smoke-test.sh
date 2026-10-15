@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 PVX_BIN_DIR="/opt/redis-pvxs-ioc/bin/pvxs"
 PV_ENV='LANG=C LC_ALL=C EPICS_PVA_AUTO_ADDR_LIST=NO EPICS_PVA_ADDR_LIST=127.0.0.1'
-DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.6.1@sha256:73ef6e1ca9e8e6c344e2663f841186050629b49a3f1ebe3c3ffa1e73ce4bfad5"
+DEFAULT_REDIS_PVXS_IOC_IMAGE="adregistry.fnal.gov/instrumentation/redis-pvxs-ioc:v0.9.0@sha256:79ecf695a4096523d6396988c669dbef0c35eed8c178b348c4ce518da1209a43"
 USER_SUPPLIED_REDIS_PVXS_IOC_IMAGE="${REDIS_PVXS_IOC_IMAGE+x}"
 SOURCE_VERSION="$(tr -d '\n' < VERSION)"
 mkdir -p "$ROOT_DIR/build"

@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 - unreleased
+## v0.9.0 - 2026-10-15
 
 v0.9.0 makes the standalone Redis/PVXS service the supported runtime. The
 release focuses on safe configuration changes, observable Redis continuity,

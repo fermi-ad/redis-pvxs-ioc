@@ -9,6 +9,19 @@ runtime, dependency pins and representative policy choices require independent
 Instrumentation review and protected-main merge before execution.
 No final soak or 600-frame acceptance is run as part of tooling unit tests.
 
+Current forward CI and qualification scope requires Linux amd64; the existing
+Linux arm64 job remains informational. macOS is outside that scope. The published
+v0.9.0 qualification included required native macOS development evidence, which
+remains valid historical evidence in its original source, fixtures and release
+archives. Current Linux-only checks do not rewrite those release requirements.
+
+This platform change does not implement a v1.0 qualification policy: the tooling
+still accepts exact final `VERSION=0.9.0` only. In
+[v1.0 planning (#144)](https://github.com/fermi-ad/redis-pvxs-ioc/issues/144), Linux
+arm64 release qualification remains an explicit pending decision, leaning toward
+exclusion. No arm64 expansion is included here; future platform expansion should
+prioritize Linux arm64 over macOS when a deployment need justifies it.
+
 ## Run and retain evidence
 
 1. Merge the complete reviewed runtime/dependency/release source into `main`,
@@ -71,7 +84,7 @@ only, capabilities are dropped, and processes use the runner's non-root UID.
 | Gate | Actual retained evidence | Limits and review focus |
 | --- | --- | --- |
 | Final merged source | Candidate/qualification head SHA, main ancestry, exact VERSION from GitHub, pinned recursive source inventory and full SBOM/provenance/manifest hashes | Protected-main/code-owner review establishes acceptance of merged code and upstream dependency pins; attestations do not establish code review by themselves. |
-| Native macOS and minimal | Same-SHA native matrix jobs, successful configure/test/real RecCeiver steps, raw logs containing the expected passed runtime/image/discovery tests and integrations OFF | Linux ARM is informational. The macOS and Linux x64 jobs are required. |
+| Native Linux amd64 and minimal | Same-SHA native Linux amd64 job, successful configure/test/real RecCeiver steps, raw logs containing the expected passed runtime/image/discovery tests and integrations OFF | Linux arm64 is informational. Current forward qualification requires Linux amd64; published v0.9.0 evidence retains its original required macOS checks. |
 | Sanitizers and full feature | Successful x64 ASan/UBSan job with integrations ON, raw passed endpoint RPC, RPC hardening/recovery, ChannelFinder HTTP, source-health, imaging and discovery test evidence | `source_health_e2e` is the registered CTest name; `channelfinder_http_tests` is required for full-feature HTTP coverage. Required names are cross-checked against the actual candidate's CMake source, not only synthetic logs. Skipped optional features or omitted tests fail. |
 | Redis/PVA and discovery/catalog | Candidate smoke/access checks and native Redis/PVA test logs; real RecCeiver using its ChannelFinder processor in the existing in-memory client acceptance fixture | This reuses the accepted native receiver procedure; it does not claim a production ChannelFinder deployment was qualified. |
 

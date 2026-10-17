@@ -8,10 +8,18 @@ the complete version. Git and GitHub Release tags are `v${VERSION}`. Docker tags
 replace the SemVer `+` separator with `_`, because Docker tags cannot contain `+`.
 For example, `v0.9.0-rc.1+build.2` uses image tag `v0.9.0-rc.1_build.2`.
 
-0.9.0 publishes Linux amd64 images. Native macOS development checks remain part
-of qualification; existing Linux arm64 checks are informational. ARM image
-publication and soak qualification may be reconsidered for 1.0.0 when a real
-deployment needs them. Fleet deployment is a separate task.
+Linux amd64 is the required release and validation platform. Existing Linux
+arm64 CI remains informational; macOS is outside the current CI and release
+qualification scope. The published v0.9.0 evidence includes the macOS development
+checks required at that release; its source, fixtures and release archives remain
+historical evidence.
+
+For [v1.0 planning (#144)](https://github.com/fermi-ad/redis-pvxs-ioc/issues/144),
+Linux arm64 release images and qualification are an explicit pending scope
+decision, currently leaning toward exclusion. No arm64 expansion is part of this
+CI change. Any future platform expansion should prioritize Linux arm64 over
+macOS and require an identified deployment need. Fleet deployment is a separate
+task.
 
 ## Prepare, validate, then promote
 

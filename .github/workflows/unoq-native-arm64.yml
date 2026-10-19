@@ -1,0 +1,393 @@
+name: UNO Q native ARM64 full qualification
+
+on:
+  push:
+    branches: [dev/unoq-0.9.0]
+  pull_request:
+    branches: [main]
+    # Branch pushes already cover synchronize, avoiding duplicate full builds.
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unoq-native-arm64-2d704c9
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native-arm64-full:
+    name: native ARM64 full suite (2d704c9)
+    if: >-
+      github.repository == 'fermi-ad/redis-pvxs-ioc' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/dev/unoq-0.9.0') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev/unoq-0.9.0') ||
+       (github.event_name == 'pull_request' && github.event.pull_request.number == 159 &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.head_ref == 'dev/unoq-0.9.0'))
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      # Workflow-only commits must not change the source being qualified.
+      SOURCE_REVISION: 2d704c9c7e83c7b38dfcc61234f07d3bcb9d985c
+      SOURCE_VERSION: 0.9.0
+      BUILDER_IMAGE: redis-pvxs-ioc:unoq-native-2d704c9
+      WORKFLOW_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      UNOQ_CONFIG_SHA256: fd4de2c552a119cc6698ca4288187b894b2ab0ed0d38270a71f3f6ad711c78ee
+    steps:
+      - name: Verify native host and Docker platform
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/unoq-native-arm64"
+          printf 'EVIDENCE=%s\n' "$EVIDENCE" >> "$GITHUB_ENV"
+          mkdir -p "$EVIDENCE"
+          chmod 0755 "$EVIDENCE"
+          uname -a | tee "$EVIDENCE/host.txt"
+          test "$(uname -m)" = aarch64
+          docker version > "$EVIDENCE/docker-version.txt"
+          docker info > "$EVIDENCE/docker-info.txt"
+          case "$(docker info --format '{{.Architecture}}')" in
+            aarch64|arm64) ;;
+            *) echo 'A native ARM64 Docker server is required' >&2; exit 1 ;;
+          esac
+          docker buildx inspect default --bootstrap > "$EVIDENCE/builder.txt"
+          printf 'native build platform: linux/arm64\ntarget platform: linux/arm64\n' \
+            > "$EVIDENCE/platforms.txt"
+
+      - name: Check out the immutable IOC source and dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 2d704c9c7e83c7b38dfcc61234f07d3bcb9d985c
+          path: source
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify and record exact build inputs
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          test "$(tr -d '\n' < VERSION)" = "$SOURCE_VERSION"
+          git diff --exit-code HEAD
+          git rev-parse HEAD > "$EVIDENCE/source-revision.txt"
+          git submodule status --recursive > "$EVIDENCE/submodules.txt"
+          sha256sum Dockerfile packaging/ubuntu.sources > "$EVIDENCE/build-input-hashes.txt"
+          python3 scripts/release-image.py source-inputs "$EVIDENCE/source-inputs.json"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          names = re.findall(r'\badd_test\s*\(\s*NAME\s+([A-Za-z0-9_]+)', Path('CMakeLists.txt').read_text())
+          assert 'access_runtime_tests' in names
+          Path(os.environ['EVIDENCE'], 'declared-tests.json').write_text(json.dumps(names, indent=2) + '\n')
+          PY
+
+      - name: Stage the reviewed 28-PV UNO Q configuration
+        run: |
+          set -euo pipefail
+          # Exact reviewed config: fermi-ad/unoq@134210d402543a6dd8c671090bb5d8f05d5cfeaa
+          # config/redis-pvxs-ioc.yaml, with only schema_version: 1 added.
+          cat > "$EVIDENCE/unoq.yaml" <<'YAML'
+          # EPICS PV map for the UNO Q test stack. Schema ref: modules/redis-pvxs-ioc/demo/.
+          # RedisAdapter base TEST:UNOQ -> literal keys {TEST:UNOQ}:<sub>. IOC name: fields
+          # are the bare leaf (no namespace, no _R/_S); server.namespace TEST re-adds the
+          # prefix, so served PV = TEST:UNOQ:<leaf>.
+          schema_version: 1
+
+          server:
+            instance: unoq
+            namespace: TEST
+            auto_beacon: true
+
+          redis:
+            base_key: TEST:UNOQ
+            host: 127.0.0.1
+            port: 6379
+            workers: 2
+            readers: 2
+
+          pvs:
+            - name: UNOQ:TEMP
+              type: float64
+              shape: scalar
+              read: { key: TEMP_R }
+              metadata: { description: "MCU die temperature", units: degC, precision: 2 }
+
+            - name: UNOQ:SOC:TEMP
+              type: float64
+              shape: scalar
+              read: { key: SOC:TEMP_R }
+              metadata: { description: "Qualcomm SoC thermal zone 0", units: degC, precision: 2 }
+
+            - name: UNOQ:TEMP:FAHRENHEIT
+              type: float64
+              shape: scalar
+              read: { key: TEMP:FAHRENHEIT_R }
+              metadata: { description: "MCU temperature (derived)", units: degF, precision: 2 }
+
+            - name: UNOQ:TEMP:AVG
+              type: float64
+              shape: scalar
+              read: { key: TEMP:AVG_R }
+              metadata: { description: "MCU temperature 60s rolling mean", units: degC, precision: 2 }
+
+            - name: UNOQ:CONTROLLER:STATUS
+              type: uint32
+              shape: scalar
+              read: { key: CONTROLLER_STATUS_R }
+              metadata: { description: "Adapter status: RPC_ERR 0x1 | REDIS_ERR 0x2 (reserved, not currently set) | FW_ERR 0x4", units: Raw }
+
+            - name: UNOQ:CONTROLLER:HEARTBEAT
+              type: uint32
+              shape: scalar
+              read: { key: CONTROLLER_HEARTBEAT_R }
+              metadata: { description: "Adapter 5s heartbeat counter", units: Raw }
+
+            - name: UNOQ:PYSERVICE:HEARTBEAT
+              type: uint32
+              shape: scalar
+              read: { key: PYSERVICE_HEARTBEAT_R }
+              metadata: { description: "pyservice 5s heartbeat counter", units: Raw }
+
+            - name: UNOQ:LED:IMAGE
+              type: uint32
+              shape: scalar
+              read: { key: LED:IMAGE_R }
+              write: { key: LED:IMAGE_S }
+              confirm: { key: LED:IMAGE_R, timeout_ms: 5000 }
+              metadata:
+                description: "LED matrix image index (0 off, 1 smiley, 2 heart, 3 arrow, 4 checker, 5 frame, 6 draw buffer; other -> ?)"
+                units: Raw
+
+            - name: UNOQ:LED:FRAME
+              type: int32
+              shape: array
+              read: { key: LED:FRAME_R }
+              write: { key: LED:FRAME_S }
+              confirm: { key: LED:FRAME_R, timeout_ms: 10000 }
+              metadata: { description: "LED frame buffer, 104 x brightness 0-255 (row-major 8x13); displayed when LED:IMAGE=6", units: Raw }
+
+            - name: UNOQ:LED:DISPLAY
+              type: int32
+              shape: array
+              read: { key: LED:DISPLAY_R }
+              metadata: { description: "Frame actually on the matrix (presets expanded)", units: Raw }
+
+            - name: UNOQ:ADC:A0
+              type: int32
+              shape: scalar
+              read: { key: ADC:A0_R }
+              metadata: { description: "ADC A0 raw counts (12-bit)", units: counts }
+
+            - name: UNOQ:ADC:A0:VOLTS
+              type: float64
+              shape: scalar
+              read: { key: ADC:A0:VOLTS_R }
+              metadata: { description: "ADC A0 (derived)", units: V, precision: 4 }
+
+            - name: UNOQ:ADC:A1
+              type: int32
+              shape: scalar
+              read: { key: ADC:A1_R }
+              metadata: { description: "ADC A1 raw counts (12-bit)", units: counts }
+
+            - name: UNOQ:ADC:A1:VOLTS
+              type: float64
+              shape: scalar
+              read: { key: ADC:A1:VOLTS_R }
+              metadata: { description: "ADC A1 (derived)", units: V, precision: 4 }
+
+            - name: UNOQ:ADC:A2
+              type: int32
+              shape: scalar
+              read: { key: ADC:A2_R }
+              metadata: { description: "ADC A2 raw counts (12-bit)", units: counts }
+
+            - name: UNOQ:ADC:A2:VOLTS
+              type: float64
+              shape: scalar
+              read: { key: ADC:A2:VOLTS_R }
+              metadata: { description: "ADC A2 (derived)", units: V, precision: 4 }
+
+            - name: UNOQ:ADC:A3
+              type: int32
+              shape: scalar
+              read: { key: ADC:A3_R }
+              metadata: { description: "ADC A3 raw counts (12-bit)", units: counts }
+
+            - name: UNOQ:ADC:A3:VOLTS
+              type: float64
+              shape: scalar
+              read: { key: ADC:A3:VOLTS_R }
+              metadata: { description: "ADC A3 (derived)", units: V, precision: 4 }
+
+            - name: UNOQ:ADC:A4
+              type: int32
+              shape: scalar
+              read: { key: ADC:A4_R }
+              metadata: { description: "ADC A4 raw counts (12-bit)", units: counts }
+
+            - name: UNOQ:ADC:A4:VOLTS
+              type: float64
+              shape: scalar
+              read: { key: ADC:A4:VOLTS_R }
+              metadata: { description: "ADC A4 (derived)", units: V, precision: 4 }
+
+            - name: UNOQ:ADC:A5
+              type: int32
+              shape: scalar
+              read: { key: ADC:A5_R }
+              metadata: { description: "ADC A5 raw counts (12-bit)", units: counts }
+
+            - name: UNOQ:ADC:A5:VOLTS
+              type: float64
+              shape: scalar
+              read: { key: ADC:A5:VOLTS_R }
+              metadata: { description: "ADC A5 (derived)", units: V, precision: 4 }
+
+            - name: UNOQ:PWM:D3
+              type: uint32
+              shape: scalar
+              read: { key: PWM:D3_R }
+              write: { key: PWM:D3_S }
+              confirm: { key: PWM:D3_R, timeout_ms: 5000 }
+              metadata: { description: "PWM duty on D3 (0-255)", units: Raw }
+
+            - name: UNOQ:PWM:D5
+              type: uint32
+              shape: scalar
+              read: { key: PWM:D5_R }
+              write: { key: PWM:D5_S }
+              confirm: { key: PWM:D5_R, timeout_ms: 5000 }
+              metadata: { description: "PWM duty on D5 (0-255)", units: Raw }
+
+            - name: UNOQ:PWM:D6
+              type: uint32
+              shape: scalar
+              read: { key: PWM:D6_R }
+              write: { key: PWM:D6_S }
+              confirm: { key: PWM:D6_R, timeout_ms: 5000 }
+              metadata: { description: "PWM duty on D6 (0-255)", units: Raw }
+
+            - name: UNOQ:PWM:D9
+              type: uint32
+              shape: scalar
+              read: { key: PWM:D9_R }
+              write: { key: PWM:D9_S }
+              confirm: { key: PWM:D9_R, timeout_ms: 5000 }
+              metadata: { description: "PWM duty on D9 (0-255)", units: Raw }
+
+            - name: UNOQ:PWM:D10
+              type: uint32
+              shape: scalar
+              read: { key: PWM:D10_R }
+              write: { key: PWM:D10_S }
+              confirm: { key: PWM:D10_R, timeout_ms: 5000 }
+              metadata: { description: "PWM duty on D10 (0-255)", units: Raw }
+
+            - name: UNOQ:PWM:D11
+              type: uint32
+              shape: scalar
+              read: { key: PWM:D11_R }
+              write: { key: PWM:D11_S }
+              confirm: { key: PWM:D11_R, timeout_ms: 5000 }
+              metadata: { description: "PWM duty on D11 (0-255)", units: Raw }
+          YAML
+          chmod 0644 "$EVIDENCE/unoq.yaml"
+          printf '%s  %s\n' "$UNOQ_CONFIG_SHA256" "$EVIDENCE/unoq.yaml" | sha256sum --check
+
+      - name: Build the immutable Dockerfile natively with the full CTest suite
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # Default BuildKit is the verified native ARM64 Docker server. Its
+          # automatic BUILDPLATFORM and TARGETPLATFORM are both linux/arm64.
+          # No QEMU setup, CTest filter, cache reuse, or image publication.
+          docker buildx build --builder default --platform linux/arm64 \
+            --target builder --no-cache --load --progress plain \
+            --metadata-file "$EVIDENCE/build-metadata.json" \
+            --build-arg REDIS_PVXS_IOC_VERSION="$SOURCE_VERSION" \
+            --build-arg REDIS_PVXS_IOC_REVISION="$SOURCE_REVISION" \
+            --tag "$BUILDER_IMAGE" . 2>&1 | tee "$EVIDENCE/build.log"
+          test "$(docker image inspect "$BUILDER_IMAGE" --format '{{.Os}}/{{.Architecture}}')" = linux/arm64
+          docker image inspect "$BUILDER_IMAGE" > "$EVIDENCE/builder-image.json"
+
+      - name: Collect and require full integration test evidence
+        run: |
+          set -euo pipefail
+          container=$(docker create "$BUILDER_IMAGE" true)
+          docker cp "$container:/opt/redis-pvxs-ioc/build/CMakeCache.txt" "$EVIDENCE/CMakeCache.txt"
+          docker cp "$container:/opt/redis-pvxs-ioc/build/Testing" "$EVIDENCE/Testing"
+          docker rm "$container"
+          docker run --rm --network none --read-only --entrypoint ctest \
+            "$BUILDER_IMAGE" --test-dir /opt/redis-pvxs-ioc/build --show-only=json-v1 \
+            > "$EVIDENCE/ctest-manifest.json"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          cache = (evidence / 'CMakeCache.txt').read_text()
+          for flag in ('REDIS_PVXS_IOC_BUILD_TESTS', 'REDIS_PVXS_IOC_ENABLE_GRPC',
+                       'REDIS_PVXS_IOC_ENABLE_CHANNELFINDER'):
+              assert re.search(r'^' + flag + r':BOOL=ON$', cache, re.M), flag
+          tests = json.loads((evidence / 'ctest-manifest.json').read_text())['tests']
+          names = {test['name'] for test in tests}
+          declared = set(json.loads((evidence / 'declared-tests.json').read_text()))
+          assert declared <= names, sorted(declared - names)
+          assert 'access_runtime_tests' in names
+          log = (evidence / 'Testing/Temporary/LastTest.log').read_text()
+          for name in names:
+              assert re.search(r'^\d+/\d+ Test: ' + re.escape(name) + r'$', log, re.M), name
+          passed = len(re.findall(r'^Test Passed\.$', log, re.M))
+          assert passed == len(tests), (passed, len(tests))
+          assert not re.search(r'^Test (?:Failed|Not Run)\.', log, re.M)
+          totals = re.findall(r'100% tests passed, 0 tests failed out of (\d+)', (evidence / 'build.log').read_text())
+          assert totals and int(totals[-1]) == len(tests), totals
+          report = {'source_revision': os.environ['SOURCE_REVISION'],
+                    'workflow_head': os.environ['WORKFLOW_HEAD'], 'native_arm64': True,
+                    'grpc': True, 'channelfinder': True, 'registered_tests': len(tests),
+                    'passed_tests': passed, 'access_runtime_tests_passed': True}
+          (evidence / 'ctest-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY
+
+      - name: Validate the native version and reviewed UNO Q config as UID 10001
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only --user 10001:10001 \
+            --entrypoint /opt/redis-pvxs-ioc/build/redis-pvxs-ioc \
+            "$BUILDER_IMAGE" --version | tee "$EVIDENCE/version.txt"
+          grep -Fx "redis-pvxs-ioc $SOURCE_VERSION ($SOURCE_REVISION)" "$EVIDENCE/version.txt"
+          docker run --rm --network none --read-only --user 10001:10001 \
+            --mount "type=bind,src=$EVIDENCE/unoq.yaml,dst=/unoq.yaml,readonly" \
+            --entrypoint /opt/redis-pvxs-ioc/build/redis-pvxs-ioc \
+            "$BUILDER_IMAGE" --check-config /unoq.yaml --json \
+            | tee "$EVIDENCE/unoq-check-config.json"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          config = json.loads((evidence / 'unoq-check-config.json').read_text())
+          assert config['valid'] and config['schema_version'] == 1
+          assert config['pv_count'] == 28 and not config['legacy_input']
+          digest = hashlib.sha256((evidence / 'unoq.yaml').read_bytes()).hexdigest()
+          assert digest == os.environ['UNOQ_CONFIG_SHA256']
+          report = json.loads((evidence / 'ctest-qualification.json').read_text())
+          report.update({'version': os.environ['SOURCE_VERSION'], 'unoq_config_pvs': 28,
+                         'unoq_config_sha256': digest, 'config_cli_uid': 10001,
+                         'config_cli_network': 'none', 'config_cli_read_only': True})
+          (evidence / 'qualification.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY
+          cat "$EVIDENCE/qualification.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain native full-suite qualification and failure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unoq-native-arm64-2d704c9-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          retention-days: 90
+          if-no-files-found: error

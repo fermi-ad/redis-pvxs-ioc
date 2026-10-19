@@ -323,7 +323,11 @@ jobs:
           docker cp "$container:/opt/redis-pvxs-ioc/build/CMakeCache.txt" "$EVIDENCE/CMakeCache.txt"
           docker cp "$container:/opt/redis-pvxs-ioc/build/Testing" "$EVIDENCE/Testing"
           docker rm "$container"
-          docker run --rm --network none --read-only --entrypoint ctest \
+          # The actual test log was copied above. Listing tests uses a separate
+          # container with scratch logs, leaving the captured result untouched.
+          docker run --rm --network none --read-only \
+            --tmpfs /opt/redis-pvxs-ioc/build/Testing:rw,nosuid,nodev,size=16m,mode=0700 \
+            --entrypoint ctest \
             "$BUILDER_IMAGE" --test-dir /opt/redis-pvxs-ioc/build --show-only=json-v1 \
             > "$EVIDENCE/ctest-manifest.json"
           python3 - <<'PY'

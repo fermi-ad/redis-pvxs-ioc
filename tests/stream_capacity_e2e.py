@@ -11,6 +11,8 @@ import sys
 import tempfile
 import time
 
+from pva_fixture import wait_for_ioc_generation
+
 
 def check_fixture_report(evidence, samples, clients):
     expected = samples * clients
@@ -48,6 +50,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ioc", required=True)
     parser.add_argument("--client", required=True)
+    parser.add_argument("--pvxget", required=True)
     args = parser.parse_args()
     redis_port = int(os.environ["REDIS_PVXS_TEST_REDIS_PORT"])
     for case, elements, clients in (("scalar", 1, 1), ("array", 32, 1), ("fanout", 32, 16),
@@ -70,6 +73,7 @@ def main():
                 ioc = subprocess.Popen([args.ioc, "--config", str(path)], stdout=log, stderr=subprocess.STDOUT)
                 workload = None
                 try:
+                    wait_for_ioc_generation(ioc, args.pvxget, "capacity", f"127.0.0.1:{port}")
                     command = [args.client, "--redis-port", str(redis_port), "--base-key", f"capacity-{case}",
                                "--pv", "CAP:value", "--pva-address", f"127.0.0.1:{port}",
                                "--samples", str(samples), "--rate", str(rate), "--elements", str(elements),

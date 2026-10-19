@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: unoq-native-arm64-182e3d1
+  group: unoq-native-arm64-a09e4ad
   cancel-in-progress: true
 
 defaults:
@@ -22,7 +22,7 @@ defaults:
 
 jobs:
   native-arm64-full:
-    name: native ARM64 full suite (182e3d1)
+    name: native ARM64 full suite (a09e4ad)
     if: >-
       github.repository == 'fermi-ad/redis-pvxs-ioc' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/dev/unoq-0.9.0') ||
@@ -34,9 +34,9 @@ jobs:
     timeout-minutes: 90
     env:
       # Workflow-only commits must not change the source being qualified.
-      SOURCE_REVISION: 182e3d14d086d3ee576cbfc2fd494171aa759fb0
+      SOURCE_REVISION: a09e4adbb3a24ecd30a8ef57f401ca14eee1f8aa
       SOURCE_VERSION: 0.9.0
-      BUILDER_IMAGE: redis-pvxs-ioc:unoq-native-182e3d1
+      BUILDER_IMAGE: redis-pvxs-ioc:unoq-native-a09e4ad
       WORKFLOW_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       UNOQ_CONFIG_SHA256: fd4de2c552a119cc6698ca4288187b894b2ab0ed0d38270a71f3f6ad711c78ee
     steps:
@@ -62,7 +62,7 @@ jobs:
       - name: Check out the immutable IOC source and dependencies
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: 182e3d14d086d3ee576cbfc2fd494171aa759fb0
+          ref: a09e4adbb3a24ecd30a8ef57f401ca14eee1f8aa
           path: source
           submodules: recursive
           persist-credentials: false
@@ -391,7 +391,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: unoq-native-arm64-182e3d1-${{ github.run_id }}-${{ github.run_attempt }}
+          name: unoq-native-arm64-a09e4ad-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.EVIDENCE }}/
           retention-days: 90
           if-no-files-found: error

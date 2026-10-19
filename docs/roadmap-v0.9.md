@@ -1,4 +1,12 @@
-# Path to v0.9.0 and a v1.0 release candidate
+# Archived planning: path to v0.9.0 and a v1.0 release candidate
+
+> **Historical planning record.** [v0.9.0 was released on October 15, 2026](https://github.com/fermi-ad/redis-pvxs-ioc/releases/tag/v0.9.0).
+> The original sequence, status wording and unchecked planning boxes below are
+> retained as history; they are not the current completion ledger or release gates.
+> Use the release for qualification evidence, [#144](https://github.com/fermi-ad/redis-pvxs-ioc/issues/144)
+> and the [1.0 decision map](roadmap-v1.0.md) for current scope. In particular,
+> historical macOS requirements and the “After v0.9.0” list do not override today's
+> platform decisions or make every candidate mandatory for 1.0.
 
 The release sequence is **v0.8.2 → v0.9.0 candidates → v0.9.0 → v1.0.0-rc.1**.
 The [v0.9.0 milestone](https://github.com/fermi-ad/redis-pvxs-ioc/milestone/1)

@@ -73,14 +73,37 @@ RUN cmake --build build -j"$(nproc)"
 # legs run the rest of the suite and exclude only that test; the native leg
 # of a multi-arch build — and a classic single-platform `docker build`, where
 # both ARGs are empty — still runs the full suite.
+# QEMU also synthesizes smaps Shared_Dirty as zero and lacks epoll_pwait2.
+# Adapt only the emulated test processes: private, non-persistent Redis fixtures
+# ignore that false COW warning, and libevent selects a supported backend.
 # NOTE: no default values on these ARGs — a default would override the
 # per-platform value BuildKit injects on multi-platform builds.
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 RUN if [ -n "$TARGETPLATFORM" ] && [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ]; then \
       echo "Cross-build $BUILDPLATFORM -> $TARGETPLATFORM under emulation:" \
-           "excluding access_runtime_tests (deadlocks under qemu-user)"; \
-      ctest --test-dir build -E '^access_runtime_tests$' --output-on-failure; \
+           "excluding access_runtime_tests (deadlocks under qemu-user)" && \
+      printf '%s\n' \
+        '#!/usr/bin/python3' \
+        'import os, pathlib, sys, tempfile' \
+        'args = sys.argv[1:]' \
+        'if len(args) != 10 or len(set(args[::2])) != 5:' \
+        '    raise SystemExit("emulated Redis requires five unique fixture option/value pairs")' \
+        'options = dict(zip(args[::2], args[1::2]))' \
+        'if set(options) != {"--bind", "--port", "--save", "--appendonly", "--dir"} or options["--bind"] != "127.0.0.1" or options["--save"] != "" or options["--appendonly"] != "no":' \
+        '    raise SystemExit("emulated Redis requires loopback with RDB and AOF persistence disabled")' \
+        'directory = pathlib.Path(options["--dir"]).resolve()' \
+        'if directory.parent != pathlib.Path(tempfile.gettempdir()).resolve() or not directory.name.startswith(("redis-pvxs-test-", "redis-pvxs-health-")) or not directory.is_dir():' \
+        '    raise SystemExit("emulated Redis requires an isolated fixture temporary directory")' \
+        'if not options["--port"].isdecimal() or not 1 <= int(options["--port"]) <= 65535:' \
+        '    raise SystemExit("emulated Redis requires a valid fixture port")' \
+        'os.execv("/usr/bin/redis-server", ["/usr/bin/redis-server", *args, "--ignore-warnings", "ARM64-COW-BUG"])' \
+        > /tmp/redis-pvxs-test-redis-server && \
+      chmod 0755 /tmp/redis-pvxs-test-redis-server && \
+      cmake -S . -B build \
+        -D REDIS_SERVER_EXECUTABLE:FILEPATH=/tmp/redis-pvxs-test-redis-server && \
+      EVENT_NOEPOLL=1 EVENT_SHOW_METHOD=1 \
+        ctest --test-dir build -E '^access_runtime_tests$' --output-on-failure; \
     else \
       ctest --test-dir build --output-on-failure; \
     fi

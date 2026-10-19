@@ -124,9 +124,11 @@ The normal test suite runs a short deterministic external-IOC transfer. The same
 checker can run the release imaging workload with a private Redis:
 
 ```sh
+EPICS_HOST_ARCH=$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)
 python3 scripts/run-with-redis.py --redis-server "$(command -v redis-server)" --timeout 90 -- \
   python3 tests/ndarray_transfer_e2e.py \
     --ioc build/redis-pvxs-ioc --client build/ndarray_transfer \
+    --pvxget "third_party/pvxs/bin/$EPICS_HOST_ARCH/pvxget" \
     --frames 600 --width 1920 --height 1080 --fps 10 \
     --report /tmp/ndarray-transfer-report.json
 ```

@@ -451,12 +451,14 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_test(NAME ndarray_transfer_e2e COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/ndarray_transfer_e2e.py
-    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:ndarray_transfer>)
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:ndarray_transfer>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
   set_tests_properties(ndarray_transfer_e2e PROPERTIES TIMEOUT 30)
   add_test(NAME stream_capacity_e2e COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/stream_capacity_e2e.py
-    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:stream_capacity>)
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --client $<TARGET_FILE:stream_capacity>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
   set_tests_properties(stream_capacity_e2e PROPERTIES TIMEOUT 40)
   add_test(NAME stream_capacity_report_tests COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/tests/stream_capacity_report_test.py)

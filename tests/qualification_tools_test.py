@@ -82,7 +82,8 @@ class ProofFixture:
         self.remote[f"repos/{contract.REPOSITORY}/contents/scripts/qualification-timings.patch?ref={SHA}"] = self.content((directory / instrument).read_bytes())
         native_contract = json.loads((ROOT / "tests/qualification-native-contract.json").read_text())
         self.remote[f"repos/{contract.REPOSITORY}/contents/CMakeLists.txt?ref={SHA}"] = self.content(native_contract["cmake_excerpt"].encode())
-        self.remote[f"repos/{contract.REPOSITORY}/contents/.github/workflows/native.yml?ref={SHA}"] = self.content(native_contract["native_workflow"].encode())
+        self.remote[f"repos/{contract.REPOSITORY}/contents/.github/workflows/native.yml?ref={SHA}"] = self.content(
+            (ROOT / ".github/workflows/native.yml").read_bytes())
         self.remote[f"repos/{contract.REPOSITORY}/compare/{SHA}...main"] = dict(status="identical", merge_base_commit=dict(sha=SHA))
         self.own_run = self.run(100, "qualify-image.yml", attempt=2)
         candidate_run = self.run(11, "candidate-image.yml")
@@ -194,7 +195,7 @@ class ProofFixture:
             write(self.directory / ("ci/" + kind + "-run.json"), info)
             jobs, logs, artifacts = [], {}, {}
             cases = [("validate", ["adlinux3"])] if kind == "image" else [
-                ("native (macos-14, none)", ["macos-14"]), ("native (ubuntu-24.04, none)", ["ubuntu-24.04"]),
+                ("native (ubuntu-24.04, none)", ["ubuntu-24.04"]),
                 ("native (ubuntu-24.04, address,undefined)", ["ubuntu-24.04"])]
             steps = ["Build validation image", "Validate image metadata", "Validate runtime image", "Validate isolated Redis/PVA and access behavior"] \
                 if kind == "image" else ["Configure and build service", "Test native runtime and access control",
@@ -345,7 +346,18 @@ class QualificationContractTests(unittest.TestCase):
     def test_complete_actual_proof_fixture_derives_every_required_gate(self):
         record = self.fixture.verify()
         self.assertEqual(record["checks"], sorted(contract.CHECKS))
+        self.assertNotIn("native-macos", record["checks"])
+        jobs = contract.read(self.fixture.directory, self.fixture.proof["ci"]["native"]["jobs"])
+        self.assertEqual({job["name"] for job in jobs["jobs"]}, {
+            "native (ubuntu-24.04, none)", "native (ubuntu-24.04, address,undefined)"})
+        release = module("release_image", "release-image.py")
+        release.verify_record(record, self.fixture.own_run, "0.9.0", SHA, "qualification")
         self.assertFalse((self.fixture.directory / "qualification.json").exists())
+
+    def test_unperformed_macos_summary_check_is_rejected(self):
+        self.fixture.record["checks"].append("native-macos")
+        with self.assertRaisesRegex(ValueError, "summary differs"):
+            self.fixture.verify()
 
     def change_snapshot(self, function):
         path = self.fixture.directory / self.fixture.proof["github_snapshot"]["path"]
@@ -609,9 +621,36 @@ class QualificationContractTests(unittest.TestCase):
         self.fixture.mutate(path, lambda value: value.update(expired=True))
         self.reject("artifact identity")
 
-    def test_wrong_platform_or_native_matrix_job_is_rejected(self):
+    def test_missing_required_linux_matrix_job_is_rejected(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/12/attempts/1/jobs?per_page=100"
+        original = self.fixture.api(endpoint)
+        for name in ("native (ubuntu-24.04, none)", "native (ubuntu-24.04, address,undefined)"):
+            with self.subTest(job=name):
+                data = copy.deepcopy(original)
+                data["jobs"] = [job for job in data["jobs"] if job["name"] != name]
+                data["total_count"] = len(data["jobs"])
+                self.fixture.remote[endpoint] = data
+                write(self.fixture.directory / "ci/native-jobs.json", data)
+                self.reject("missing native/minimal/sanitizer CI matrix job")
+
+    def test_failed_or_skipped_required_linux_step_is_rejected(self):
+        endpoint = f"repos/{contract.REPOSITORY}/actions/runs/12/attempts/1/jobs?per_page=100"
+        original = self.fixture.api(endpoint)
+        for job in original["jobs"]:
+            for step in job["steps"]:
+                for conclusion in ("failure", "skipped"):
+                    with self.subTest(job=job["name"], step=step["name"], conclusion=conclusion):
+                        data = copy.deepcopy(original)
+                        selected = next(item for item in data["jobs"] if item["name"] == job["name"])
+                        next(item for item in selected["steps"] if item["name"] == step["name"])["conclusion"] = conclusion
+                        self.fixture.remote[endpoint] = data
+                        write(self.fixture.directory / "ci/native-jobs.json", data)
+                        self.reject("required CI steps did not succeed")
+
+    def test_wrong_linux_runner_label_is_rejected(self):
         data = self.fixture.remote[f"repos/{contract.REPOSITORY}/actions/runs/12/attempts/1/jobs?per_page=100"]
-        data["jobs"][0]["labels"] = ["ubuntu-24.04"]
+        job = next(job for job in data["jobs"] if job["name"] == "native (ubuntu-24.04, none)")
+        job["labels"] = ["ubuntu-24.04-arm"]
         write(self.fixture.directory / "ci/native-jobs.json", data)
         self.reject("matrix job")
 
@@ -940,6 +979,9 @@ class CollectorBoundaryTests(unittest.TestCase):
 
     def test_native_workflow_retains_matrix_bound_qualification_logs(self):
         text = (ROOT / ".github/workflows/native.yml").read_text()
+        self.assertNotIn("macos-", text)
+        self.assertNotIn("brew install", text)
+        self.assertIn("continue-on-error: ${{ matrix.runner == 'ubuntu-24.04-arm' }}", text)
         self.assertIn("name: native (${{ matrix.runner }}, ${{ matrix.sanitizer }})", text)
         self.assertIn("native-qualification-${{ matrix.evidence }}-${{ github.run_id }}-${{ github.run_attempt }}", text)
         self.assertIn("ctest --test-dir build --output-on-failure 2>&1 | tee -a build/native-qualification.log", text)

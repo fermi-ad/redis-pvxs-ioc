@@ -115,7 +115,8 @@ int main() {
   slow.reset();
 
   // Oversized payload, oversized metadata, excessive fields, and duplicate
-  // fields are rejected server-side and advance the cursor exactly once.
+  // fields are rejected before returning to the IOC and advance the cursor
+  // exactly once. Redis has already materialized each entry at that point.
   publish("limits", 1, 2 * 1024 * 1024);
   std::mutex limitMutex;
   uint64_t acceptedBatch = 0, acceptedRejections = 0, rejectedCallbacks = 0;
@@ -173,6 +174,28 @@ int main() {
   assert(backward.status().streamResets == 1);
   backward.reset();
 
+  // An unavailable initial Redis response also leaves latest-snapshot seeking
+  // pending. CLIENT PAUSE affects only this test's isolated Redis instance.
+  publish("offline", 1);
+  publish("offline", 2);
+  publish("offline", 3);
+  redis.command("CLIENT", "PAUSE", "1800", "ALL");
+  std::mutex offlineMutex;
+  std::vector<uint64_t> offlineBatches;
+  XrmLatestReader offline(config, "offline", 1024, 10,
+      [&](const auto&, const auto&, const auto& entries, const auto&) {
+        std::lock_guard<std::mutex> lock(offlineMutex);
+        offlineBatches.push_back(std::stoull(entries[0].second.at("batch")));
+      });
+  assert(!offline.snapshot().connected && offline.status().readFailures >= 1);
+  offline.start();
+  eventually([&] { std::lock_guard<std::mutex> lock(offlineMutex); return !offlineBatches.empty(); });
+  {
+    std::lock_guard<std::mutex> lock(offlineMutex);
+    assert((offlineBatches == std::vector<uint64_t>{3}));
+  }
+  offline.reset();
+
   // Script permissions are explicit: an EVAL denial is a read rejection,
   // never an excuse to fall back to an uncapped client-side fetch.
   redis.command("ACL", "SETUSER", "bounded-test-user", "on", ">bounded-test-password",
@@ -181,20 +204,44 @@ int main() {
   restrictedConfig.user = "bounded-test-user";
   restrictedConfig.password = "bounded-test-password";
   publish("acl", 1);
+  publish("acl", 2);
+  publish("acl", 3);
   std::mutex aclMutex;
-  bool aclRecovered = false;
+  std::vector<uint64_t> aclBatches;
+  uint64_t aclRejections = 0;
   XrmLatestReader acl(restrictedConfig, "acl", 1024, 10,
       [&](const auto&, const auto&, const auto& entries, const auto& metadata) {
         std::lock_guard<std::mutex> lock(aclMutex);
-        aclRecovered = entries[0].second.at("batch") == "1" && metadata.readRejections > 0;
+        aclBatches.push_back(std::stoull(entries[0].second.at("batch")));
+        aclRejections = metadata.readRejections;
       });
   const auto denied = acl.snapshot();
   assert(denied.rejected && denied.fields.empty() && acl.status().readRejections == 1);
   acl.start();
+  eventually([&] { return acl.status().readRejections >= 2; });
   redis.command("ACL", "SETUSER", "bounded-test-user", "+eval");
-  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return aclRecovered; });
+  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return !aclBatches.empty(); });
+  {
+    std::lock_guard<std::mutex> lock(aclMutex);
+    assert((aclBatches == std::vector<uint64_t>{3}) && aclRejections >= 2);
+  }
+  publish("acl", 4);
+  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return aclBatches.size() == 2; });
+  // After a successful baseline, outages retain the cursor and must replay
+  // subsequent retained records in order instead of seeking to the new tail.
+  redis.command("ACL", "SETUSER", "bounded-test-user", "-eval");
+  const auto previousRejections = acl.status().readRejections;
+  eventually([&] { return acl.status().readRejections > previousRejections; });
+  publish("acl", 5);
+  publish("acl", 6);
+  redis.command("ACL", "SETUSER", "bounded-test-user", "+eval");
+  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return aclBatches.size() == 4; });
+  {
+    std::lock_guard<std::mutex> lock(aclMutex);
+    assert((aclBatches == std::vector<uint64_t>{3, 4, 5, 6}));
+  }
   acl.reset();
   redis.command("ACL", "DELUSER", "bounded-test-user");
 
-  std::cout << "Bounded XRM reader ordering, overload loss, size limits, ACL and resets passed\n";
+  std::cout << "XRM reader ordering, overload loss, response limits, ACL and resets passed\n";
 }

@@ -13,10 +13,10 @@
 namespace redis_pvxs_ioc {
 namespace {
 
-// All large strings remain on the Redis side unless this entry satisfies the
-// limits. The 32-pair/4096-byte limits apply to all fields, including unknown
-// ones, and duplicate fields are rejected. Redis stream IDs have bounded size.
-// The response contains a single entry, never an accumulated client queue.
+// Redis materializes the whole requested entry before Lua can inspect it.
+// These checks only limit what Redis returns to the client, not Redis's own
+// allocation or work. The response contains at most one entry; the 32-pair
+// and 4096-byte metadata limits include unknown fields and reject duplicates.
 constexpr const char* kReadScript = R"lua(
 local kind = redis.call('TYPE', KEYS[1]).ok
 if kind == 'none' then return {0} end
@@ -149,7 +149,7 @@ struct XrmLatestReader::State {
     bool deliver = false, immediate = false;
   };
 
-  Reading read(bool initial) {
+  Reading read(bool initial, bool deliverInitial = false) {
     std::string cursor;
     {
       std::lock_guard<std::mutex> guard(mutex);
@@ -187,6 +187,10 @@ struct XrmLatestReader::State {
       ++status.readRejections;
       return reading;
     }
+    // A transport or command failure did not establish a baseline. Retry the
+    // latest snapshot after recovery instead of replaying from 0-0. Wrong-type
+    // keys likewise cannot establish a usable stream baseline.
+    if (initial && result.code != 2) initialPending = false;
     status.inspected = true;
     if (result.code == 0 || result.code == 2) {
       if (status.hasData) {
@@ -228,24 +232,28 @@ struct XrmLatestReader::State {
       // Immediately invalidate the retained waveform. An empty field map is
       // unambiguously invalid and carries no rejected bytes across the wire.
       reading.metadata = {status.epoch, status.readRejections};
-      reading.deliver = !initial;
+      reading.deliver = !initial || deliverInitial;
       return reading;
     }
     reading.snapshot.fields = std::move(result.fields);
     status.lastReceived = std::chrono::steady_clock::now();
     ++status.entries;
     reading.metadata = {status.epoch, status.readRejections};
-    reading.deliver = !initial;
+    reading.deliver = !initial || deliverInitial;
     return reading;
   }
 
   void run() {
     for (;;) {
+      bool initial;
       {
         std::lock_guard<std::mutex> guard(mutex);
         if (!status.active) break;
+        initial = initialPending;
       }
-      auto reading = read(false);
+      // If snapshot() failed, the initial value must also be delivered to the
+      // active consumer once a latest snapshot eventually succeeds.
+      auto reading = read(initial, initial);
       if (reading.deliver) {
         RedisAdapter::StreamBatch batch;
         batch.emplace_back(std::move(reading.snapshot.id), std::move(reading.snapshot.fields));
@@ -274,7 +282,7 @@ struct XrmLatestReader::State {
   std::condition_variable wake;
   RedisAdapter::ReaderStatus status;
   XrmTailMetadata tail;
-  bool everConnected = false, snapped = false, started = false;
+  bool everConnected = false, snapped = false, started = false, initialPending = true;
   std::thread worker;
 };
 

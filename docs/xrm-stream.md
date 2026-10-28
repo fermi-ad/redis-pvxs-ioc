@@ -58,7 +58,25 @@ Each channel uses `{base-key}:key-prefix:CH<n>` and an entry with schema
 
 The IOC's XRM stream reader requires Redis ACL permission for `EVAL`, `TYPE`,
 `XRANGE`, and `XREVRANGE` on its waveform stream keys. A denied `EVAL` causes
-the reader to fail closed instead of silently falling back to an unbounded read.
+the reader to reject the read instead of falling back to a client-side fetch.
+
+**Blocking limitation:** Redis materializes complete stream entries when the
+reader's Lua script calls `XRANGE` or `XREVRANGE`, before the script can check
+their lengths. Its payload and metadata limits cap the response sent to the IOC,
+but do not bound Redis's intermediate allocation or execution time. An
+oversized retained tail is fetched repeatedly. Do not deploy this reader until
+all stream writes and preexisting entries are independently subject to an
+enforced size limit, or the storage contract is redesigned to support bounded
+reads.
+
+Possible designs require a separate contract decision. One is an admission
+service that exclusively controls every write to these keys, validates each
+entry's encoded size, and establishes that no oversized historical entries
+remain; ordinary Redis ACLs alone cannot enforce argument lengths. Another is
+a fixed-field hash or bounded ring with per-field `HSTRLEN` checks before
+reading values. That would need explicit ordering, retention, atomicity, and
+loss semantics and would change the current Redis Stream interface. Either
+approach also needs separate storage and writer resource controls.
 
 | Field | Meaning |
 | --- | --- |
@@ -131,20 +149,18 @@ use these per-PV counters to observe sequence gaps. Counters
 persist across metadata-only reloads and reset when the PV runtime is
 recreated or the IOC restarts.
 
-The bounded XRM reader consumes one Redis entry at a time, limits each
-payload and metadata response before it leaves Redis, and needs permission
-to run its bounded `EVAL` script as well as read the stream. It cannot recover
-entries already trimmed. The IOC marks a processed value stale while the
-observed tail has a different session or connection. With matching identity,
-sample count, and rate, it also compares batch distance times nominal batch
-duration with `stale_after_ms`; this is an estimate of pipeline lag, not an
-acquisition timestamp or an exact queue age. During a rate/count change or
-when tail metadata is unavailable, that estimate is unavailable; the local
-monotonic freshness deadline and visible batch identifiers still apply.
+The XRM reader consumes one Redis entry at a time and limits each payload and
+metadata response before it leaves Redis; see the Redis-side limitation above.
+It cannot recover entries already trimmed. The IOC marks a processed value
+stale until it reaches the last observed tail. Endpoint metadata alone cannot
+prove the duration of unseen batches, even when their rates and sample counts
+match, so no nominal batch-distance estimate can establish freshness while the
+reader is behind. The observed tail is updated when Redis is polled and is not
+an acquisition timestamp or a guarantee that no newer value has since arrived.
 Source-health readiness remains invalid while source validity or time is
 invalid, even if records continue arriving. For receipt-liveness evidence,
 the source diagnostics expose `lastReceivedAgeMs` from the reader's local
-monotonic clock; a bounded Redis entry can update that field before full XRM
+monotonic clock; a size-accepted Redis response can update that field before full XRM
 envelope validation, and it does not establish acquisition-time validity.
 When the raw source stops, its readiness was already invalid.
 

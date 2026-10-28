@@ -55,20 +55,12 @@ template<class T> bool equals(const pvxs::Value& value, const std::vector<T>& ex
 }
 
 int main() {
-  XrmTailMetadata tail{true, "run", "2", "4", "100", "1000"};
-  assert(xrmNominalPipelineLagExceeds("run", 2, 1, 100, 1000, tail, 300));
-  assert(!xrmNominalPipelineLagExceeds("run", 2, 1, 100, 1000, tail, 301));
-  assert(!xrmNominalPipelineLagExceeds("other", 2, 1, 100, 1000, tail, 1));
-  assert(!xrmNominalPipelineLagExceeds("run", 1, 1, 100, 1000, tail, 1));
-  assert(!xrmNominalPipelineLagExceeds("run", 2, 5, 100, 1000, tail, 1));
-  assert(!xrmNominalPipelineLagExceeds("run", 2, 1, 101, 1000, tail, 1));
-  assert(!xrmNominalPipelineLagExceeds("run", 2, 1, 100, 1001, tail, 1));
-  assert(!xrmTailIdentityChanged("run", 2, tail));
-  assert(xrmTailIdentityChanged("old-run", 2, tail));
-  assert(xrmTailIdentityChanged("run", 1, tail));
-  tail.batch = "18446744073709551616";
-  assert(!xrmNominalPipelineLagExceeds("run", 2, 1, 100, 1000, tail, 1));
-  assert(!xrmTailIdentityChanged("old-run", 2, tail));
+  assert(xrmPipelineCaughtUp("1-2", "1-2"));
+  assert(!xrmPipelineCaughtUp("1-2", "1-3"));
+  assert(!xrmPipelineCaughtUp("1-2", "1-1"));
+  assert(!xrmPipelineCaughtUp("1-2", ""));
+  assert(!xrmPipelineCaughtUp("", "1-2"));
+  assert(!xrmPipelineCaughtUp("1-2", "invalid"));
 
   const auto* port = std::getenv("REDIS_PVXS_TEST_REDIS_PORT");
   assert(port);
@@ -382,7 +374,9 @@ int main() {
   auto lagConfig = config;
   lagConfig.name = "lag";
   lagConfig.read.key = "lag:CH1";
-  lagConfig.sourceHealth.staleAfterMs = 20;
+  // Even a nominal estimate below this deadline is unproven while unseen
+  // intermediate records can have different rates or sample counts.
+  lagConfig.sourceHealth.staleAfterMs = 60000;
   auto lagFirst = waveform(samples16(1, 2));
   lagFirst["session"] = "lag-run";
   lagFirst["sample_rate_hz"] = "100";
@@ -446,6 +440,122 @@ return 1
   }
   assert(observedBacklog && reachedTail);
 
+  // The tail advertises a different rate and sample count from the unseen
+  // backlog. A local receipt time cannot make those historical waveforms
+  // fresh, even though the records and their timestamps are otherwise valid.
+  constexpr const char* rateChangeBurst = R"lua(
+local function append(batch, rate, count)
+  local payload = count == 4 and string.char(1,0,2,0,3,0,4,0) or string.char(1,0,2,0)
+  redis.call('XADD', KEYS[1], '*', '_', payload,
+    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
+    'batch',tostring(batch),'channel','1','sample_rate_hz',tostring(rate),'sample_count',tostring(count),
+    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
+end
+for i=1002,1501 do append(i, 100, 2) end
+append(1502, 200, 4)
+return 1
+)lua";
+  redis.command("EVAL", rateChangeBurst, "1", "{xrm-runtime-tests}:lag:CH1");
+  const auto rateDeadline = std::chrono::steady_clock::now() + 15s;
+  bool observedOldRate = false, reachedNewRate = false, observedUnready = false;
+  while (std::chrono::steady_clock::now() < rateDeadline) {
+    const auto health = lagRuntime->sourceHealth()[0];
+    if (!health.lastValidCursor.empty() && !health.reader.observedCursor.empty() &&
+        RedisAdapter::compareStreamIds(health.reader.observedCursor, health.lastValidCursor) > 0) {
+      observedUnready = true;
+      assert(!health.ready && !health.fresh);
+    }
+    {
+      std::lock_guard<std::mutex> guard(monitorMutex);
+      for (const auto& event : monitored) {
+        const auto batchNumber = std::get<1>(event);
+        if (std::get<0>(event) == "lag-run" && batchNumber >= 1002 && batchNumber <= 1501) {
+          observedOldRate = true;
+          assert(std::get<2>(event) == epicsSevInvalid);
+        }
+        if (std::get<0>(event) == "lag-run" && batchNumber == 1502 && std::get<2>(event) == epicsSevNone)
+          reachedNewRate = true;
+      }
+    }
+    if (observedOldRate && reachedNewRate && observedUnready) break;
+    std::this_thread::sleep_for(5ms);
+  }
+  assert(observedOldRate && reachedNewRate && observedUnready);
+  eventually([&] { return lagRuntime->sourceHealth()[0].ready; });
+  value = lagRuntime->sharedPV().fetch();
+  assert(value["xrm.sampleRateHz"].as<uint64_t>() == 200);
+  assert(value["xrm.sampleCount"].as<uint64_t>() == 4);
+  assert(equals<int16_t>(value, {1, 2, 3, 4}));
+
+  // A malformed tail must not make its preceding retained history look fresh.
+  constexpr const char* malformedTailBurst = R"lua(
+local function append(batch, rate)
+  redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
+    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
+    'batch',tostring(batch),'channel','1','sample_rate_hz',rate,'sample_count','2',
+    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
+end
+for i=1503,2002 do append(i, '100') end
+append(2003, 'invalid')
+return 1
+)lua";
+  redis.command("EVAL", malformedTailBurst, "1", "{xrm-runtime-tests}:lag:CH1");
+  eventually([&] {
+    const auto health = lagRuntime->sourceHealth()[0];
+    return health.state == "invalid" && health.reader.cursor == health.reader.observedCursor;
+  });
+  bool observedBeforeMalformed = false;
+  eventually([&] {
+    std::lock_guard<std::mutex> guard(monitorMutex);
+    for (const auto& event : monitored) {
+      const auto batchNumber = std::get<1>(event);
+      if (std::get<0>(event) == "lag-run" && batchNumber >= 1503 && batchNumber <= 2002) {
+        observedBeforeMalformed = true;
+        assert(std::get<2>(event) == epicsSevInvalid);
+      }
+    }
+    return observedBeforeMalformed;
+  });
+  assert(observedBeforeMalformed);
+  auto recovery = lagFirst;
+  recovery["batch"] = "2004";
+  assert(producer.addSingleValue<RedisAdapter::Attrs>("lag:CH1", recovery).ok());
+  eventually([&] { return lagRuntime->sourceHealth()[0].ready; });
+
+  // A backwards tail batch number gives no basis for a nominal lag estimate.
+  constexpr const char* backwardTailBurst = R"lua(
+local function append(batch)
+  redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
+    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
+    'batch',tostring(batch),'channel','1','sample_rate_hz','100','sample_count','2',
+    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
+end
+for i=2005,2504 do append(i) end
+append(10)
+return 1
+)lua";
+  redis.command("EVAL", backwardTailBurst, "1", "{xrm-runtime-tests}:lag:CH1");
+  const auto backwardDeadline = std::chrono::steady_clock::now() + 15s;
+  bool observedBeforeBackward = false, reachedBackward = false;
+  while (std::chrono::steady_clock::now() < backwardDeadline) {
+    {
+      std::lock_guard<std::mutex> guard(monitorMutex);
+      for (const auto& event : monitored) {
+        const auto batchNumber = std::get<1>(event);
+        if (std::get<0>(event) == "lag-run" && batchNumber >= 2005 && batchNumber <= 2504) {
+          observedBeforeBackward = true;
+          assert(std::get<2>(event) == epicsSevInvalid);
+        }
+        if (std::get<0>(event) == "lag-run" && batchNumber == 10 && std::get<2>(event) == epicsSevNone)
+          reachedBackward = true;
+      }
+    }
+    if (observedBeforeBackward && reachedBackward) break;
+    std::this_thread::sleep_for(5ms);
+  }
+  assert(observedBeforeBackward && reachedBackward);
+  assert(lagRuntime->sharedPV().fetch()["xrm.sequenceDiscontinuities"].as<uint64_t>() == 1);
+
   constexpr const char* restartBurst = R"lua(
 local function append(session, batch)
   redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
@@ -453,7 +563,7 @@ local function append(session, batch)
     'batch',tostring(batch),'channel','1','sample_rate_hz','100','sample_count','2',
     'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
 end
-for i=1002,1501 do append('lag-run', i) end
+for i=2505,3004 do append('lag-run', i) end
 append('lag-new', 1)
 return 1
 )lua";
@@ -466,7 +576,7 @@ return 1
       for (const auto& event : monitored) {
         const auto& session = std::get<0>(event);
         const auto batchNumber = std::get<1>(event);
-        if (session == "lag-run" && batchNumber >= 1002 && batchNumber <= 1501) {
+        if (session == "lag-run" && batchNumber >= 2505 && batchNumber <= 3004) {
           observedPriorSession = true;
           assert(std::get<2>(event) == epicsSevInvalid);
         }
@@ -480,7 +590,7 @@ return 1
   assert(observedPriorSession && reachedNewSession);
   value = lagRuntime->sharedPV().fetch();
   assert(value["xrm.sessionChanges"].as<uint64_t>() == 1);
-  assert(value["xrm.discontinuities"].as<uint64_t>() == 1);
+  assert(value["xrm.discontinuities"].as<uint64_t>() == 2);
   monitor->cancel();
   client.close();
   pvaServer.stop();

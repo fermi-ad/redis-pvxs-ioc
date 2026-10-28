@@ -15,8 +15,10 @@ struct XrmTailMetadata {
 };
 
 // XRM has large entries, so never enqueue batches on RedisAdapter's callback
-// pool. This reader obtains one bounded entry and executes its callback on the
-// same thread before obtaining another. Redis trims may still cause gaps.
+// pool. This reader limits each response and executes its callback on the same
+// thread before obtaining another. Redis materializes each requested stream
+// entry before Lua can check its size; these limits do not bound Redis itself.
+// Redis trims may still cause gaps.
 class XrmLatestReader {
 public:
   XrmLatestReader(RedisConfig backend, std::string key, uint64_t maxPayloadBytes,
@@ -26,8 +28,9 @@ public:
   XrmLatestReader& operator=(const XrmLatestReader&) = delete;
 
   // Call once before start(). The latest initial value is read with the same
-  // server-side bounds as all subsequent entries. A rejected entry advances the
-  // cursor and is reflected in readRejections.
+  // response limits as all subsequent entries. If Redis is unavailable or
+  // cannot run the script, the worker continues seeking a latest snapshot.
+  // A rejected entry advances the cursor and is reflected in readRejections.
   RedisAdapter::StreamSnapshot snapshot();
   void start();
   void reset() noexcept;

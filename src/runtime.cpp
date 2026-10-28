@@ -460,7 +460,10 @@ public:
     if (snapshot.present() && decode(snapshot.fields, decoded, &xrm) &&
         (protocol_ == StreamProtocol::XrmV1 || timestamp.valid)) {
       lastRaw_ = std::move(decoded);
-      if (protocol_ == StreamProtocol::XrmV1) lastXrm_ = std::move(xrm);
+      if (protocol_ == StreamProtocol::XrmV1) {
+        lastXrm_ = std::move(xrm);
+        lastXrmCursor_ = snapshot.id;
+      }
       lastTimestampNs_ = timestamp.nanoseconds;
       sourceValid_ = timestamp.valid;
       sourceError_ = timestamp.error;
@@ -864,7 +867,10 @@ private:
       }
       if (!updateValue) return true;
       lastRaw_ = raw;
-      if (protocol_ == StreamProtocol::XrmV1 && xrm) acceptXrmMetadata(*xrm);
+      if (protocol_ == StreamProtocol::XrmV1 && xrm) {
+        acceptXrmMetadata(*xrm);
+        lastXrmCursor_ = streamId;
+      }
       lastTimestampNs_ = timestamp;
       sourceValid_ = sourceValid;
       sourceError_ = sourceError;
@@ -902,12 +908,9 @@ private:
 
   std::string xrmLagErrorLocked() const {
     if (protocol_ != StreamProtocol::XrmV1 || !xrmReader_ || !lastXrm_.present) return {};
-    const auto tail = xrmReader_->tailMetadata();
-    if (xrmTailIdentityChanged(lastXrm_.session, lastXrm_.connection, tail))
-      return "XRM pipeline is awaiting a newer producer session or connection";
-    if (xrmNominalPipelineLagExceeds(lastXrm_.session, lastXrm_.connection, lastXrm_.batch,
-            lastXrm_.sampleCount, lastXrm_.sampleRateHz, tail, config_.sourceHealth.staleAfterMs))
-      return "XRM nominal pipeline lag exceeds freshness deadline";
+    const auto observedCursor = xrmReader_->status().observedCursor;
+    if (!xrmPipelineCaughtUp(lastXrmCursor_, observedCursor))
+      return "XRM pipeline freshness is unknown until the observed Redis tail is processed";
     return {};
   }
 
@@ -1070,6 +1073,7 @@ private:
   std::string readCursor_;
   ValueType lastRaw_{};
   XrmMetadata lastXrm_;
+  std::string lastXrmCursor_;
   XrmSequenceCounters xrmCounters_;
   bool pipelineLagStale_ = false;
   uint64_t lastTimestampNs_ = 0;

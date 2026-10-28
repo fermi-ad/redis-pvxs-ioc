@@ -40,6 +40,8 @@
   and reload-under-load benchmark report.
 - [Feature state and roadmap](feature-state-roadmap.md): current capabilities and
   tracked future work.
+- [Path to v1.0.0](roadmap-v1.0.md): evolving candidate decisions, consumer profiles,
+  release gates and protected integration workflow.
 - [Normative types roadmap](normative-types-roadmap.md): expansion beyond
   `NTScalar` and `NTScalarArray`.
 
@@ -54,6 +56,7 @@
 
 ## Historical design material
 
+- [Archived v0.9 release planning](roadmap-v0.9.md)
 - [Sidecar retirement and migration](legacy-sidecar.md)
 - [Original design proposal](history/original-design.md)
 - [Initial MVP specification](history/mvp-spec.md)

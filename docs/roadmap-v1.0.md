@@ -52,6 +52,39 @@ Use `Refs #...` in focused PRs and track "integrated" separately from "released"
 in #144. Close completed implementation issues when their changes reach `main`;
 merging a PR into the integration branch alone does not complete release work.
 
+## Official PVXS adoption
+
+Track the focused PVXS adoption in
+[#144](https://github.com/fermi-ad/redis-pvxs-ioc/issues/144) and
+[#147](https://github.com/fermi-ad/redis-pvxs-ioc/issues/147), through
+[PR #160](https://github.com/fermi-ad/redis-pvxs-ioc/pull/160) into
+`dev/v1.0.0`. Replace the IOC fork pin
+`749a8933b7982cb4dd9c16660a53f93bcdd3d67e`, which adds a single backlog change
+to the `1.5.2` baseline, with official
+[PVXS commit `96345ddbbad50144b9f4464b9a24a2e490bbbf45`](https://github.com/epics-base/pvxs/commit/96345ddbbad50144b9f4464b9a24a2e490bbbf45).
+That commit sets the listener backlog to 32 on non-RTOS platforms and retains 4
+on RTEMS and VxWorks. [PVXS #229](https://github.com/epics-base/pvxs/pull/229)
+was closed as applied with changes on 28 October 2026; tag `1.5.3` predates the
+correction, so adoption requires the exact upstream commit.
+
+Before integration, require clean Linux amd64 minimal, sanitizer and image
+validation, plus 60 fresh bursts: 20 each at 16, 32 and 64 client contexts, using
+the fixture's five-second deadline with zero Linux `ListenOverflows` and
+`ListenDrops`. Also require source-health, outage, reconnect, alias, reload,
+access and write-confirmation coverage. The development runs and exact source,
+image and fixture identities are recorded in the
+[adoption evidence report](validation/pvxs-upstream-adoption-2026-10-28.md).
+Integration remains pending current-head required CI and independent review;
+these development results do not qualify a final release candidate.
+
+Keep [#122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122) and
+[#138](https://github.com/fermi-ad/redis-pvxs-ioc/issues/138) open until final
+candidate acceptance. Integration tests do not satisfy the exact-source
+qualification tracked in
+[#156](https://github.com/fermi-ad/redis-pvxs-ioc/issues/156). EPICS Base fork
+removal remains separate work; this step changes no public API, `VERSION` or
+other dependency pins.
+
 ## Final integration and qualification
 
 Before marking the umbrella PR ready, synchronize current `main`, reconcile all

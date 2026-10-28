@@ -24,18 +24,21 @@ gitlink, verify that its public remote contains the exact pinned commit.
 
 ### `third_party/pvxs`
 
-- Published `.gitmodules` URL: `https://github.com/derekste/pvxs.git`
-- Pinned commit: `749a8933b7982cb4dd9c16660a53f93bcdd3d67e`
-- Publish status: published bounded-backlog correction; final candidate
-  qualification pending
-- Verified remote branch: `refs/heads/dev/listener-backlog-v0.9`
-- The pin is one commit and one line beyond the previous `1.5.2`-based IOC pin,
-  changing the listener backlog from 4 to 32. [Issue #122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122)
-  retains the burst comparison. Upstream
-  [PVXS #229](https://github.com/epics-base/pvxs/pull/229) remains a follow-up
-  and is not a release gate for this fork pin.
-- Release gate: repeat the final candidate burst, outage and reconnect
-  qualification with strict CI and independent Instrumentation review.
+- Published `.gitmodules` URL: `https://github.com/epics-base/pvxs.git`
+- Pinned commit: `96345ddbbad50144b9f4464b9a24a2e490bbbf45`
+- Publish status: official upstream revision; integration validation and final
+  candidate qualification remain separate acceptance steps
+- Verified upstream branch: `refs/heads/master`
+- [PVXS #229](https://github.com/epics-base/pvxs/pull/229) was closed as applied
+  with changes on 28 October 2026. The official revision uses listener backlog
+  32 on Linux and other non-RTOS platforms, retaining 4 on RTEMS and VxWorks.
+  It replaces the personal fork's backlog-only correction. Tag `1.5.3` predates
+  this revision and does not include the correction.
+- [Issue #122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122) retains
+  startup acceptance; [#138](https://github.com/fermi-ad/redis-pvxs-ioc/issues/138)
+  still requires the separate EPICS Base fork exit. Neither is closed merely by
+  adopting this pin. Final candidate burst, outage and reconnect qualification,
+  strict CI and independent Instrumentation review remain required.
 
 ### `third_party/redis-adapter`
 

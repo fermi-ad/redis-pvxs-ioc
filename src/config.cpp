@@ -9,6 +9,8 @@
 #include <cctype>
 #include <filesystem>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <tuple>
 #include <map>
 #include <set>
@@ -756,13 +758,87 @@ OperationLimitsConfig parseOperationLimits(const YAML::Node& node) {
   return result;
 }
 
+std::string parseGatewayServer(const YAML::Node& node, const std::string& where) {
+  const auto target = parseString(node, where);
+  const auto colon = target.find(':');
+  if (colon == std::string::npos || colon == 0 || colon + 1 == target.size() ||
+      target.find(':', colon + 1) != std::string::npos)
+    fail(where, "expected an explicit unicast IPv4 address:TCP-port");
+  const auto host = target.substr(0, colon), port = target.substr(colon + 1);
+  in_addr address{};
+  if (inet_pton(AF_INET, host.c_str(), &address) != 1 ||
+      !std::all_of(port.begin(), port.end(), [](unsigned char c) { return std::isdigit(c); }))
+    fail(where, "expected an explicit unicast IPv4 address:TCP-port");
+  const auto bits = ntohl(address.s_addr);
+  if ((bits >> 24) == 0 || (bits >> 24) >= 224 || (bits & 0xffu) == 255u)
+    fail(where, "broadcast, multicast and unspecified addresses are unsupported");
+  // A directed broadcast need not end in .255. Reject addresses advertised as
+  // broadcasts by any local interface, including those with narrow masks.
+  ifaddrs* interfaces = nullptr;
+  if (getifaddrs(&interfaces) != 0) fail(where, "could not validate local broadcast addresses");
+  bool broadcast = false;
+  for (auto* entry = interfaces; entry; entry = entry->ifa_next) {
+    if ((entry->ifa_flags & IFF_BROADCAST) && entry->ifa_broadaddr &&
+        entry->ifa_broadaddr->sa_family == AF_INET &&
+        reinterpret_cast<const sockaddr_in*>(entry->ifa_broadaddr)->sin_addr.s_addr == address.s_addr) {
+      broadcast = true;
+      break;
+    }
+  }
+  freeifaddrs(interfaces);
+  if (broadcast) fail(where, "local broadcast targets are unsupported");
+  unsigned long portNumber = 0;
+  try { portNumber = std::stoul(port); } catch (const std::exception&) { fail(where, "invalid port"); }
+  if (!portNumber || portNumber > 65535) fail(where, "port must be 1..65535");
+  return host + ":" + std::to_string(portNumber);
+}
+
+GatewayConfig parseGateway(const YAML::Node& node, const AppConfig& app, EndpointRegistry& endpoints) {
+  GatewayConfig gateway;
+  if (!node) return gateway;
+  const std::string path = "root.pva_gateway";
+  rejectUnknownKeys(node, path, {"pvs"});
+  const auto pvs = requireSequence(requireNode(node, "pvs", path), path + ".pvs");
+  if (!pvs.size()) fail(path + ".pvs", "must contain at least one selected PV");
+  std::set<std::pair<std::string, std::string>> upstreamNames;
+  for (size_t i = 0; i < pvs.size(); ++i) {
+    const auto where = path + ".pvs[" + std::to_string(i) + "]";
+    rejectUnknownKeys(pvs[i], where, {"name", "upstream", "server", "access"});
+    GatewayPVConfig pv;
+    pv.name = parseString(requireNode(pvs[i], "name", where), where + ".name");
+    pv.upstream = parseString(requireNode(pvs[i], "upstream", where), where + ".upstream");
+    pv.server = parseGatewayServer(requireNode(pvs[i], "server", where), where + ".server");
+    if (pv.name.empty() || pv.name.find('\0') != std::string::npos)
+      fail(where + ".name", "must be a nonempty PV name without NUL");
+    if (pv.upstream.empty() || pv.upstream.find('\0') != std::string::npos)
+      fail(where + ".upstream", "must be a nonempty PV name without NUL");
+    if (!upstreamNames.insert({pv.server, pv.upstream}).second)
+      fail(where + ".upstream", "must not duplicate another selected upstream on the same server");
+    if (pvs[i]["access"]) {
+      if (!app.access.enabled) fail(where + ".access", "requires root.access.enabled: true");
+      pv.access = parseAccessAssignment(pvs[i]["access"], where + ".access");
+    } else if (app.access.enabled) {
+      pv.access = app.access.defaults.pv;
+    }
+    const auto name = fullGatewayName(app.server, pv);
+    endpoints.reserve(name, EndpointKind::Gateway, name, where + ".name");
+    gateway.pvs.push_back(std::move(pv));
+  }
+  for (size_t i = 0; i < gateway.pvs.size(); ++i) {
+    const auto& pv = gateway.pvs[i];
+    if (endpoints.entries().count(pv.upstream))
+      fail(path + ".pvs[" + std::to_string(i) + "].upstream", "must not match any locally served PV name");
+  }
+  return gateway;
+}
+
 AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& configDirectory) {
   requireMap(root, "root");
   validateTopLevelSchema(root);
   std::vector<YAML::Node> ancestors;
   size_t visited = 0;
   validateTree(root, "root", ancestors, visited);
-  rejectUnknownKeys(root, "root", {"schema_version", "server", "access", "redis", "redis_backends", "alarms", "channelfinder", "discovery", "limits", "pvs", "rpc_services"});
+  rejectUnknownKeys(root, "root", {"schema_version", "server", "access", "redis", "redis_backends", "alarms", "channelfinder", "discovery", "limits", "pvs", "rpc_services", "pva_gateway"});
 
   AppConfig config;
   config.legacyInput = !root["schema_version"];
@@ -883,6 +959,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
     config.pvs.push_back(std::move(pv));
   }
 
+  config.pvaGateway = parseGateway(root["pva_gateway"], config, endpoints);
+
   // Generic gRPC services exposed as RPC PVs (one PV per reflected method).
   if (root["rpc_services"]) {
     const auto svcNode = requireSequence(root["rpc_services"], "root.rpc_services");
@@ -898,8 +976,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
     }
   }
 
-  if (config.pvs.empty() && config.rpcServices.empty()) {
-    fail("root", "must define at least one of 'pvs' or 'rpc_services'");
+  if (config.pvs.empty() && config.rpcServices.empty() && config.pvaGateway.pvs.empty()) {
+    fail("root", "must define at least one of 'pvs', 'rpc_services', or 'pva_gateway.pvs'");
   }
 
   auto alarmBytes = config.limits.alarmStateBytes - config.limits.alarmQueueEntries * kAlarmQueueEntryBytes;
@@ -931,6 +1009,7 @@ std::string summarizeConfig(const AppConfig& config) {
          << " redis_backends=" << config.redisBackends.size()
          << " pvs=" << config.pvs.size()
          << " rpc_services=" << config.rpcServices.size()
+         << " gateway_pvs=" << config.pvaGateway.pvs.size()
          << " access=" << (config.access.enabled ? "enabled" : "disabled");
   if (config.access.enabled) {
     stream << "\naccess_file=" << config.access.file
@@ -947,6 +1026,8 @@ std::string summarizeConfig(const AppConfig& config) {
            << " -> " << (config.server.nameSpace.empty() ? "" : config.server.nameSpace + ":")
            << "<METHOD>" << svc.suffix;
   }
+  for (const auto& pv : config.pvaGateway.pvs)
+    stream << "\n- gateway " << fullGatewayName(config.server, pv) << " <- " << pv.upstream << " @ " << pv.server;
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)
            << " [";
@@ -1139,6 +1220,10 @@ std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
     return pv.name;
   }
   return server.nameSpace + ":" + pv.name;
+}
+
+std::string fullGatewayName(const ServerConfig& server, const GatewayPVConfig& pv) {
+  return server.nameSpace.empty() ? pv.name : server.nameSpace + ":" + pv.name;
 }
 
 std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig& pv) {

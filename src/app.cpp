@@ -31,6 +31,7 @@
 #include "redis_pvxs_ioc/config.h"
 #include "redis_pvxs_ioc/config_diff.h"
 #include "redis_pvxs_ioc/discovery.h"
+#include "redis_pvxs_ioc/gateway_pv.h"
 #if REDIS_PVXS_IOC_ENABLE_GRPC
 #include "redis_pvxs_ioc/rpc_pv.h"
 #endif
@@ -782,6 +783,11 @@ pvxs::server::Config buildServerConfig(const AppConfig& config) {
 }
 
 using RuntimeMap = std::unordered_map<std::string, std::shared_ptr<PVRuntimeBase>>;
+struct GatewayState {
+  GatewayPVConfig config;
+  std::shared_ptr<GatewayPV> pv;
+};
+using GatewayMap = std::unordered_map<std::string, GatewayState>;
 
 std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
   std::set<std::string> groups;
@@ -789,6 +795,7 @@ std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
   groups.insert(config.access.defaults.adminRead.asg);
   groups.insert(config.access.defaults.adminWrite.asg);
   for (const auto& pv : config.pvs) groups.insert(pv.access.value_or(config.access.defaults.pv).asg);
+  for (const auto& pv : config.pvaGateway.pvs) groups.insert(pv.access.value_or(config.access.defaults.pv).asg);
   for (const auto& service : config.rpcServices) {
     groups.insert(service.access.value_or(config.access.defaults.rpc).asg);
   }
@@ -804,6 +811,9 @@ RpcMap assembleRpcPVs(const AppConfig& config, const RpcServices& services, Assi
     rpcPVs.emplace(item);
     assignments.emplace(item.first, service.config.access.value_or(config.access.defaults.rpc));
   }
+  for (const auto& pv : config.pvaGateway.pvs)
+    if (endpoints.entries().count(pv.upstream))
+      throw std::runtime_error("gateway upstream '" + pv.upstream + "' matches a locally served endpoint");
   return rpcPVs;
 }
 
@@ -891,6 +901,10 @@ std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
                          {"type", pv.kind == PVKind::NTNDArray ? "ntndarray" : toString(pv.type)}, {"shape", toString(pv.shape)}};
     records.push_back(std::move(record));
   }
+  for (const auto& pv : config.pvaGateway.pvs)
+    records.push_back({fullGatewayName(config.server, pv), "pvxs:gateway", {},
+                       {{"protocol", "pva"}, {"source", "pva-gateway"}, {"upstream", pv.upstream},
+                        {"upstream_server", pv.server}}});
   for (const auto& name : adminPVNames(config.server))
     records.push_back({name, "pvxs:diagnostic", {}, {{"protocol", "pva"}}});
   for (const auto& rpc : rpcs) records.push_back({rpc.first, "pvxs:RPC", {}, {{"protocol", "pva"}}});
@@ -921,6 +935,7 @@ struct Application::Impl {
   std::shared_ptr<AlarmPublisher> alarmPublisher;
   std::shared_ptr<RuntimeStats> runtimeStats = std::make_shared<RuntimeStats>();
   RuntimeMap runtimes;
+  GatewayMap gateways;
   RpcMap rpcPVs;
   AssignmentMap rpcAssignments;
   RpcServices rpcServices;
@@ -957,7 +972,8 @@ struct Application::Impl {
     reload.diffKnown = true; reload.schemaVersion = config.schemaVersion;
     reload.added = diff.added.size(); reload.removed = diff.removed.size();
     reload.recreated = diff.replaced.size();
-    reload.retained = config.pvs.size() - reload.added - reload.recreated;
+    reload.retained = config.pvs.size() + config.pvaGateway.pvs.size()
+        - reload.added - reload.recreated;
     reload.metadataChanged = diff.metadataChanged.size(); reload.aliasesChanged = diff.aliasesChanged.size();
     reload.accessChanged = diff.accessChanged.size();
     if (admin) admin->setLastDiff(formatConfigDiff(diff, true));
@@ -1110,6 +1126,7 @@ void Application::pump() {
   }
 
   if (impl_->access) impl_->access->pump();
+  for (auto& gateway : impl_->gateways) gateway.second.pv->pump();
   pumpRpcRecovery();
 
   const auto now = std::chrono::steady_clock::now();
@@ -1165,6 +1182,12 @@ void Application::pumpRpcRecovery() {
               bindings.emplace(name, PVBinding{runtime->sharedPV(), runtime,
                                                 pv.access.value_or(config.access.defaults.pv)});
           }
+          for (const auto& pv : config.pvaGateway.pvs) {
+            const auto name = fullGatewayName(config.server, pv);
+            const auto& gateway = impl_->gateways.at(name).pv;
+            bindings.emplace(name, PVBinding{gateway->sharedPV(), gateway,
+                                              pv.access.value_or(config.access.defaults.pv)});
+          }
           for (const auto& rpc : rpcs)
             bindings.emplace(rpc.first, PVBinding{*rpc.second, rpc.second, assignments.at(rpc.first)});
 
@@ -1189,7 +1212,7 @@ void Application::pumpRpcRecovery() {
           for (const auto& update : updates) update->refresh();
           if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
           impl_->admin->setGeneration(generation);
-          impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
+          impl_->admin->setPvCount(impl_->runtimes.size() + impl_->gateways.size() + impl_->rpcPVs.size());
           impl_->admin->setStatus("generation " + std::to_string(generation) + " active after optional RPC recovery");
           impl_->admin->setError("");
         } catch (const std::exception& exception) {
@@ -1246,12 +1269,15 @@ void Application::stop() {
   if (!started_ && !impl_->hasConfig) return;
   impl_->discovery.reset();
   impl_->catalog.reset();
+  for (auto& item : impl_->gateways) item.second.pv->retireWrites();
   if (impl_->access) impl_->access->clearBindings();
   else impl_->registry->clear();
   for (auto& item : impl_->runtimes) item.second->deactivate("application stopping");
+  for (auto& item : impl_->gateways) item.second.pv->deactivate();
   if (impl_->operations) impl_->operations->shutdown();
   if (impl_->rpcOperations) impl_->rpcOperations->shutdown();
   impl_->runtimes.clear();
+  impl_->gateways.clear();
   impl_->rpcPVs.clear();
   impl_->rpcServices.clear();
   impl_->redisBackends.clear();
@@ -1331,6 +1357,47 @@ bool Application::applyGeneration(const AppConfig& config,
     RpcServices nextRpcServices;
     impl_->reloadPhase("rpc");
     auto nextRpcs = buildRpcPVs(config, nextRpcAssignments, impl_->rpcServices, nextRpcServices, impl_->rpcOperations);
+    // A staged monitor must not discover an endpoint still exposed by the
+    // previous generation, even when that endpoint is removed by this reload.
+    if (impl_->hasConfig) {
+      auto oldEndpoints = configuredEndpoints(impl_->currentConfig);
+      for (const auto& rpc : impl_->rpcPVs)
+        oldEndpoints.reserve(rpc.first, EndpointKind::RPC, rpc.first);
+      for (const auto& pv : config.pvaGateway.pvs)
+        if (oldEndpoints.entries().count(pv.upstream))
+          throw std::runtime_error("gateway upstream '" + pv.upstream + "' matches a currently served endpoint");
+    }
+    GatewayMap nextGateways;
+    std::vector<std::shared_ptr<GatewayPV>> addedGateways, retiredGateways;
+    pvxs::client::Context gatewayContext;
+    bool contextCreated = false;
+    for (const auto& pv : config.pvaGateway.pvs) {
+      const auto name = fullGatewayName(config.server, pv);
+      const auto existing = impl_->gateways.find(name);
+      if (existing != impl_->gateways.end() && existing->second.config.upstream == pv.upstream &&
+          existing->second.config.server == pv.server &&
+          sameAccessAssignment(existing->second.config.access.value_or(impl_->currentConfig.access.defaults.pv),
+                               pv.access.value_or(config.access.defaults.pv))) {
+        nextGateways.emplace(name, GatewayState{pv, existing->second.pv});
+      } else {
+        if (!contextCreated) {
+          pvxs::client::Config clientConfig;
+          clientConfig.autoAddrList = false;
+          gatewayContext = clientConfig.build();
+          contextCreated = true;
+        }
+        auto gateway = GatewayPV::create(gatewayContext, pv.upstream, pv.server, name, impl_->operations,
+                                         config.limits.operationTimeoutMs.value_or(5000),
+                                         static_cast<size_t>(config.limits.maxPayloadBytes));
+        addedGateways.push_back(gateway);
+        nextGateways.emplace(name, GatewayState{pv, std::move(gateway)});
+      }
+    }
+    for (const auto& old : impl_->gateways) {
+      const auto next = nextGateways.find(old.first);
+      if (next == nextGateways.end() || next->second.pv != old.second.pv)
+        retiredGateways.push_back(old.second.pv);
+    }
     auto nextCatalog = buildDiscoveryCatalog(config, nextRpcs, impl_->server.config().tcp_port, generation);
 
     auto bindings = impl_->admin->bindings(config.access.defaults);
@@ -1346,6 +1413,11 @@ bool Application::applyGeneration(const AppConfig& config,
     }
     for (const auto& rpc : nextRpcs)
       bind(rpc.first, *rpc.second, rpc.second, nextRpcAssignments.at(rpc.first));
+    for (const auto& pv : config.pvaGateway.pvs) {
+      const auto name = fullGatewayName(config.server, pv);
+      const auto& gateway = nextGateways.at(name).pv;
+      bind(name, gateway->sharedPV(), gateway, pv.access.value_or(config.access.defaults.pv));
+    }
 
     std::shared_ptr<AccessController::PreparedConfiguration> policy;
     std::shared_ptr<AccessController::PreparedBindings> secured;
@@ -1365,6 +1437,10 @@ bool Application::applyGeneration(const AppConfig& config,
       if (policy && !impl_->access->activateConfiguration(policy, failure)) return false;
       for (const auto& update : updates) update->commit();
       for (const auto& runtime : added) runtime->activate();
+      for (const auto& gateway : addedGateways) gateway->activate();
+      // Fence the final upstream send against cutover. A send already
+      // scheduled is in flight; no later send may use a retiring mapping.
+      for (const auto& gateway : retiredGateways) gateway->retireWrites();
       return true;
     };
     const bool published = impl_->access
@@ -1376,6 +1452,7 @@ bool Application::applyGeneration(const AppConfig& config,
     // Publication has committed. No subsequent failure is reported as a rejected
     // generation. Retain old owners until retired channels/work have drained.
     impl_->runtimes.swap(nextRuntimes);
+    impl_->gateways.swap(nextGateways);
     impl_->redisBackends.swap(nextBackends);
     impl_->rpcPVs.swap(nextRpcs);
     impl_->rpcAssignments.swap(nextRpcAssignments);
@@ -1393,13 +1470,14 @@ bool Application::applyGeneration(const AppConfig& config,
       if (secured) impl_->access->finishBindings(secured);
       else impl_->registry->finish(plain);
       for (const auto& runtime : retired) runtime->deactivate("generation retired");
+      for (const auto& gateway : retiredGateways) gateway->deactivate();
       if (!reuseAlarm && nextAlarm) nextAlarm->stop();
       for (const auto& update : updates) update->refresh();
       impl_->alarmPublisher->activate();
       if (policy) impl_->access->finishConfiguration();
       if (impl_->discovery) impl_->discovery->publish(impl_->catalog);
       impl_->admin->setGeneration(generation);
-      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->rpcPVs.size());
+      impl_->admin->setPvCount(impl_->runtimes.size() + impl_->gateways.size() + impl_->rpcPVs.size());
       impl_->admin->setStatus("generation " + std::to_string(generation) + " active");
       impl_->admin->setError("");
       impl_->admin->setOperations(impl_->operations->stats(), impl_->currentConfig.limits);

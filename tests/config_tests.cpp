@@ -3,6 +3,7 @@
 #include <string>
 
 #include "redis_pvxs_ioc/config.h"
+#include "redis_pvxs_ioc/config_diff.h"
 
 using namespace redis_pvxs_ioc;
 
@@ -780,6 +781,65 @@ pvs:
   }
   const auto disabled = loadConfigString(std::string(kLegacyConfig) + "\ndiscovery: {enabled: false}\n");
   assert(!disabled.discovery.enabled);
+
+  const std::string gatewayBase =
+      "server: {instance: gateway, namespace: EXPORT}\n"
+      "redis: {base_key: gateway, host: localhost, port: 6379}\n";
+  const auto gateway = loadConfigString(gatewayBase +
+      "pva_gateway: {pvs: [{name: table, upstream: 'DEVICE:table', server: '127.0.0.1:15075'}]}\n");
+  assert(gateway.pvaGateway.pvs.size() == 1);
+  assert(fullGatewayName(gateway.server, gateway.pvaGateway.pvs[0]) == "EXPORT:table");
+  assert(gateway.pvaGateway.pvs[0].upstream == "DEVICE:table");
+  assert(gateway.pvaGateway.pvs[0].server == "127.0.0.1:15075");
+  for (const auto* declaration : {
+      "{pvs: [{name: table, upstream: 'DEVICE:table'}]}",
+      "{address_list: ['127.0.0.1:5076'], pvs: [{name: table, upstream: 'DEVICE:table', server: '127.0.0.1:5075'}]}",
+      "{pvs: [{name: table, upstream: 'DEVICE:table', server: '127.0.0.1'}]}",
+      "{pvs: [{name: table, upstream: 'DEVICE:table', server: 'localhost:5075'}]}",
+      "{pvs: [{name: table, upstream: 'DEVICE:table', server: '255.255.255.255:5075'}]}",
+      "{pvs: [{name: table, upstream: 'DEVICE:table', server: '224.0.0.1:5075'}]}",
+      "{pvs: [{name: table, upstream: 'DEVICE:table', server: '127.0.0.1:0'}]}",
+      "{pvs: [{name: table, upstream: 'DEVICE:table', server: '127.0.0.1:65536'}]}",
+      "{pvs: []}",
+      "{pvs: [{name: '', upstream: 'DEVICE:table', server: '127.0.0.1:5075'}]}",
+      "{pvs: [{name: table, upstream: 'EXPORT:table', server: '127.0.0.1:5075'}]}",
+      "{pvs: [{name: a, upstream: 'EXPORT:b', server: '127.0.0.1:5075'}, {name: b, upstream: 'DEVICE:b', server: '127.0.0.1:5075'}]}",
+      "{pvs: [{name: a, upstream: 'DEVICE:a', server: '127.0.0.1:5075'}, {name: b, upstream: 'DEVICE:a', server: '127.0.0.1:5075'}]}",
+      "{pvs: [{name: a, upstream: 'DEVICE:a', server: '127.0.0.1:5075', access: {asg: DEVICE}}]}"}) {
+    const auto text = gatewayBase + "pva_gateway: " + declaration + "\n";
+    assert(throwsConfig(text.c_str()));
+  }
+  const auto collision = std::string(kLegacyConfig) +
+      "\npva_gateway: {pvs: [{name: readback, upstream: 'DEVICE:table', server: '127.0.0.1:5075'}]}\n";
+  assert(throwsConfig(collision.c_str()));
+  const auto aliasLoop = std::string(kLegacyConfig) +
+      "\npva_gateway: {pvs: [{name: remote, upstream: 'EXTERNAL:readback', server: '127.0.0.1:5075'}]}\n";
+  assert(throwsConfig(aliasLoop.c_str()));
+  const auto sameNameDifferentServers = gatewayBase +
+      "pva_gateway: {pvs: [{name: a, upstream: 'DEVICE:a', server: '127.0.0.1:5075'}, "
+      "{name: b, upstream: 'DEVICE:a', server: '127.0.0.1:5076'}]}\n";
+  assert(loadConfigString(sameNameDifferentServers).pvaGateway.pvs.size() == 2);
+  auto changedGateway = gateway;
+  changedGateway.pvaGateway.pvs[0].upstream = "DEVICE:other";
+  auto gatewayDiff = diffConfigs(gateway, changedGateway);
+  assert(gatewayDiff.replaced == std::vector<std::string>{"EXPORT:table"});
+  changedGateway = gateway;
+  changedGateway.pvaGateway.pvs[0].server = "127.0.0.1:15077";
+  assert(diffConfigs(gateway, changedGateway).replaced == std::vector<std::string>{"EXPORT:table"});
+  changedGateway = gateway;
+  changedGateway.pvaGateway.pvs[0].access = AccessAssignment{"DEVICE", 0};
+  gatewayDiff = diffConfigs(gateway, changedGateway);
+  assert(gatewayDiff.replaced == std::vector<std::string>{"EXPORT:table"});
+  assert(gatewayDiff.accessChanged == std::vector<std::string>{"EXPORT:table"});
+  auto redisTable = gateway;
+  redisTable.pvaGateway = {};
+  PVConfig valueTable;
+  valueTable.name = "table";
+  redisTable.pvs.push_back(valueTable);
+  for (const auto& report : {diffConfigs(gateway, redisTable), diffConfigs(redisTable, gateway)}) {
+    assert(report.replaced == std::vector<std::string>{"EXPORT:table"});
+    assert(report.added.empty() && report.removed.empty());
+  }
 
   if (argc > 1) {
     const auto fileConfig = loadConfigFile(argv[1]);

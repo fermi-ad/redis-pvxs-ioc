@@ -8,10 +8,13 @@ variables over PVAccess without loading an EPICS database or calling `iocInit()`
 - PVAccess is the core client protocol. The main process does not serve Channel
   Access or load record/support-module databases.
 - YAML is the current definition plane for server settings, Redis backends, PV
-  definitions, alarm publication, ChannelFinder metadata, and optional gRPC
-  forwarding.
+  definitions, selected upstream PVA channels, alarm publication, ChannelFinder
+  metadata, and optional gRPC forwarding.
 - Redis is the value plane for configured reads, writes, confirmations, and alarm
   stream events. One generation may use multiple independent Redis servers.
+- Selected PVA gateway channels use direct upstream PVA connections and do not
+  use Redis for their values. Their downstream operations use the same registry
+  and optional access policy as other PVs.
 - Native RecCeiver registration publishes the active PVA catalog automatically.
   Discovery has its own bounded worker and follows successful generation activation.
 
@@ -24,7 +27,7 @@ It constructs:
 2. the always-on operational PV namespace;
 3. one Redis adapter per configured backend;
 4. Redis-backed PV runtimes and alarm publication;
-5. optional reflected gRPC RPC PVs.
+5. optional reflected gRPC RPC PVs and selected PVA gateway channels.
 
 `--check-config` performs the same schema and naming validation without serving
 PVs. Configuration errors include a YAML path so a bad definition can be fixed
@@ -44,6 +47,10 @@ Routes use Redis stream keys through the pinned `redis-adapter`. A PV may have a
 read route, optional write route, and optional confirmation/readback route.
 Floating-point values and arrays may use a linear scale/offset transform; clients
 always see served-unit values.
+
+Selected gateway channels preserve the upstream PVA value structure. See the
+[gateway configuration](configuration.md#pva_gateway) for the cached GET,
+monitor, PUT, and security semantics and their limitations.
 
 ## Generation-based hot reload
 
@@ -79,7 +86,7 @@ verification commands are in [`operations.md`](operations.md).
 ## Optional integrations
 
 - [`channelfinder-sync.md`](channelfinder-sync.md) documents one-shot catalog
-  generation and publication for configured Redis PVs.
+  generation and publication for configured Redis and gateway PVs.
 - [`rpc-forwarding.md`](rpc-forwarding.md) documents reflection-based PVA RPC to
   gRPC forwarding.
 - [`reccaster.md`](reccaster.md) documents native RecCeiver discovery and catalog

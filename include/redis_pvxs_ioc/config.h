@@ -120,6 +120,19 @@ struct AccessConfig {
   AccessDefaultsConfig defaults;
 };
 
+// A selected, explicitly addressed upstream PVA channel.  Local names are
+// relative to server.namespace; upstream names are complete device PV names.
+struct GatewayPVConfig {
+  std::string name;
+  std::string upstream;
+  std::string server;
+  std::optional<AccessAssignment> access;
+};
+
+struct GatewayConfig {
+  std::vector<GatewayPVConfig> pvs;
+};
+
 // A backend gRPC service to expose as RPC PVs. The IOC reflects the service at
 // startup and creates one RPC PV per method; it has NO compiled-in knowledge of
 // the service's methods or message types (see docs/rpc-forwarding.md). Each PV
@@ -253,6 +266,7 @@ struct AppConfig {
   OperationLimitsConfig limits;
   std::vector<PVConfig> pvs;
   std::vector<RpcServiceConfig> rpcServices;
+  GatewayConfig pvaGateway;
 };
 
 AppConfig loadConfigFile(const std::string& path);
@@ -277,6 +291,7 @@ bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs);
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv);
+std::string fullGatewayName(const ServerConfig& server, const GatewayPVConfig& pv);
 std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig& pv);
 std::string adminPVName(const ServerConfig& server, const std::string& suffix);
 std::string versionPVName(const ServerConfig& server);

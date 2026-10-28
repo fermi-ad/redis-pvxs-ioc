@@ -40,6 +40,14 @@ def main():
 
         result = check(base)
         assert result["schema_version"] == 1 and result["legacy_input"] is True and result["pv_count"] == 1
+        selected = copy.deepcopy(base)
+        selected["pva_gateway"] = dict(pvs=[dict(name="camera", upstream="DEVICE:camera", server="127.0.0.1:15075")])
+        checked = check(selected)
+        assert checked["pv_count"] == 1 and checked["gateway_pv_count"] == 1
+        assert diff(selected)["additions"] == ["C:camera"]
+        del selected["pvs"]
+        checked = check(selected)
+        assert checked["pv_count"] == 0 and checked["gateway_pv_count"] == 1
         versioned = dict(base, schema_version=1)
         assert check(versioned)["legacy_input"] is False
         unchanged(diff(versioned))

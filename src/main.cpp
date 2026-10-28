@@ -100,6 +100,7 @@ int main(int argc, char* argv[]) {
       std::cout << "{\"valid\":true,\"schema_version\":" << config.schemaVersion
                 << ",\"legacy_input\":" << (config.legacyInput ? "true" : "false")
                 << ",\"pv_count\":" << config.pvs.size() << ",\"rpc_service_count\":" << config.rpcServices.size()
+                << ",\"gateway_pv_count\":" << config.pvaGateway.pvs.size()
                 << ",\"summary\":" << redis_pvxs_ioc::quoteJson(summary) << "}\n";
     } else std::cout << summary << '\n';
     return 0;

@@ -25,8 +25,7 @@
 #include "redis_pvxs_ioc/queued_exec.h"
 #include "redis_pvxs_ioc/ntndarray.h"
 #include "redis_pvxs_ioc/util.h"
-#include "redis_pvxs_ioc/xrm_latest_reader.h"
-#include "redis_pvxs_ioc/xrm_pipeline_lag.h"
+#include "redis_pvxs_ioc/xrm_hash_reader.h"
 
 namespace redis_pvxs_ioc {
 namespace {
@@ -447,7 +446,7 @@ public:
     RedisAdapter::StreamSnapshot snapshot;
     if (protocol_ == StreamProtocol::XrmV1) {
       if (!xrmBackend_) throw std::runtime_error("xrm_v1 requires its Redis backend configuration");
-      xrmReader_ = std::make_unique<XrmLatestReader>(*xrmBackend_, config_.read.key, limits_.maxPayloadBytes, 20,
+      xrmReader_ = std::make_unique<XrmHashReader>(*xrmBackend_, config_.read.key, limits_.maxPayloadBytes, 20,
           [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
             if (const auto self = weak.lock()) self->handleRead(data, true, false, metadata);
           });
@@ -467,7 +466,11 @@ public:
       lastTimestampNs_ = timestamp.nanoseconds;
       sourceValid_ = timestamp.valid;
       sourceError_ = timestamp.error;
-      if (sourceValid_) readSample_.accept(snapshot.id, 1);
+      if (protocol_ == StreamProtocol::XrmV1 && sourceValid_) {
+        sourceError_ = "Waiting for a new XRM publication after baseline";
+        healthError_ = sourceError_;
+        readSample_.reject(sourceError_);
+      } else if (sourceValid_) readSample_.accept(snapshot.id, 1);
       else readSample_.reject(sourceError_);
     } else {
       sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : snapshot.rejected ? "Redis snapshot rejected"
@@ -613,7 +616,7 @@ public:
   void deactivate(const std::string& reason) override {
     if (!alive_.exchange(false)) return;
     RedisAdapter::ReaderHandle retiredRead, retiredConfirm;
-    std::unique_ptr<XrmLatestReader> retiredXrm;
+    std::unique_ptr<XrmHashReader> retiredXrm;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++commandEpoch_;
@@ -847,7 +850,11 @@ private:
       if (epoch) {
         if (!acceptEpochLocked(updateValue, epoch, &current)) return false;
         auto& sample = updateValue ? readSample_ : confirmSample_;
-        if (sourceValid) sample.accept(streamId, epoch);
+        if (sourceValid && protocol_ == StreamProtocol::XrmV1) {
+          const auto proof = xrmReader_->freshnessProof();
+          if (proof != SourceClock::time_point{}) sample.accept(streamId, epoch, proof);
+          else sample.reject("Waiting for a new XRM publication after baseline", epoch);
+        } else if (sourceValid) sample.accept(streamId, epoch);
         else sample.reject(sourceError, epoch);
         sample.acceptedReadRejections = metadata->readRejections;
       }
@@ -908,9 +915,12 @@ private:
 
   std::string xrmLagErrorLocked() const {
     if (protocol_ != StreamProtocol::XrmV1 || !xrmReader_ || !lastXrm_.present) return {};
-    const auto observedCursor = xrmReader_->status().observedCursor;
-    if (!xrmPipelineCaughtUp(lastXrmCursor_, observedCursor))
-      return "XRM pipeline freshness is unknown until the observed Redis tail is processed";
+    if (xrmReader_->status().observedCursor != lastXrmCursor_)
+      return "XRM pipeline is awaiting its observed latest publication";
+    const auto proof = xrmReader_->freshnessProof();
+    if (proof == SourceClock::time_point{}) return "Waiting for a new XRM publication after baseline";
+    if (SourceClock::now() - proof >= std::chrono::milliseconds(config_.sourceHealth.staleAfterMs))
+      return "XRM publication freshness cannot be established";
     return {};
   }
 
@@ -1067,7 +1077,7 @@ private:
   std::atomic<bool> alive_{true};       // false once retired
   std::atomic<bool> committed_{false};  // true after staging commits
   RedisAdapter::ReaderHandle readReader_, confirmReader_;
-  std::unique_ptr<XrmLatestReader> xrmReader_;
+  std::unique_ptr<XrmHashReader> xrmReader_;
   SourceSampleState readSample_, confirmSample_;
   std::string healthError_;
   std::string readCursor_;

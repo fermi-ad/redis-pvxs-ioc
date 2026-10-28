@@ -2,6 +2,7 @@
 // acquisition. The XRM must already be configured to the supplied layout;
 // this process does not write device PVs.
 #include "redis_pvxs_ioc/xrm_acquisition.h"
+#include "redis_pvxs_ioc/xrm_contract.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -53,6 +54,7 @@ struct Options {
   unsigned xrmPort = 4210, redisPort = 6379;
   size_t maxLength = 128;
   uint64_t durationMs = 0;
+  bool publishLatest = false;
   XRMStreamConfig config;
 };
 
@@ -68,9 +70,11 @@ Options parseOptions(int argc, char** argv) {
                    "Required: --xrm-host IP --base-key KEY --channels 1,2,...\n"
                    "          --sample-bytes 1..4 --sample-rate-hz N --samples-per-batch N\n"
                    "Optional: --xrm-port N --redis-host IP --redis-port N --key-prefix KEY\n"
-                   "          --maxlen N --duration-ms N\n";
+                   "          --maxlen N --duration-ms N --publish-latest\n"
+                   "--publish-latest atomically publishes the stream and a latest-value hash for the XRM IOC.\n";
       std::exit(0);
     }
+    if (name == "--publish-latest") { options.publishLatest = true; continue; }
     require(index + 1 < argc, "missing option value: " + name);
     const std::string value = argv[++index];
     if (name == "--xrm-host") options.xrmHost = value;
@@ -225,24 +229,120 @@ void appendCommand(std::string& output, const std::vector<std::string>& parts) {
   }
 }
 
-void publish(Socket& redis, const std::vector<XRMRedisRecord>& records, size_t maxLength, Deadline runDeadline) {
+// No other writer may modify these stream or hash keys. Script execution is
+// isolated, but Redis scripts do not roll back earlier commands after errors.
+// A shared pending marker prevents readers from accepting partial batches; a
+// separate bounded commit stream lets history consumers identify committed
+// batches even after the latest marker advances. Neither rolls back XADDs.
+constexpr const char* kPublishLatest = R"lua(
+local limit = tonumber(ARGV[1])
+local channels = (#KEYS - 2) / 2
+local marker = KEYS[#KEYS-1]
+local commits = KEYS[#KEYS]
+local mk = redis.call('TYPE', marker).ok
+local ck = redis.call('TYPE', commits).ok
+if mk ~= 'none' and mk ~= 'string' then return redis.error_reply('XRM marker has wrong type') end
+if mk == 'string' and redis.call('STRLEN', marker) > 172 then return redis.error_reply('XRM marker too large') end
+if ck ~= 'none' and ck ~= 'stream' then return redis.error_reply('XRM commit stream has wrong type') end
+if ck == 'stream' and redis.call('XLEN', commits) > limit then
+  return redis.error_reply('XRM commit stream exceeds configured retention')
+end
+for i = 1, channels do
+  local stream = KEYS[2*i-1]
+  local hash = KEYS[2*i]
+  local sk = redis.call('TYPE', stream).ok
+  local hk = redis.call('TYPE', hash).ok
+  if sk ~= 'none' and sk ~= 'stream' then return redis.error_reply('XRM stream has wrong type') end
+  if sk == 'stream' and redis.call('XLEN', stream) > limit then
+    return redis.error_reply('XRM stream exceeds configured retention')
+  end
+  if hk ~= 'none' and hk ~= 'hash' then return redis.error_reply('XRM latest key has wrong type') end
+  if hk == 'hash' then
+    local enc = redis.call('OBJECT', 'ENCODING', hash)
+    if enc == 'listpack' or enc == 'ziplist' then
+      if redis.call('MEMORY', 'USAGE', hash, 'SAMPLES', 1) > 65536 then
+        return redis.error_reply('XRM compact hash is too large')
+      end
+    elseif enc ~= 'hashtable' then return redis.error_reply('XRM hash encoding unsupported') end
+    if redis.call('HLEN', hash) > 32 then return redis.error_reply('XRM hash has too many fields') end
+  end
+end
+redis.call('SET', marker, 'pending')
+for i = 1, channels do redis.call('HSET', KEYS[2*i], 'state', 'pending') end
+local p = 4
+local ids = {}
+for i = 1, channels do
+  local n = tonumber(ARGV[p]); p = p + 1
+  local streamargs = {'XADD', KEYS[2*i-1], 'MAXLEN', '=', ARGV[1], '*'}
+  local hashargs = {'HSET', KEYS[2*i], 'state', 'ready', 'contract', 'fermi-ad/xrm-latest:1', 'commit', ARGV[2]}
+  for j = 1, n do
+    streamargs[#streamargs+1] = ARGV[p]; hashargs[#hashargs+1] = ARGV[p]; p = p + 1
+    streamargs[#streamargs+1] = ARGV[p]; hashargs[#hashargs+1] = ARGV[p]; p = p + 1
+  end
+  local id = redis.call(unpack(streamargs))
+  redis.call('HDEL', KEYS[2*i], 'acq_time_ns')
+  hashargs[#hashargs+1] = 'stream_id'; hashargs[#hashargs+1] = id
+  redis.call(unpack(hashargs))
+  ids[#ids+1] = id
+end
+redis.call('XADD', commits, 'MAXLEN', '=', ARGV[1], '*', 'token', ARGV[2], 'channels', ARGV[3])
+redis.call('SET', marker, ARGV[2])
+return ids
+)lua";
+
+void publish(Socket& redis, const std::vector<XRMRedisRecord>& records, size_t maxLength, Deadline runDeadline,
+             bool publishLatest) {
   std::string requests;
-  appendCommand(requests, {"MULTI"});
-  for (const auto& record : records) {
-    std::vector<std::string> arguments{"XADD", record.key, "MAXLEN", "=", std::to_string(maxLength), "*"};
-    arguments.reserve(6 + record.fields.size() * 2);
-    for (const auto& field : record.fields) { arguments.push_back(field.first); arguments.push_back(field.second); }
+  if (publishLatest) {
+    require(!records.empty(), "empty XRM publication");
+    const auto fieldValue = [](const XRMRedisRecord& record, const std::string& name) {
+      for (const auto& field : record.fields) if (field.first == name) return field.second;
+      throw std::runtime_error("XRM publication missing " + name);
+    };
+    const auto token = fieldValue(records.front(), "session") + "/" + fieldValue(records.front(), "connection") +
+                       "/" + fieldValue(records.front(), "batch");
+    std::string channels;
+    const auto group = xrmPublicationGroup(records.front().key);
+    std::vector<std::string> arguments{"EVAL", kPublishLatest, std::to_string(records.size() * 2 + 2)};
+    for (const auto& record : records) {
+      require(xrmPublicationGroup(record.key) == group &&
+              fieldValue(record, "session") + "/" + fieldValue(record, "connection") + "/" +
+                  fieldValue(record, "batch") == token, "inconsistent XRM publication group");
+      if (!channels.empty()) channels += ',';
+      channels += fieldValue(record, "channel");
+      arguments.push_back(record.key);
+      arguments.push_back(xrmLatestHashKey(record.key));
+    }
+    arguments.push_back(xrmCommitMarkerKey(records.front().key));
+    arguments.push_back(xrmCommitStreamKey(records.front().key));
+    arguments.push_back(std::to_string(maxLength));
+    arguments.push_back(token);
+    arguments.push_back(channels);
+    for (const auto& record : records) {
+      arguments.push_back(std::to_string(record.fields.size()));
+      for (const auto& field : record.fields) { arguments.push_back(field.first); arguments.push_back(field.second); }
+    }
     appendCommand(requests, arguments);
+  } else {
+    appendCommand(requests, {"MULTI"});
+    for (const auto& record : records) {
+      std::vector<std::string> arguments{"XADD", record.key, "MAXLEN", "=", std::to_string(maxLength), "*"};
+      arguments.reserve(6 + record.fields.size() * 2);
+      for (const auto& field : record.fields) { arguments.push_back(field.first); arguments.push_back(field.second); }
+      appendCommand(requests, arguments);
+    }
+    appendCommand(requests, {"EXEC"});
   }
-  appendCommand(requests, {"EXEC"});
   // On failure the transaction outcome may be unknown. The caller discards
   // the batch and closes both sockets; it must not replay the transaction.
   redis.sendAll(requests, runDeadline);
   const auto deadline = std::min(runDeadline, Clock::now() + 2s);
-  require(redis.line(deadline) == "+OK", "Redis MULTI rejected");
-  for (size_t i = 0; i < records.size(); ++i)
-    require(redis.line(deadline) == "+QUEUED", "Redis XADD was not queued");
-  require(redis.line(deadline) == "*" + std::to_string(records.size()), "Redis transaction failed");
+  if (!publishLatest) {
+    require(redis.line(deadline) == "+OK", "Redis MULTI rejected");
+    for (size_t i = 0; i < records.size(); ++i)
+      require(redis.line(deadline) == "+QUEUED", "Redis XADD was not queued");
+  }
+  require(redis.line(deadline) == "*" + std::to_string(records.size()), "Redis publication failed");
   for (size_t i = 0; i < records.size(); ++i) {
     const auto header = redis.line(deadline);
     require(!header.empty() && header[0] == '$', "Redis XADD returned an error");
@@ -290,7 +390,7 @@ int run(const Options& options, const Connector& connector =
         ++batchSequence;
         auto records = makeXRMRedisRecords(options.config, batch, {}, options.base, options.prefix,
                                            session, connection, batchSequence);
-        try { publish(redis, records, options.maxLength, deadline); ++published; retryMs = 250; }
+        try { publish(redis, records, options.maxLength, deadline, options.publishLatest); ++published; retryMs = 250; }
         catch (...) { ++failed; throw; }
       });
     } catch (const std::exception& error) {

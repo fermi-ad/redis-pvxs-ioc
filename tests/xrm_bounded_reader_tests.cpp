@@ -1,8 +1,14 @@
-#include "redis_pvxs_ioc/xrm_latest_reader.h"
+#include "redis_pvxs_ioc/xrm_hash_reader.h"
+#include "redis_pvxs_ioc/xrm_contract.h"
 
 #include <sw/redis++/redis++.h>
 
-#include <algorithm>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
@@ -22,226 +28,299 @@ template<class Predicate> void eventually(Predicate predicate) {
   assert(predicate());
 }
 
+std::string str(const redisReply* reply) {
+  assert(reply && reply->type == REDIS_REPLY_STRING);
+  return {reply->str, reply->len};
+}
+
+uint64_t commandCount(sw::redis::Redis& redis, const std::string& command) {
+  const auto reply = redis.command("INFO", "commandstats");
+  const auto info = str(reply.get());
+  const auto needle = "cmdstat_" + command + ":calls=";
+  const auto pos = info.find(needle);
+  return pos == std::string::npos ? 0 : std::stoull(info.substr(pos + needle.size()));
+}
+
+// Local-only forwarding fixture: delay server responses without changing the
+// Redis server or the time at which it executes each command.
+class DelayedProxy {
+public:
+  explicit DelayedProxy(uint16_t upstreamPort) {
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener_ >= 0);
+    sockaddr_in address{}; address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); address.sin_port = 0;
+    assert(::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    socklen_t n = sizeof(address);
+    assert(::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &n) == 0);
+    port_ = ntohs(address.sin_port);
+    assert(::listen(listener_, 1) == 0);
+    worker_ = std::thread([this, upstreamPort] {
+      const int downstream = ::accept(listener_, nullptr, nullptr);
+      if (downstream < 0) return;
+      const int upstream = ::socket(AF_INET, SOCK_STREAM, 0);
+      assert(upstream >= 0);
+#ifdef SO_NOSIGPIPE
+      int enabled = 1;
+      assert(::setsockopt(downstream, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0);
+      assert(::setsockopt(upstream, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0);
+#endif
+      sockaddr_in target{}; target.sin_family = AF_INET;
+      target.sin_addr.s_addr = htonl(INADDR_LOOPBACK); target.sin_port = htons(upstreamPort);
+      assert(::connect(upstream, reinterpret_cast<sockaddr*>(&target), sizeof(target)) == 0);
+      pollfd fds[2]{{downstream, POLLIN, 0}, {upstream, POLLIN, 0}};
+      while (!stopped_) {
+        const int rc = ::poll(fds, 2, 20);
+        if (rc < 0) break;
+        for (int i = 0; i < 2; ++i) {
+          if (!(fds[i].revents & POLLIN)) continue;
+          char bytes[65536];
+          const auto count = ::recv(fds[i].fd, bytes, sizeof(bytes), 0);
+          if (count <= 0) { stopped_ = true; break; }
+          if (i == 1) std::this_thread::sleep_for(300ms);
+          size_t offset = 0;
+          while (offset < static_cast<size_t>(count)) {
+#ifdef MSG_NOSIGNAL
+            const auto sent = ::send(fds[1-i].fd, bytes + offset, count - offset, MSG_NOSIGNAL);
+#else
+            const auto sent = ::send(fds[1-i].fd, bytes + offset, count - offset, 0);
+#endif
+            if (sent <= 0) { stopped_ = true; break; }
+            offset += static_cast<size_t>(sent);
+          }
+        }
+        if ((fds[0].revents | fds[1].revents) & (POLLERR | POLLHUP | POLLNVAL)) break;
+      }
+      ::close(upstream); ::close(downstream);
+    });
+  }
+  ~DelayedProxy() {
+    stopped_ = true;
+    ::shutdown(listener_, SHUT_RDWR);
+    ::close(listener_);
+    if (worker_.joinable()) worker_.join();
+  }
+  uint16_t port() const { return port_; }
+private:
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  std::atomic<bool> stopped_{false};
+  std::thread worker_;
+};
+
 int main() {
   const auto* port = std::getenv("REDIS_PVXS_TEST_REDIS_PORT");
   assert(port);
   RedisConfig config;
-  config.baseKey = "xrm-bounded-test";
+  config.baseKey = "xrm-hash-test";
   config.port = static_cast<uint16_t>(std::stoi(port));
   sw::redis::ConnectionOptions options;
-  options.host = config.host;
-  options.port = config.port;
+  options.host = config.host; options.port = config.port;
   sw::redis::Redis redis(options);
-
-  auto publish = [&](const std::string& key, uint64_t batch, size_t payloadBytes = 8, int maxlen = 1000) {
-    const auto count = std::to_string(batch);
-    return redis.command("XADD", "{" + config.baseKey + "}:" + key, "MAXLEN", "=",
-        std::to_string(maxlen), "*", "_", std::string(payloadBytes, 'x'),
-        "schema", "fermi-ad/xrm-waveform:1", "session", "session1", "connection", "1",
-        "batch", count, "channel", "1", "sample_count", "4", "sample_bytes", "2",
-        "sample_rate_hz", "1000", "source_validity", "unknown", "acq_time_valid", "0");
+  constexpr const char* fixturePublish = R"lua(
+local fields = {}
+for i=2,#ARGV do fields[#fields+1] = ARGV[i] end
+local id = redis.call('XADD', KEYS[1], '*', unpack(fields))
+redis.call('DEL', KEYS[2])
+redis.call('HSET', KEYS[2], 'contract', 'fermi-ad/xrm-latest:1', 'state', 'ready', 'commit', ARGV[1], 'stream_id', id, unpack(fields))
+redis.call('SET', KEYS[3], ARGV[1])
+return id
+)lua";
+  const auto stream = "{" + config.baseKey + "}:waveform";
+  const auto hash = stream + ":latest:v1";
+  const auto publishTo = [&](const std::string& subkey, uint64_t batch) {
+    const auto destination = "{" + config.baseKey + "}:" + subkey;
+    std::vector<std::string> args{"EVAL", fixturePublish, "3", destination, xrmLatestHashKey(destination),
+      xrmCommitMarkerKey(destination), "session1/1/" + std::to_string(batch),
+      "_", "abcdefgh", "schema", "fermi-ad/xrm-waveform:1", "session", "session1",
+      "connection", "1", "batch", std::to_string(batch), "channel", "1",
+      "sample_count", "4", "sample_bytes", "2", "sample_rate_hz", "1000",
+      "source_validity", "valid", "acq_time_valid", "1", "acq_time_ns", "1"};
+    return str(redis.command(args.begin(), args.end()).get());
   };
+  const auto publish = [&](uint64_t batch) { return publishTo("waveform", batch); };
 
-  // Startup and normal consumption: no callback before start, and all
-  // retained entries are delivered in order while the consumer keeps up.
-  publish("ordered", 1);
-  std::mutex orderedMutex;
-  std::vector<uint64_t> ordered;
-  XrmLatestReader normal(config, "ordered", 1024, 5,
-      [&](const auto&, const auto&, const auto& entries, const auto&) {
-        assert(entries.size() == 1);
-        std::lock_guard<std::mutex> lock(orderedMutex);
-        ordered.push_back(std::stoull(entries[0].second.at("batch")));
-      });
-  const auto first = normal.snapshot();
-  assert(first.present() && first.fields.at("batch") == "1");
-  publish("ordered", 2);
-  { std::lock_guard<std::mutex> lock(orderedMutex); assert(ordered.empty()); }
-  normal.start();
-  for (int i = 3; i <= 50; ++i) publish("ordered", i);
-  eventually([&] { std::lock_guard<std::mutex> lock(orderedMutex); return ordered.size() == 49; });
-  {
-    std::lock_guard<std::mutex> lock(orderedMutex);
-    for (size_t i = 0; i < ordered.size(); ++i) assert(ordered[i] == i + 2);
-  }
-  const auto orderedTail = normal.tailMetadata();
-  assert(orderedTail.present && orderedTail.session == "session1" && orderedTail.batch == "50" &&
-         orderedTail.sampleCount == "4" && orderedTail.sampleRate == "1000");
-  normal.reset();
-
-  // Hold the consumer while a fast producer publishes 5,000 entries into a
-  // stream retaining only eight. While blocked, the reader cannot accumulate
-  // callbacks or payloads. After release, the missing sequence is observable.
+  publish(1); publish(2); const auto third = publish(3);
   std::mutex mutex;
   std::condition_variable changed;
-  bool callbackEntered = false, release = false;
   std::vector<uint64_t> received;
-  XrmLatestReader slow(config, "slow", 1024, 5,
+  bool hold = false, entered = false, release = false;
+  XrmHashReader reader(config, "waveform", 1024, 5,
       [&](const auto&, const auto&, const auto& entries, const auto&) {
         std::unique_lock<std::mutex> lock(mutex);
+        if (entries[0].second.empty()) { received.push_back(0); return; }
         received.push_back(std::stoull(entries[0].second.at("batch")));
-        if (received.size() == 1) {
-          callbackEntered = true;
-          changed.notify_all();
+        if (hold) {
+          entered = true; changed.notify_all();
           changed.wait(lock, [&] { return release; });
+          hold = false;
         }
       });
-  assert(!slow.snapshot().present());
-  slow.start();
-  publish("slow", 1, 512, 8);
+  const auto snapshot = reader.snapshot();
+  assert(snapshot.present() && snapshot.id == third && snapshot.fields.at("batch") == "3");
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  reader.start();
+  publish(4);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 4; });
+  const auto proof = reader.freshnessProof();
+  assert(proof != std::chrono::steady_clock::time_point{});
+  std::this_thread::sleep_for(100ms);
+  assert(reader.freshnessProof() == proof); // polling an unchanged value is not producer liveness
+
+  // Even a huge arbitrary Stream tail is never read by the hash consumer.
+  redis.command("XADD", stream, "*", "_", std::string(8 * 1024 * 1024, 'x'));
+  std::this_thread::sleep_for(50ms);
+  assert(reader.status().cursor != "0-0" && reader.freshnessProof() == proof);
+
+  // An unrecognized giant field is not enumerated or copied by the reader.
+  redis.command("HSET", hash, "unrecognized", std::string(8 * 1024 * 1024, 'u'));
+  std::this_thread::sleep_for(50ms);
+  assert(reader.status().readRejections == 0 && reader.freshnessProof() == proof);
+  redis.command("HDEL", hash, "unrecognized");
+  const std::string unknownName(8 * 1024 * 1024, 'n');
+  redis.command("HSET", hash, unknownName, "x");
+  std::this_thread::sleep_for(50ms);
+  assert(reader.status().readRejections == 0 && reader.freshnessProof() == proof);
+  redis.command("HDEL", hash, unknownName);
+
+  // An oversized known hash field is rejected without an HGET of any field.
+  redis.command("HSET", hash, "_", std::string(8 * 1024 * 1024, 'x'));
+  eventually([&] { return reader.status().readRejections == 1; });
+  const auto gets = commandCount(redis, "hget");
+  std::this_thread::sleep_for(80ms);
+  assert(commandCount(redis, "hget") == gets);
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(5); // rejected data forces a new baseline
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 5; });
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(6);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 6; });
+  assert(reader.freshnessProof() != std::chrono::steady_clock::time_point{});
+
+  redis.command("HSET", hash, "stream_id", "not-an-id");
+  eventually([&] { return reader.status().readRejections == 2; });
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(7);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 7; });
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(8);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 8; });
+  assert(reader.freshnessProof() != std::chrono::steady_clock::time_point{});
+
+  const auto oldEpoch = reader.status().epoch;
+  redis.command("DEL", hash);
+  eventually([&] { return reader.status().streamKind == RedisAdapter::StreamKind::Missing; });
+  assert(reader.status().epoch == oldEpoch + 1 && reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(9); // a publication after observed absence is fresh evidence
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 9; });
+  assert(reader.freshnessProof() != std::chrono::steady_clock::time_point{});
+  redis.command("HSET", hash, "stream_id", "1-0");
+  eventually([&] { return reader.status().epoch == oldEpoch + 2; });
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(10);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 10; });
+  assert(reader.freshnessProof() != std::chrono::steady_clock::time_point{});
+  redis.command("EVAL", "redis.call('HSET',KEYS[1],'batch','11','commit','session1/1/11'); "
+                       "redis.call('SET',KEYS[2],'session1/1/11'); return 1", "2", hash,
+                xrmCommitMarkerKey(stream));
+  eventually([&] { return reader.status().epoch == oldEpoch + 3; });
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 11; });
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(12);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 12; });
+  assert(reader.freshnessProof() != std::chrono::steady_clock::time_point{});
+
+  // Redis outage clears freshness even if the same retained hash is available
+  // after reconnect; it takes another publication to re-establish proof.
+  redis.command("CLIENT", "PAUSE", "1500", "ALL");
+  eventually([&] { return !reader.status().connected && reader.status().readFailures > 0; });
+  eventually([&] { return reader.status().connected && reader.status().streamKind == RedisAdapter::StreamKind::Stream; });
+  assert(reader.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(13);
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 13; });
+  assert(reader.freshnessProof() != std::chrono::steady_clock::time_point{});
+
+  // If the callback cannot keep up, the hash coalesces intermediate updates.
+  { std::lock_guard<std::mutex> guard(mutex); hold = true; }
+  publish(14);
   {
     std::unique_lock<std::mutex> lock(mutex);
-    assert(changed.wait_for(lock, 5s, [&] { return callbackEntered; }));
+    assert(changed.wait_for(lock, 5s, [&] { return entered; }));
   }
-  for (int i = 2; i <= 5001; ++i) publish("slow", i, 512, 8);
-  const auto paused = slow.status();
-  assert(paused.entries == 1 && paused.callbacks == 0);
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    assert(received.size() == 1 && received[0] == 1);
-    release = true;
-  }
+  for (int i = 15; i <= 114; ++i) publish(i);
+  { std::lock_guard<std::mutex> guard(mutex); release = true; }
   changed.notify_all();
-  eventually([&] {
-    std::lock_guard<std::mutex> lock(mutex);
-    return !received.empty() && received.back() == 5001;
-  });
+  eventually([&] { std::lock_guard<std::mutex> guard(mutex); return !received.empty() && received.back() == 114; });
   {
-    std::lock_guard<std::mutex> lock(mutex);
-    assert(received.size() <= 9 && received[1] > received[0] + 1);
-    assert(received[1] >= 4994);
+    std::lock_guard<std::mutex> guard(mutex);
+    for (const auto batch : received) assert(batch <= 14 || batch == 114);
   }
-  assert(slow.tailMetadata().batch == "5001");
-  slow.reset();
+  reader.reset();
 
-  // Oversized payload, oversized metadata, excessive fields, and duplicate
-  // fields are rejected before returning to the IOC and advance the cursor
-  // exactly once. Redis has already materialized each entry at that point.
-  publish("limits", 1, 2 * 1024 * 1024);
-  std::mutex limitMutex;
-  uint64_t acceptedBatch = 0, acceptedRejections = 0, rejectedCallbacks = 0;
-  XrmLatestReader limited(config, "limits", 1024, 5,
-      [&](const auto&, const auto&, const auto& entries, const auto& metadata) {
-        std::lock_guard<std::mutex> lock(limitMutex);
-        if (entries[0].second.empty()) { ++rejectedCallbacks; return; }
-        acceptedBatch = std::stoull(entries[0].second.at("batch"));
-        acceptedRejections = metadata.readRejections;
-      });
-  const auto oversized = limited.snapshot();
-  assert(oversized.connected && oversized.rejected && oversized.fields.empty() && oversized.id != "0-0");
-  assert(limited.status().readRejections == 1);
-  limited.start();
-  redis.command("XADD", "{" + config.baseKey + "}:limits", "*", "_", "x", "extra", std::string(5000, 'm'));
-  eventually([&] { return limited.status().readRejections == 2; });
-  std::vector<std::string> excessive{"XADD", "{" + config.baseKey + "}:limits", "*"};
-  for (int i = 0; i < 33; ++i) { excessive.push_back("field" + std::to_string(i)); excessive.push_back("x"); }
-  redis.command(excessive.begin(), excessive.end());
-  eventually([&] { return limited.status().readRejections == 3; });
-  redis.command("XADD", "{" + config.baseKey + "}:limits", "*", "_", "x", "batch", "1", "batch", "2");
-  eventually([&] { return limited.status().readRejections == 4; });
-  std::this_thread::sleep_for(50ms);
-  assert(limited.status().readRejections == 4);
-  publish("limits", 5);
-  eventually([&] { std::lock_guard<std::mutex> lock(limitMutex); return acceptedBatch == 5; });
-  { std::lock_guard<std::mutex> lock(limitMutex); assert(acceptedRejections == 4 && rejectedCallbacks == 3); }
-  assert(limited.tailMetadata().present && limited.tailMetadata().batch == "5");
+  // An oversized compact hash must be rejected before field lookup, including
+  // when an unusual server configuration permits very large listpacks.
+  redis.command("CONFIG", "SET", "hash-max-listpack-value", "1048576");
+  const auto compact = "{" + config.baseKey + "}:compact:latest:v1";
+  redis.command("HSET", compact, "unrecognized", std::string(131072, 'x'));
+  redis.command("SET", "{" + config.baseKey + "}:compact:latest:v1:commit", "test");
+  assert(str(redis.command("OBJECT", "ENCODING", compact).get()) == "listpack");
+  const auto lengths = commandCount(redis, "hstrlen");
+  XrmHashReader compactReader(config, "compact", 1024, 5, [](const auto&, const auto&, const auto&, const auto&) {});
+  assert(compactReader.snapshot().rejected);
+  assert(commandCount(redis, "hstrlen") == lengths);
+  compactReader.reset();
+  redis.command("CONFIG", "SET", "hash-max-listpack-value", "64");
 
-  // Deleting and recreating a stream changes the reader epoch and permits the
-  // replacement stream to recover without reusing the previous cursor.
-  redis.command("DEL", "{" + config.baseKey + "}:limits");
-  eventually([&] { return limited.status().streamKind == RedisAdapter::StreamKind::Missing; });
-  assert(limited.status().epoch == 2 && limited.status().disappearances == 1);
-  publish("limits", 6);
-  eventually([&] { std::lock_guard<std::mutex> lock(limitMutex); return acceptedBatch == 6; });
-  assert(limited.status().epoch == 2);
-  limited.reset();
-
-  // A replacement with a lower stream ID can occur entirely between polls;
-  // the reader detects it and consumes the new stream in a new epoch.
-  redis.command("XADD", "{" + config.baseKey + "}:backward", "1000-0", "_", "old");
-  std::mutex resetMutex;
-  uint64_t resetEpoch = 0;
-  XrmLatestReader backward(config, "backward", 1024, 50,
-      [&](const auto&, const auto&, const auto&, const auto& metadata) {
-        std::lock_guard<std::mutex> lock(resetMutex);
-        resetEpoch = metadata.epoch;
-      });
-  assert(backward.snapshot().id == "1000-0");
-  redis.command("DEL", "{" + config.baseKey + "}:backward");
-  redis.command("XADD", "{" + config.baseKey + "}:backward", "1-0", "_", "new");
-  backward.start();
-  eventually([&] { std::lock_guard<std::mutex> lock(resetMutex); return resetEpoch == 2; });
-  assert(backward.status().streamResets == 1);
-  backward.reset();
-
-  // An unavailable initial Redis response also leaves latest-snapshot seeking
-  // pending. CLIENT PAUSE affects only this test's isolated Redis instance.
-  publish("offline", 1);
-  publish("offline", 2);
-  publish("offline", 3);
-  redis.command("CLIENT", "PAUSE", "1800", "ALL");
-  std::mutex offlineMutex;
-  std::vector<uint64_t> offlineBatches;
-  XrmLatestReader offline(config, "offline", 1024, 10,
-      [&](const auto&, const auto&, const auto& entries, const auto&) {
-        std::lock_guard<std::mutex> lock(offlineMutex);
-        offlineBatches.push_back(std::stoull(entries[0].second.at("batch")));
-      });
-  assert(!offline.snapshot().connected && offline.status().readFailures >= 1);
-  offline.start();
-  eventually([&] { std::lock_guard<std::mutex> lock(offlineMutex); return !offlineBatches.empty(); });
-  {
-    std::lock_guard<std::mutex> lock(offlineMutex);
-    assert((offlineBatches == std::vector<uint64_t>{3}));
-  }
-  offline.reset();
-
-  // Script permissions are explicit: an EVAL denial is a read rejection,
-  // never an excuse to fall back to an uncapped client-side fetch.
-  redis.command("ACL", "SETUSER", "bounded-test-user", "on", ">bounded-test-password",
-                "resetkeys", "~{xrm-bounded-test}:*", "-@all", "+type", "+xrange", "+xrevrange");
-  auto restrictedConfig = config;
-  restrictedConfig.user = "bounded-test-user";
-  restrictedConfig.password = "bounded-test-password";
-  publish("acl", 1);
-  publish("acl", 2);
-  publish("acl", 3);
+  // An initial script denial is retried as a baseline, not claimed fresh.
+  redis.command("ACL", "SETUSER", "xrm-hash-user", "on", ">xrm-hash-password", "resetkeys",
+                "~{xrm-hash-test}:*", "-@all", "+type", "+object|encoding", "+memory|usage",
+                "+hlen", "+hstrlen", "+hget", "+get", "+strlen");
+  auto restricted = config; restricted.user = "xrm-hash-user"; restricted.password = "xrm-hash-password";
   std::mutex aclMutex;
-  std::vector<uint64_t> aclBatches;
-  uint64_t aclRejections = 0;
-  XrmLatestReader acl(restrictedConfig, "acl", 1024, 10,
-      [&](const auto&, const auto&, const auto& entries, const auto& metadata) {
-        std::lock_guard<std::mutex> lock(aclMutex);
-        aclBatches.push_back(std::stoull(entries[0].second.at("batch")));
-        aclRejections = metadata.readRejections;
+  std::vector<uint64_t> aclValues;
+  XrmHashReader acl(restricted, "waveform", 1024, 10,
+      [&](const auto&, const auto&, const auto& entries, const auto&) {
+        if (entries[0].second.empty()) return;
+        std::lock_guard<std::mutex> guard(aclMutex);
+        aclValues.push_back(std::stoull(entries[0].second.at("batch")));
       });
-  const auto denied = acl.snapshot();
-  assert(denied.rejected && denied.fields.empty() && acl.status().readRejections == 1);
+  assert(acl.snapshot().rejected);
   acl.start();
+  redis.command("ACL", "SETUSER", "xrm-hash-user", "+eval");
+  eventually([&] { std::lock_guard<std::mutex> guard(aclMutex); return !aclValues.empty(); });
+  { std::lock_guard<std::mutex> guard(aclMutex); assert((aclValues == std::vector<uint64_t>{114})); }
+  assert(acl.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(115);
+  eventually([&] { std::lock_guard<std::mutex> guard(aclMutex); return aclValues.size() == 2; });
+  assert(acl.freshnessProof() != std::chrono::steady_clock::time_point{});
+  redis.command("ACL", "SETUSER", "xrm-hash-user", "-hstrlen");
   eventually([&] { return acl.status().readRejections >= 2; });
-  redis.command("ACL", "SETUSER", "bounded-test-user", "+eval");
-  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return !aclBatches.empty(); });
-  {
-    std::lock_guard<std::mutex> lock(aclMutex);
-    assert((aclBatches == std::vector<uint64_t>{3}) && aclRejections >= 2);
-  }
-  publish("acl", 4);
-  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return aclBatches.size() == 2; });
-  // After a successful baseline, outages retain the cursor and must replay
-  // subsequent retained records in order instead of seeking to the new tail.
-  redis.command("ACL", "SETUSER", "bounded-test-user", "-eval");
-  const auto previousRejections = acl.status().readRejections;
-  eventually([&] { return acl.status().readRejections > previousRejections; });
-  publish("acl", 5);
-  publish("acl", 6);
-  redis.command("ACL", "SETUSER", "bounded-test-user", "+eval");
-  eventually([&] { std::lock_guard<std::mutex> lock(aclMutex); return aclBatches.size() == 4; });
-  {
-    std::lock_guard<std::mutex> lock(aclMutex);
-    assert((aclBatches == std::vector<uint64_t>{3, 4, 5, 6}));
-  }
+  assert(acl.freshnessProof() == std::chrono::steady_clock::time_point{});
+  redis.command("ACL", "SETUSER", "xrm-hash-user", "+hstrlen");
+  eventually([&] { std::lock_guard<std::mutex> guard(aclMutex); return aclValues.size() == 3; });
+  assert(acl.freshnessProof() == std::chrono::steady_clock::time_point{});
+  publish(116);
+  eventually([&] { std::lock_guard<std::mutex> guard(aclMutex); return aclValues.size() == 4; });
+  assert(acl.freshnessProof() != std::chrono::steady_clock::time_point{});
   acl.reset();
-  redis.command("ACL", "DELUSER", "bounded-test-user");
+  redis.command("ACL", "DELUSER", "xrm-hash-user");
 
-  std::cout << "XRM reader ordering, overload loss, response limits, ACL and resets passed\n";
+  publishTo("delayed", 1);
+  DelayedProxy proxy(config.port);
+  auto delayedConfig = config; delayedConfig.port = proxy.port();
+  std::atomic<bool> observed{false};
+  XrmHashReader delayed(delayedConfig, "delayed", 1024, 5,
+      [&](const auto&, const auto&, const auto& entries, const auto&) {
+        if (!entries[0].second.empty() && entries[0].second.at("batch") == "2") observed = true;
+      });
+  assert(delayed.snapshot().present());
+  delayed.start();
+  publishTo("delayed", 2);
+  eventually([&] { return observed.load(); });
+  const auto delayedProof = delayed.freshnessProof();
+  assert(delayedProof != std::chrono::steady_clock::time_point{});
+  assert(std::chrono::steady_clock::now() - delayedProof >= 200ms);
+  delayed.reset();
+
+  std::cout << "XRM hash bounds, freshness, outage, ACL and coalescing passed\n";
 }

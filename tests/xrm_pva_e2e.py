@@ -108,6 +108,8 @@ def main():
     redis_port = int(os.environ["REDIS_PVXS_TEST_REDIS_PORT"])
     base = "xrm-pva-e2e"
     keys = ["{" + base + "}:xrm:CH1", "{" + base + "}:xrm:CH5"]
+    marker = "{" + base + "}:xrm:latest:v1:commit"
+    commits = "{" + base + "}:xrm:latest:v1:commits"
     expected = [[-131072, 131071, 42, -1], [12345, -12345, 0, 65536]]
     payload = b"".join(struct.pack("<ii", first, second) for first, second in zip(*expected))
     for key in keys:
@@ -170,7 +172,8 @@ def main():
                 producer = subprocess.Popen([args.stream, "--xrm-host", "127.0.0.1", "--xrm-port", str(source_port),
                     "--redis-host", "127.0.0.1", "--redis-port", str(redis_port), "--base-key", base,
                     "--key-prefix", "xrm", "--channels", "1,5", "--sample-bytes", "4",
-                    "--sample-rate-hz", "1000", "--samples-per-batch", "4", "--maxlen", "8"],
+                    "--sample-rate-hz", "1000", "--samples-per-batch", "4", "--maxlen", "8",
+                    "--publish-latest"],
                     stdout=stream_output, stderr=subprocess.STDOUT)
 
                 def eventually(predicate, explanation):
@@ -210,31 +213,68 @@ def main():
                     assert fields[b"session"] and int(fields[b"connection"]) > 0 and int(fields[b"batch"]) > 0
                     assert fields[b"source_validity"] == b"unknown" and fields[b"acq_time_valid"] == b"0"
                     assert b"acq_time_ns" not in fields
+                    latest = redis_command(redis_port, "HGETALL", key + ":latest:v1")
+                    latest = dict(zip(latest[::2], latest[1::2]))
+                    assert latest[b"state"] == b"ready" and latest[b"contract"] == b"fermi-ad/xrm-latest:1"
+                    assert latest[b"stream_id"] == cursor
+                    assert latest[b"commit"] == redis_command(redis_port, "GET", marker)
+                    assert all(latest[field] == value for field, value in fields.items())
                     eventually(lambda: get(channel) == (values, 3, 0, 0),
                                f"CH{channel} did not expose the exact waveform with invalid unknown time")
 
-                def inject(values, stamp, batch):
-                    cursor = redis_command(redis_port, "XADD", keys[0], "*", "_", struct.pack("<4i", *values),
-                        "schema", "fermi-ad/xrm-waveform:1", "sample_bytes", "4", "sample_count", "4",
-                        "sample_rate_hz", "1000", "channel", "1", "session", metadata[0][b"session"],
-                        "connection", metadata[0][b"connection"], "batch", str(batch),
-                        "source_validity", "valid", "acq_time_valid", "1", "acq_time_ns", str(stamp))
-                    if not isinstance(cursor, bytes):
-                        raise ValueError("unexpected injected Redis cursor")
-                    return cursor
+                source_text = (Path(__file__).resolve().parents[1] / "tools/xrm_stream.cpp").read_text()
+                match = re.search(r'kPublishLatest = R"lua\((.*?)\)lua"', source_text, re.S)
+                assert match, "publisher script not found"
+                publish_script = match.group(1)
+
+                def inject(values, stamp, batch, script=publish_script):
+                    token = metadata[0][b"session"] + b"/" + metadata[0][b"connection"] + b"/" + str(batch).encode()
+                    command = ["EVAL", script, "6", keys[0], keys[0] + ":latest:v1",
+                               keys[1], keys[1] + ":latest:v1", marker, commits, "8", token, "1,5"]
+                    for channel, payload_values, original in zip((1, 5), (values, expected[1]), metadata):
+                        fields = dict(original)
+                        fields.update({b"_": struct.pack("<4i", *payload_values), b"channel": str(channel).encode(),
+                                       b"batch": str(batch).encode(), b"source_validity": b"valid",
+                                       b"acq_time_valid": b"1", b"acq_time_ns": str(stamp).encode()})
+                        command.append(str(len(fields)))
+                        for name, item in fields.items():
+                            command.extend((name, item))
+                    return redis_command(redis_port, *command)
 
                 first_values = [-123, 456, 32768, -32769]
-                first_cursor = inject(first_values, 1700000000123456789, int(metadata[0][b"batch"]) + 1)
+                first_cursor = inject(first_values, 1700000000123456789, int(metadata[0][b"batch"]) + 1)[0]
                 assert tuple(map(int, first_cursor.split(b"-"))) > tuple(map(int, cursors[0].split(b"-")))
                 eventually(lambda: get(1) == (first_values, 0, 1700000000, 123456789),
                            "PVA did not preserve the first verified acquisition timestamp")
 
                 second_values = [17, -18, 19, -20]
-                second_cursor = inject(second_values, 1600000000000000042, int(metadata[0][b"batch"]) + 2)
+                second_cursor = inject(second_values, 1600000000000000042, int(metadata[0][b"batch"]) + 2)[0]
                 assert tuple(map(int, second_cursor.split(b"-"))) > tuple(map(int, first_cursor.split(b"-")))
                 eventually(lambda: get(1) == (second_values, 0, 1600000000, 42),
                            "PVA did not preserve a backwards acquisition timestamp")
-                assert get(5) == (expected[1], 3, 0, 0)
+                eventually(lambda: get(5) == (expected[1], 0, 1600000000, 42),
+                           "CH5 did not observe the committed timestamp")
+
+                # Inject an error in the actual publisher script after CH1's
+                # XADD but before CH5. Redis does not roll back CH1's entry.
+                before_lengths = [len(history(redis_port, key)) for key in keys]
+                before_commits = len(history(redis_port, commits))
+                needle = "local id = redis.call(unpack(streamargs))"
+                assert publish_script.count(needle) == 1
+                faulty = publish_script.replace(needle,
+                    "if i == 2 then return redis.error_reply('injected mid-batch failure') end\n  " + needle)
+                try:
+                    inject([9, 8, 7, 6], 1500000000000000001, int(metadata[0][b"batch"]) + 3, faulty)
+                    raise AssertionError("fault injection unexpectedly succeeded")
+                except ValueError as error:
+                    assert "injected mid-batch failure" in str(error)
+                assert [len(history(redis_port, key)) for key in keys] == [before_lengths[0] + 1, before_lengths[1]]
+                assert len(history(redis_port, commits)) == before_commits
+                assert redis_command(redis_port, "GET", marker) == b"pending"
+                eventually(lambda: get(1) == (second_values, 3, 1600000000, 42),
+                           "CH1 did not reject the partial batch")
+                eventually(lambda: get(5) == (expected[1], 3, 1600000000, 42),
+                           "CH5 did not reject the partial batch")
                 print("fake XRM -> Redis -> IOC -> PVA: exact 32-bit waveforms, unknown-time alarm, "
                       "verified timestamp and backwards time passed")
             except Exception:

@@ -389,7 +389,9 @@ readiness. It applies to both read and distinct confirmation sources. Setting it
 false retains source diagnostics and health alarms. `stale_after_ms` defaults to
 zero (cadence unspecified); otherwise it is 1–86400000 ms. Freshness measures
 time since the last valid snapshot/update was received on the IOC's monotonic
-clock. It does not estimate acquisition age from the legacy source timestamp.
+clock for legacy streams. It does not estimate acquisition age from the legacy
+source timestamp. XRM uses the start of a prior successful latest-hash poll as
+a conservative bound for a subsequently observed publication.
 For `stream_protocol: xrm_v1`, `stale_after_ms` is required and must be nonzero.
 Choose the interval to match the acquisition and trigger cadence, including
 expected quiet periods, so a stopped stream becomes invalid without treating
@@ -404,7 +406,8 @@ publication. Policy edits retain the runtime, reader, cursor and counters.
 
 Source epoch changes cancel pending confirmations without replaying commands;
 new matching observations must belong to the command's source epoch. A valid
-decoded sample in the current epoch restores readiness after stream replacement.
+decoded legacy sample in the current epoch restores readiness after replacement;
+XRM re-establishes a baseline and waits for a later publication.
 
 ### Collision and route validation
 

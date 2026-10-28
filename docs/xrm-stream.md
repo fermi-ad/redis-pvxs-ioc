@@ -40,7 +40,8 @@ verifying a suitable device format and Redis access, choose values explicitly:
 xrm-stream --xrm-host 192.0.2.10 --xrm-port 4210 \
   --redis-host 192.0.2.20 --redis-port 6379 --base-key my-xrm \
   --key-prefix adc --channels 1,5,8 --sample-bytes 4 \
-  --sample-rate-hz 1000000 --samples-per-batch 10000 --maxlen 128
+  --sample-rate-hz 1000000 --samples-per-batch 10000 --maxlen 128 \
+  --publish-latest
 ```
 
 These documentation-only addresses and settings are not a device
@@ -53,30 +54,36 @@ there is no lossless-acquisition or sustained-rate guarantee.
 
 ## Redis contract
 
-Each channel uses `{base-key}:key-prefix:CH<n>` and an entry with schema
-`fermi-ad/xrm-waveform:1`:
+Each channel's history stream uses `{base-key}:key-prefix:CH<n>`, with schema
+`fermi-ad/xrm-waveform:1`. The optional `--publish-latest` mode also publishes
+`{base-key}:key-prefix:CH<n>:latest:v1` hashes, a shared
+`{base-key}:key-prefix:latest:v1:commit` marker, and a
+`{base-key}:key-prefix:latest:v1:commits` stream. The IOC's `xrm_v1` mode
+requires this latest-value contract; it never reads the history stream. Without
+`--publish-latest`, the companion publishes only history and cannot feed an
+`xrm_v1` IOC.
 
-The IOC's XRM stream reader requires Redis ACL permission for `EVAL`, `TYPE`,
-`XRANGE`, and `XREVRANGE` on its waveform stream keys. A denied `EVAL` causes
-the reader to reject the read instead of falling back to a client-side fetch.
+The IOC requires Redis ACL permission for `EVAL`, `TYPE`, `OBJECT ENCODING`,
+`MEMORY USAGE`, `HLEN`, `HSTRLEN`, `HGET`, `STRLEN`, and `GET` on its latest
+hash and marker. It fails closed on a denied command, missing or invalid marker,
+invalid hash, or unsupported encoding, with no Stream fallback. The script
+reads a fixed set of fields only after checking each field's size. It rejects
+hashes with more than 32 fields and compact hashes over 64 KiB before field
+lookup; unknown fields are never retrieved. The configured payload limit bounds
+the accepted waveform. These are per-read bounds, not a global Redis memory or
+CPU budget; concurrent readers and writers require separate resource planning.
+The optional publisher script requires `EVAL`, `TYPE`, `XLEN`, `OBJECT
+ENCODING`, `MEMORY USAGE`, `HLEN`, `STRLEN`, `SET`, `HSET`, `HDEL`, and `XADD`
+on its group keys. Grant read and write permissions only to the intended
+principals; `xrm-stream` itself currently cannot authenticate.
 
-**Blocking limitation:** Redis materializes complete stream entries when the
-reader's Lua script calls `XRANGE` or `XREVRANGE`, before the script can check
-their lengths. Its payload and metadata limits cap the response sent to the IOC,
-but do not bound Redis's intermediate allocation or execution time. An
-oversized retained tail is fetched repeatedly. Do not deploy this reader until
-all stream writes and preexisting entries are independently subject to an
-enforced size limit, or the storage contract is redesigned to support bounded
-reads.
-
-Possible designs require a separate contract decision. One is an admission
-service that exclusively controls every write to these keys, validates each
-entry's encoded size, and establishes that no oversized historical entries
-remain; ordinary Redis ACLs alone cannot enforce argument lengths. Another is
-a fixed-field hash or bounded ring with per-field `HSTRLEN` checks before
-reading values. That would need explicit ordering, retention, atomicity, and
-loss semantics and would change the current Redis Stream interface. Either
-approach also needs separate storage and writer resource controls.
+This contract assumes one trusted producer exclusively owns each stream group,
+its hashes, marker, and commit stream. Other principals may read them but must
+not write, replace, trim, expire, or forge them. ACLs do not validate values or
+force writers to use the publication script. Start with a clean namespace and
+enforce that ownership independently. In particular, the producer still writes
+and trims history streams; the IOC's bounded hash reads do not bound arbitrary
+preexisting or externally written Stream data or Redis storage.
 
 | Field | Meaning |
 | --- | --- |
@@ -119,7 +126,7 @@ envelope. The structure contains:
 | `xrm.sourceValidity` | string | `unknown`, `valid`, or `invalid` |
 | `xrm.acqTimeValid` | bool | Source's acquisition-time validity flag |
 | `xrm.acqTimePresent`, `xrm.acqTimeParsed` | bool | Whether a Unix-ns field was present and whether it parsed successfully |
-| `xrm.missingBatches` | uint64 | Observed missing batch numbers within a session and connection |
+| `xrm.missingBatches` | uint64 | Batch numbers skipped between IOC observations within a session and connection |
 | `xrm.discontinuities` | uint64 | Total observed session, connection and sequence discontinuities |
 | `xrm.sessionChanges`, `xrm.connectionChanges`, `xrm.sequenceDiscontinuities` | uint64 | Discontinuities by cause |
 
@@ -138,25 +145,29 @@ validity and acquisition time are unverified.
 Batch numbers enable clients to compare channels and detect partial or missing
 publications. A forward jump within the same session and connection increments
 `missingBatches` by the number of missing batch numbers; this can include
-producer-side gaps, rejected entries and entries trimmed from Redis. A session
+producer-side gaps, rejected entries and values coalesced between IOC polls. A session
 change, connection change, or duplicate/backward batch increments a
 discontinuity counter without guessing the number lost. A session change is
 counted separately from a connection change because connection numbers belong
 to a session. Counters saturate at the uint64 maximum. The first observed
-tail snapshot establishes a baseline, so earlier losses are unknown. The
+latest snapshot establishes a baseline, so earlier losses are unknown. The
 generic Redis reader's `retentionGaps` counter is not populated for XRM;
 use these per-PV counters to observe sequence gaps. Counters
 persist across metadata-only reloads and reset when the PV runtime is
 recreated or the IOC restarts.
 
-The XRM reader consumes one Redis entry at a time and limits each payload and
-metadata response before it leaves Redis; see the Redis-side limitation above.
-It cannot recover entries already trimmed. The IOC marks a processed value
-stale until it reaches the last observed tail. Endpoint metadata alone cannot
-prove the duration of unseen batches, even when their rates and sample counts
-match, so no nominal batch-distance estimate can establish freshness while the
-reader is behind. The observed tail is updated when Redis is polled and is not
-an acquisition timestamp or a guarantee that no newer value has since arrived.
+The IOC observes only the latest committed hash and may skip intermediate
+waveforms even while their Stream entries remain retained. After startup, a
+Redis outage, a rejected read or a stream-ID reset, a retained hash establishes
+a baseline but remains INVALID until a subsequent publication is observed.
+For that new value, the previous successful poll's request-start time is a
+conservative bound on how old the publication could be. Unchanged polls do not
+refresh it. A delayed response may therefore be stale on arrival. This is
+producer-liveness evidence under the trusted-writer contract, not an
+acquisition timestamp or proof that no newer value has since arrived.
+When a hash disappears or Redis becomes unavailable, the reader records that
+state immediately; the PVA health alarm is refreshed by the application's
+normal source-health pump, typically once per second, rather than instantly.
 Source-health readiness remains invalid while source validity or time is
 invalid, even if records continue arriving. For receipt-liveness evidence,
 the source diagnostics expose `lastReceivedAgeMs` from the reader's local
@@ -194,12 +205,24 @@ The signed type and one-second freshness interval are illustrative. Confirm the
 device's actual encoding and expected time between acquisitions before choosing
 either value; the example does not authorize connecting to a live device.
 
-Each batch is submitted as a Redis transaction across the selected channels.
-Redis executes a transaction without interleaving other clients, but a command
-error can still leave some channels written. A connection loss can make the
-transaction outcome unknown. In either case the companion does not replay the
-batch; inspect matching session/connection/batch fields to detect partial or
-missing publications. On source or Redis disconnect it closes both sockets,
+With `--publish-latest`, one Redis Lua execution first marks the group pending,
+then appends each channel's Stream entry and updates its hash. Only after every
+channel succeeds does it append the batch token and selected channels to the
+commit stream and set the shared marker to that token. Redis does not roll back
+earlier writes on a script error: history consumers can see orphan or partial
+entries, while IOC hash readers reject all channels while the marker is pending
+or mismatched. History consumers must reconcile each entry's
+`session/connection/batch` token against the retained commit stream and the
+listed channels; when the commit record is absent, the batch is uncommitted or
+its status is unknown because the commit stream was trimmed. The current marker
+alone cannot prove that an older batch committed. Each IOC channel polls and
+publishes independently, so the shared marker does not make PVA updates across
+channels simultaneous; clients must compare session, connection, and batch
+before combining channels. Both history and commit
+streams use `--maxlen`; the script rejects an existing stream already above that
+limit. A connection loss can make the outcome unknown, and the companion does
+not replay the batch. Without `--publish-latest`, the older Stream-only
+transaction has no commit journal. On source or Redis disconnect it closes both sockets,
 discards the incomplete buffered batch, and reconnects. This prevents joining
 partial data from different connections, but cannot establish that the next
 connection starts on a source frame boundary. Reconnect attempts back off from

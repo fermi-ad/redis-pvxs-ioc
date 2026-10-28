@@ -1,5 +1,5 @@
 #include "redis_pvxs_ioc/runtime.h"
-#include "redis_pvxs_ioc/xrm_pipeline_lag.h"
+#include "redis_pvxs_ioc/xrm_contract.h"
 #include "RedisAdapter.hpp"
 
 #include <alarm.h>
@@ -24,11 +24,13 @@
 using namespace redis_pvxs_ioc;
 using namespace std::chrono_literals;
 
-template<class Predicate> void eventually(Predicate predicate) {
+template<class Predicate> void eventuallyImpl(int line, Predicate predicate) {
   const auto deadline = std::chrono::steady_clock::now() + 3s;
   while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
+  if (!predicate()) std::cerr << "eventually timed out at line " << line << '\n';
   assert(predicate());
 }
+#define eventually(...) eventuallyImpl(__LINE__, __VA_ARGS__)
 
 RedisAdapter::Attrs waveform(std::string bytes, const std::string& width = "2") {
   const auto count = bytes.size() / std::stoul(width);
@@ -55,13 +57,6 @@ template<class T> bool equals(const pvxs::Value& value, const std::vector<T>& ex
 }
 
 int main() {
-  assert(xrmPipelineCaughtUp("1-2", "1-2"));
-  assert(!xrmPipelineCaughtUp("1-2", "1-3"));
-  assert(!xrmPipelineCaughtUp("1-2", "1-1"));
-  assert(!xrmPipelineCaughtUp("1-2", ""));
-  assert(!xrmPipelineCaughtUp("", "1-2"));
-  assert(!xrmPipelineCaughtUp("1-2", "invalid"));
-
   const auto* port = std::getenv("REDIS_PVXS_TEST_REDIS_PORT");
   assert(port);
   RA_Options options;
@@ -73,6 +68,32 @@ int main() {
   RedisConfig backend;
   backend.baseKey = "xrm-runtime-tests";
   backend.port = static_cast<uint16_t>(options.cxn.port);
+  sw::redis::ConnectionOptions redisOptions;
+  redisOptions.host = "127.0.0.1"; redisOptions.port = options.cxn.port; redisOptions.socket_timeout = 10s;
+  sw::redis::Redis redis(redisOptions);
+  constexpr const char* fixturePublish = R"lua(
+local f = {}
+for i=2,#ARGV do f[#f+1] = ARGV[i] end
+local id = redis.call('XADD', KEYS[1], '*', unpack(f))
+redis.call('DEL', KEYS[2])
+redis.call('HSET', KEYS[2], 'contract', 'fermi-ad/xrm-latest:1', 'state', 'ready', 'commit', ARGV[1], 'stream_id', id, unpack(f))
+redis.call('SET', KEYS[3], ARGV[1])
+return id
+)lua";
+  auto publishXrm = [&](const std::string& key, const RedisAdapter::Attrs& fields) {
+    const auto stream = "{xrm-runtime-tests}:" + key;
+    const auto field = [&](const char* name) {
+      const auto found = fields.find(name);
+      return found == fields.end() ? std::string{} : found->second;
+    };
+    const auto token = field("session") + "/" + field("connection") + "/" + field("batch");
+    std::vector<std::string> args{"EVAL", fixturePublish, "3", stream, xrmLatestHashKey(stream),
+                                  xrmCommitMarkerKey(stream), token};
+    for (const auto& field : fields) { args.push_back(field.first); args.push_back(field.second); }
+    const auto reply = redis.command(args.begin(), args.end());
+    assert(reply && reply->type == REDIS_REPLY_STRING);
+    return RA_Time(std::string(reply->str, reply->len));
+  };
   RedisBackendConfigs readerPolicies{{"default", backend}};
   ServerConfig server;
   server.instance = "xrm-runtime-tests";
@@ -92,7 +113,7 @@ int main() {
   // but never substitutes the Redis ID or receipt time as acquisition time.
   auto fields = waveform(samples16(-2, 0x1234));
   fields["source_validity"] = "unknown";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("waveform", fields).ok());
+  assert(publishXrm("waveform", fields).ok());
   auto runtime = make(config);
   runtime->activate();
   auto initial = runtime->sharedPV().fetch();
@@ -125,9 +146,9 @@ int main() {
     next["batch"] = std::to_string(++batch);
     next["acq_time_valid"] = valid;
     if (!time.empty()) next["acq_time_ns"] = time;
-    const auto id = producer.addSingleValue<RedisAdapter::Attrs>("waveform", next);
+    const auto id = publishXrm("waveform", next);
     assert(id.ok());
-    eventually([&] { return equals<int16_t>(runtime->sharedPV().fetch(), {first, second}); });
+    eventually([&] { return runtime->sharedPV().fetch()["xrm.batch"].as<uint64_t>() == batch; });
     return id;
   };
   const auto validId = publish16(1, 2, "1", "1700000000123456789");
@@ -183,7 +204,7 @@ int main() {
   invalidSource["source_validity"] = "invalid";
   invalidSource["acq_time_valid"] = "1";
   invalidSource["acq_time_ns"] = "1600000000000000002";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("waveform", invalidSource).ok());
+  assert(publishXrm("waveform", invalidSource).ok());
   eventually([&] { return equals<int16_t>(runtime->sharedPV().fetch(), {42, 43}); });
   value = runtime->sharedPV().fetch();
   assert(value["alarm.severity"].as<int>() == epicsSevInvalid);
@@ -195,7 +216,7 @@ int main() {
   unknownSource["source_validity"] = "unknown";
   unknownSource["acq_time_valid"] = "1";
   unknownSource["acq_time_ns"] = "1600000000000000003";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("waveform", unknownSource).ok());
+  assert(publishXrm("waveform", unknownSource).ok());
   eventually([&] { return equals<int16_t>(runtime->sharedPV().fetch(), {44, 45}); });
   value = runtime->sharedPV().fetch();
   assert(value["alarm.severity"].as<int>() == epicsSevInvalid);
@@ -206,7 +227,7 @@ int main() {
   bothInvalid["source_validity"] = "invalid";
   bothInvalid["acq_time_valid"] = "0";
   bothInvalid["acq_time_ns"] = "1600000000000000004";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("waveform", bothInvalid).ok());
+  assert(publishXrm("waveform", bothInvalid).ok());
   eventually([&] { return equals<int16_t>(runtime->sharedPV().fetch(), {46, 47}); });
   value = runtime->sharedPV().fetch();
   assert(value["alarm.severity"].as<int>() == epicsSevInvalid);
@@ -268,7 +289,7 @@ int main() {
   for (const auto& malformed : bad) {
     const auto retained = runtime->sharedPV().fetch();
     const auto retainedBatch = retained["xrm.batch"].as<uint64_t>();
-    assert(producer.addSingleValue<RedisAdapter::Attrs>("waveform", malformed).ok());
+    assert(publishXrm("waveform", malformed).ok());
     eventually([&] { return runtime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid; });
     value = runtime->sharedPV().fetch();
     assert(equals<int16_t>(value, {40, 41}));
@@ -279,6 +300,8 @@ int main() {
     assert(value["xrm.sourceValidity"].as<std::string>() == "valid");
     // Ensure the next malformed sample is independently observed.
     publish16(40, 41, "1", "1600000000000000001");
+    if (runtime->sharedPV().fetch()["alarm.severity"].as<int>() != epicsSevNone)
+      publish16(40, 41, "1", "1600000000000000001");
     eventually([&] { return runtime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevNone; });
   }
 
@@ -293,8 +316,8 @@ int main() {
   auto channel2 = channel1;
   channel2["channel"] = "2";
   channel2["_"] = samples16(80, 81);
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("XRM:CH1", channel1).ok());
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("XRM:CH2", channel2).ok());
+  assert(publishXrm("XRM:CH1", channel1).ok());
+  assert(publishXrm("XRM:CH2", channel2).ok());
   auto channelConfig1 = config;
   channelConfig1.name = "channel1";
   channelConfig1.read.key = "XRM:CH1";
@@ -314,7 +337,7 @@ int main() {
   channel1["batch"] = "101";
   channel1["sample_rate_hz"] = "2000000";
   channel1["_"] = samples16(72, 73);
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("XRM:CH1", channel1).ok());
+  assert(publishXrm("XRM:CH1", channel1).ok());
   eventually([&] { return equals<int16_t>(channelRuntime1->sharedPV().fetch(), {72, 73}); });
   sample1 = channelRuntime1->sharedPV().fetch();
   sample2 = channelRuntime2->sharedPV().fetch();
@@ -327,7 +350,7 @@ int main() {
   wrongChannel["channel"] = "2";
   wrongChannel["batch"] = "102";
   wrongChannel["_"] = samples16(90, 91);
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("XRM:CH1", wrongChannel).ok());
+  assert(publishXrm("XRM:CH1", wrongChannel).ok());
   eventually([&] { return channelRuntime1->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid; });
   sample1 = channelRuntime1->sharedPV().fetch();
   assert(equals<int16_t>(sample1, {72, 73}));
@@ -343,7 +366,7 @@ int main() {
     channel1["connection"] = connection;
     channel1["batch"] = number;
     channel1["_"] = samples16(first, first + 1);
-    assert(producer.addSingleValue<RedisAdapter::Attrs>("XRM:CH1", channel1).ok());
+    assert(publishXrm("XRM:CH1", channel1).ok());
     eventually([&] { return equals<int16_t>(channelRuntime1->sharedPV().fetch(), {first, static_cast<int16_t>(first + 1)}); });
     return channelRuntime1->sharedPV().fetch();
   };
@@ -368,239 +391,84 @@ int main() {
   sample1 = advanceChannel(114, "run-8", "1", "3");
   assert(sample1["xrm.missingBatches"].as<uint64_t>() == UINT64_MAX);
 
-  // Publish a burst atomically in Redis so the reader sees a known tail while
-  // it processes earlier batches. PVA monitors must keep the alarm invalid
-  // throughout the nominal backlog and clear it only when caught up.
+  // A retained value is a baseline, not evidence that the producer is still
+  // running. A later publication proves liveness; unchanged polls do not.
   auto lagConfig = config;
   lagConfig.name = "lag";
   lagConfig.read.key = "lag:CH1";
-  // Even a nominal estimate below this deadline is unproven while unseen
-  // intermediate records can have different rates or sample counts.
-  lagConfig.sourceHealth.staleAfterMs = 60000;
-  auto lagFirst = waveform(samples16(1, 2));
-  lagFirst["session"] = "lag-run";
-  lagFirst["sample_rate_hz"] = "100";
-  lagFirst["acq_time_valid"] = "1";
-  lagFirst["acq_time_ns"] = "1";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("lag:CH1", lagFirst).ok());
+  lagConfig.sourceHealth.staleAfterMs = 200;
+  auto lagFields = waveform(samples16(1, 2));
+  lagFields["session"] = "lag-run";
+  lagFields["sample_rate_hz"] = "100";
+  lagFields["acq_time_valid"] = "1";
+  lagFields["acq_time_ns"] = "1";
+  assert(publishXrm("lag:CH1", lagFields).ok());
   auto lagRuntime = make(lagConfig);
   lagRuntime->activate();
-  auto pvaServer = pvxs::server::Config::isolated(AF_INET).build();
-  pvaServer.addPV(lagRuntime->fullName(), lagRuntime->sharedPV()).start();
-  auto client = pvaServer.clientConfig().build();
-  std::mutex monitorMutex;
-  std::vector<std::tuple<std::string, uint64_t, int>> monitored;
-  auto monitor = client.monitor(lagRuntime->fullName()).record("queueSize", uint32_t(256))
-      .record("pipeline", true).maskConnected(true).maskDisconnected(false)
-      .event([&](pvxs::client::Subscription& subscription) {
-        try {
-          while (auto update = subscription.pop()) {
-            std::lock_guard<std::mutex> guard(monitorMutex);
-            monitored.emplace_back(update["xrm.session"].as<std::string>(), update["xrm.batch"].as<uint64_t>(),
-                                   update["alarm.severity"].as<int>());
-          }
-        } catch (const std::exception&) {}
-      }).exec();
-  eventually([&] { std::lock_guard<std::mutex> guard(monitorMutex); return !monitored.empty(); });
+  assert(lagRuntime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid);
+  assert(!lagRuntime->sourceHealth()[0].ready);
+  lagFields["batch"] = "2";
+  assert(publishXrm("lag:CH1", lagFields).ok());
+  eventually([&] { return lagRuntime->sourceHealth()[0].ready; });
+  assert(lagRuntime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevNone);
+  std::this_thread::sleep_for(250ms);
+  assert(!lagRuntime->sourceHealth()[0].ready);
+  assert(lagRuntime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid);
+  lagConfig.sourceHealth.staleAfterMs = 5000;
+  lagRuntime->reconfigure(lagConfig, 2);
 
-  sw::redis::ConnectionOptions redisOptions;
-  redisOptions.host = "127.0.0.1";
-  redisOptions.port = options.cxn.port;
-  redisOptions.socket_timeout = 10s;
-  sw::redis::Redis redis(redisOptions);
+  // The stream retains every batch, but the IOC observes only the last hash.
+  // Its visible sequence gap counts missed observations, not hardware loss.
   constexpr const char* burst = R"lua(
-for i=2,1001 do
-  redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
-    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
-    'batch',tostring(i),'channel','1','sample_rate_hz','100','sample_count','2',
-    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
+local id
+for i=3,20 do
+  local f = {'_',string.char(1,0,2,0),'schema','fermi-ad/xrm-waveform:1',
+    'session','lag-run','connection','1','batch',tostring(i),'channel','1',
+    'sample_rate_hz','100','sample_count','2','sample_bytes','2',
+    'source_validity','valid','acq_time_valid','1','acq_time_ns','1'}
+  id = redis.call('XADD',KEYS[1],'*',unpack(f))
+  if i == 20 then
+    redis.call('DEL',KEYS[2])
+    redis.call('HSET',KEYS[2],'contract','fermi-ad/xrm-latest:1',
+      'state','ready','commit','lag-run/1/20','stream_id',id,unpack(f))
+    redis.call('SET',KEYS[3],'lag-run/1/20')
+  end
 end
-return 1
+return id
 )lua";
-  redis.command("EVAL", burst, "1", "{xrm-runtime-tests}:lag:CH1");
-  const auto monitorDeadline = std::chrono::steady_clock::now() + 15s;
-  bool observedBacklog = false, reachedTail = false;
-  while (std::chrono::steady_clock::now() < monitorDeadline) {
-    {
-      std::lock_guard<std::mutex> guard(monitorMutex);
-      observedBacklog = false;
-      reachedTail = false;
-      for (const auto& event : monitored) {
-        const auto batchNumber = std::get<1>(event);
-        if (std::get<0>(event) == "lag-run" && batchNumber >= 2 && batchNumber < 1001) {
-          observedBacklog = true;
-          assert(std::get<2>(event) == epicsSevInvalid);
-        }
-        if (std::get<0>(event) == "lag-run" && batchNumber == 1001 && std::get<2>(event) == epicsSevNone)
-          reachedTail = true;
-      }
-    }
-    if (observedBacklog && reachedTail) break;
-    std::this_thread::sleep_for(5ms);
-  }
-  assert(observedBacklog && reachedTail);
-
-  // The tail advertises a different rate and sample count from the unseen
-  // backlog. A local receipt time cannot make those historical waveforms
-  // fresh, even though the records and their timestamps are otherwise valid.
-  constexpr const char* rateChangeBurst = R"lua(
-local function append(batch, rate, count)
-  local payload = count == 4 and string.char(1,0,2,0,3,0,4,0) or string.char(1,0,2,0)
-  redis.call('XADD', KEYS[1], '*', '_', payload,
-    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
-    'batch',tostring(batch),'channel','1','sample_rate_hz',tostring(rate),'sample_count',tostring(count),
-    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
-end
-for i=1002,1501 do append(i, 100, 2) end
-append(1502, 200, 4)
-return 1
-)lua";
-  redis.command("EVAL", rateChangeBurst, "1", "{xrm-runtime-tests}:lag:CH1");
-  const auto rateDeadline = std::chrono::steady_clock::now() + 15s;
-  bool observedOldRate = false, reachedNewRate = false, observedUnready = false;
-  while (std::chrono::steady_clock::now() < rateDeadline) {
-    const auto health = lagRuntime->sourceHealth()[0];
-    if (!health.lastValidCursor.empty() && !health.reader.observedCursor.empty() &&
-        RedisAdapter::compareStreamIds(health.reader.observedCursor, health.lastValidCursor) > 0) {
-      observedUnready = true;
-      assert(!health.ready && !health.fresh);
-    }
-    {
-      std::lock_guard<std::mutex> guard(monitorMutex);
-      for (const auto& event : monitored) {
-        const auto batchNumber = std::get<1>(event);
-        if (std::get<0>(event) == "lag-run" && batchNumber >= 1002 && batchNumber <= 1501) {
-          observedOldRate = true;
-          assert(std::get<2>(event) == epicsSevInvalid);
-        }
-        if (std::get<0>(event) == "lag-run" && batchNumber == 1502 && std::get<2>(event) == epicsSevNone)
-          reachedNewRate = true;
-      }
-    }
-    if (observedOldRate && reachedNewRate && observedUnready) break;
-    std::this_thread::sleep_for(5ms);
-  }
-  assert(observedOldRate && reachedNewRate && observedUnready);
-  eventually([&] { return lagRuntime->sourceHealth()[0].ready; });
+  redis.command("EVAL", burst, "3", "{xrm-runtime-tests}:lag:CH1", "{xrm-runtime-tests}:lag:CH1:latest:v1",
+                "{xrm-runtime-tests}:lag:latest:v1:commit");
+  eventually([&] { return lagRuntime->sharedPV().fetch()["xrm.batch"].as<uint64_t>() == 20; });
   value = lagRuntime->sharedPV().fetch();
-  assert(value["xrm.sampleRateHz"].as<uint64_t>() == 200);
-  assert(value["xrm.sampleCount"].as<uint64_t>() == 4);
-  assert(equals<int16_t>(value, {1, 2, 3, 4}));
+  assert(value["xrm.missingBatches"].as<uint64_t>() == 17);
+  assert(lagRuntime->sourceHealth()[0].ready);
 
-  // A malformed tail must not make its preceding retained history look fresh.
-  constexpr const char* malformedTailBurst = R"lua(
-local function append(batch, rate)
-  redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
-    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
-    'batch',tostring(batch),'channel','1','sample_rate_hz',rate,'sample_count','2',
-    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
-end
-for i=1503,2002 do append(i, '100') end
-append(2003, 'invalid')
-return 1
-)lua";
-  redis.command("EVAL", malformedTailBurst, "1", "{xrm-runtime-tests}:lag:CH1");
+  // On a transport outage, the retained latest hash is re-baselined and the
+  // alarm remains invalid until another publication is observed.
+  const auto entriesBeforeOutage = lagRuntime->sourceHealth()[0].reader.entries;
+  redis.command("CLIENT", "PAUSE", "1500", "ALL");
+  eventually([&] { return !lagRuntime->sourceHealth()[0].reader.connected; });
+  assert(!lagRuntime->sourceHealth()[0].ready);
   eventually([&] {
     const auto health = lagRuntime->sourceHealth()[0];
-    return health.state == "invalid" && health.reader.cursor == health.reader.observedCursor;
+    return health.reader.connected && health.reader.entries > entriesBeforeOutage;
   });
-  bool observedBeforeMalformed = false;
-  eventually([&] {
-    std::lock_guard<std::mutex> guard(monitorMutex);
-    for (const auto& event : monitored) {
-      const auto batchNumber = std::get<1>(event);
-      if (std::get<0>(event) == "lag-run" && batchNumber >= 1503 && batchNumber <= 2002) {
-        observedBeforeMalformed = true;
-        assert(std::get<2>(event) == epicsSevInvalid);
-      }
-    }
-    return observedBeforeMalformed;
-  });
-  assert(observedBeforeMalformed);
-  auto recovery = lagFirst;
-  recovery["batch"] = "2004";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("lag:CH1", recovery).ok());
+  assert(!lagRuntime->sourceHealth()[0].ready);
+  lagFields["batch"] = "21";
+  assert(publishXrm("lag:CH1", lagFields).ok());
+  eventually([&] { return lagRuntime->sharedPV().fetch()["xrm.batch"].as<uint64_t>() == 21; });
+  // The request that observed 21 began after reconnect. Its observation is a
+  // deterministic conservative bound for the following publication.
+  lagFields["batch"] = "22";
+  assert(publishXrm("lag:CH1", lagFields).ok());
   eventually([&] { return lagRuntime->sourceHealth()[0].ready; });
-
-  // A backwards tail batch number gives no basis for a nominal lag estimate.
-  constexpr const char* backwardTailBurst = R"lua(
-local function append(batch)
-  redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
-    'schema','fermi-ad/xrm-waveform:1','session','lag-run','connection','1',
-    'batch',tostring(batch),'channel','1','sample_rate_hz','100','sample_count','2',
-    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
-end
-for i=2005,2504 do append(i) end
-append(10)
-return 1
-)lua";
-  redis.command("EVAL", backwardTailBurst, "1", "{xrm-runtime-tests}:lag:CH1");
-  const auto backwardDeadline = std::chrono::steady_clock::now() + 15s;
-  bool observedBeforeBackward = false, reachedBackward = false;
-  while (std::chrono::steady_clock::now() < backwardDeadline) {
-    {
-      std::lock_guard<std::mutex> guard(monitorMutex);
-      for (const auto& event : monitored) {
-        const auto batchNumber = std::get<1>(event);
-        if (std::get<0>(event) == "lag-run" && batchNumber >= 2005 && batchNumber <= 2504) {
-          observedBeforeBackward = true;
-          assert(std::get<2>(event) == epicsSevInvalid);
-        }
-        if (std::get<0>(event) == "lag-run" && batchNumber == 10 && std::get<2>(event) == epicsSevNone)
-          reachedBackward = true;
-      }
-    }
-    if (observedBeforeBackward && reachedBackward) break;
-    std::this_thread::sleep_for(5ms);
-  }
-  assert(observedBeforeBackward && reachedBackward);
-  assert(lagRuntime->sharedPV().fetch()["xrm.sequenceDiscontinuities"].as<uint64_t>() == 1);
-
-  constexpr const char* restartBurst = R"lua(
-local function append(session, batch)
-  redis.call('XADD', KEYS[1], '*', '_', string.char(1,0,2,0),
-    'schema','fermi-ad/xrm-waveform:1','session',session,'connection','1',
-    'batch',tostring(batch),'channel','1','sample_rate_hz','100','sample_count','2',
-    'sample_bytes','2','source_validity','valid','acq_time_valid','1','acq_time_ns','1')
-end
-for i=2505,3004 do append('lag-run', i) end
-append('lag-new', 1)
-return 1
-)lua";
-  redis.command("EVAL", restartBurst, "1", "{xrm-runtime-tests}:lag:CH1");
-  const auto restartDeadline = std::chrono::steady_clock::now() + 15s;
-  bool observedPriorSession = false, reachedNewSession = false;
-  while (std::chrono::steady_clock::now() < restartDeadline) {
-    {
-      std::lock_guard<std::mutex> guard(monitorMutex);
-      for (const auto& event : monitored) {
-        const auto& session = std::get<0>(event);
-        const auto batchNumber = std::get<1>(event);
-        if (session == "lag-run" && batchNumber >= 2505 && batchNumber <= 3004) {
-          observedPriorSession = true;
-          assert(std::get<2>(event) == epicsSevInvalid);
-        }
-        if (session == "lag-new" && batchNumber == 1 && std::get<2>(event) == epicsSevNone)
-          reachedNewSession = true;
-      }
-    }
-    if (observedPriorSession && reachedNewSession) break;
-    std::this_thread::sleep_for(5ms);
-  }
-  assert(observedPriorSession && reachedNewSession);
-  value = lagRuntime->sharedPV().fetch();
-  assert(value["xrm.sessionChanges"].as<uint64_t>() == 1);
-  assert(value["xrm.discontinuities"].as<uint64_t>() == 2);
-  monitor->cancel();
-  client.close();
-  pvaServer.stop();
   lagRuntime->deactivate("done");
 
   // Signed four-byte samples and the exact Unix epoch are representable.
   auto wide = waveform(std::string("\xff\xff\x01\x00\x00\x00\xfe\xff", 8), "4");
   wide["acq_time_valid"] = "1";
   wide["acq_time_ns"] = "0";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("wide", wide).ok());
+  assert(publishXrm("wide", wide).ok());
   auto wideConfig = config;
   wideConfig.name = "wide";
   wideConfig.type = PrimitiveType::Int32;
@@ -609,11 +477,11 @@ return 1
   value = wideRuntime->sharedPV().fetch();
   assert(equals<int32_t>(value, {131071, -131072}));
   assert(value["timeStamp.secondsPastEpoch"].as<int64_t>() == 0);
-  assert(value["alarm.severity"].as<int>() == epicsSevNone);
+  assert(value["alarm.severity"].as<int>() == epicsSevInvalid); // retained startup baseline
   wideRuntime->activate();
   wide["_"] = std::string("\x01\x00\x00\x00\x02\x00\x00\x00", 8);
   wide["acq_time_ns"] = "18446744073709551615";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("wide", wide).ok());
+  assert(publishXrm("wide", wide).ok());
   eventually([&] { return equals<int32_t>(wideRuntime->sharedPV().fetch(), {1, 2}); });
   value = wideRuntime->sharedPV().fetch();
   assert(value["timeStamp.secondsPastEpoch"].as<int64_t>() == 18446744073LL);
@@ -624,7 +492,7 @@ return 1
   unsignedBytes["source_validity"] = "valid";
   unsignedBytes["acq_time_valid"] = "1";
   unsignedBytes["acq_time_ns"] = "1";
-  assert(producer.addSingleValue<RedisAdapter::Attrs>("unsigned", unsignedBytes).ok());
+  assert(publishXrm("unsigned", unsignedBytes).ok());
   auto unsignedConfig = config;
   unsignedConfig.name = "unsigned";
   unsignedConfig.type = PrimitiveType::UInt8;
@@ -633,7 +501,7 @@ return 1
   value = unsignedRuntime->sharedPV().fetch();
   assert(equals<uint8_t>(value, {0, 255}));
   assert(value["timeStamp.nanoseconds"].as<int32_t>() == 1);
-  assert(value["alarm.severity"].as<int>() == epicsSevNone);
+  assert(value["alarm.severity"].as<int>() == epicsSevInvalid); // retained startup baseline
 
   // Legacy Pi streams ignore the new fields and keep deriving time from ID.
   auto legacy = waveform(samples16(60, 61));

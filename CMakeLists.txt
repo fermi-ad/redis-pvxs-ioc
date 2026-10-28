@@ -184,7 +184,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/alarm_worker.cpp
   src/ntndarray.cpp
   src/runtime.cpp
-  src/xrm_latest_reader.cpp
+  src/xrm_hash_reader.cpp
   src/operation_queue.cpp
   src/app.cpp
   src/pv_registry.cpp

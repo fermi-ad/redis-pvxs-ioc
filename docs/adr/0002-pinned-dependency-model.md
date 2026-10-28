@@ -11,7 +11,7 @@ The repo vendors its build-time dependencies through pinned git submodules under
 ## Rationale
 
 - The artifact trail needs exact EPICS, PVXS, Redis, and YAML revisions attached to the product.
-- The runtime depends on local EPICS/PVXS branch behavior that is not yet treated as an upstream release baseline.
+- The runtime still requires a local EPICS Base extension; PVXS uses an exact official upstream revision.
 - Container builds should not fetch arbitrary moving heads.
 
 ## Consequences

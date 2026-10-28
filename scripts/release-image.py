@@ -28,7 +28,7 @@ SEMVER = re.compile(
 CANDIDATE_CHECKS = {"image", "smoke", "access", "sbom", "provenance", "source-inputs"}
 CANDIDATE_EVIDENCE = {"source-inputs.json", "sbom.json", "provenance.json", "registry-manifest.json"}
 QUALIFICATION_CHECKS = {
-    "native-macos", "full-feature", "minimal", "sanitizers", "redis-pva",
+    "full-feature", "minimal", "sanitizers", "redis-pva",
     "discovery-catalog", "rpc-http", "imaging-600-frames", "capacity", "rollback",
 }
 

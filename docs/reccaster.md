@@ -13,8 +13,8 @@ behavior until upgraded to a validated release.
 
 Registration is enabled by default and listens for RecCeiver announcements on
 UDP 5049. RecCeiver supplies its TCP endpoint and server key. The service uploads
-canonical PVs, their aliases, built-in diagnostics, and successfully reflected
-RPC endpoints. The `IOCNAME` is `server.instance`, and `PVAS_SERVER_PORT` is the
+canonical PVs, their aliases, selected PVA gateway channels, built-in diagnostics,
+and successfully reflected RPC endpoints. The `IOCNAME` is `server.instance`, and `PVAS_SERVER_PORT` is the
 actual bound PVA TCP port, including when an ephemeral port was requested.
 `HOSTNAME` defaults to the system hostname; the environment can override it.
 `ENGINEER`, `LOCATION`, `CONTACT`, `BUILDING`, and `SECTOR` are included when set.

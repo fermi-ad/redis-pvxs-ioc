@@ -10,11 +10,14 @@ import subprocess
 import sys
 import tempfile
 
+from pva_fixture import wait_for_ioc_generation
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ioc", required=True)
     parser.add_argument("--client", required=True)
+    parser.add_argument("--pvxget", required=True)
     parser.add_argument("--frames", type=int, default=16)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--height", type=int, default=16)
@@ -42,6 +45,7 @@ def main():
         with (folder / "ioc.log").open("w") as log:
             ioc = subprocess.Popen([args.ioc, "--config", str(path)], stdout=log, stderr=subprocess.STDOUT)
             try:
+                wait_for_ioc_generation(ioc, args.pvxget, "imaging-transfer", f"127.0.0.1:{pva_port}")
                 command = [args.client, "--redis-port", str(redis_port), "--base-key", "imaging-transfer",
                            "--pv", "IMAGE:alias", "--pva-address", f"127.0.0.1:{pva_port}",
                            "--frames", str(args.frames), "--width", str(args.width), "--height", str(args.height),

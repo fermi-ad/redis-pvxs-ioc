@@ -56,7 +56,8 @@ merging a PR into the integration branch alone does not complete release work.
 
 Track the focused PVXS adoption in
 [#144](https://github.com/fermi-ad/redis-pvxs-ioc/issues/144) and
-[#147](https://github.com/fermi-ad/redis-pvxs-ioc/issues/147), through a PR into
+[#147](https://github.com/fermi-ad/redis-pvxs-ioc/issues/147), through
+[PR #160](https://github.com/fermi-ad/redis-pvxs-ioc/pull/160) into
 `dev/v1.0.0`. Replace the IOC fork pin
 `749a8933b7982cb4dd9c16660a53f93bcdd3d67e`, which adds a single backlog change
 to the `1.5.2` baseline, with official
@@ -70,9 +71,11 @@ Before integration, require clean Linux amd64 minimal, sanitizer and image
 validation, plus 60 fresh bursts: 20 each at 16, 32 and 64 client contexts, using
 the fixture's five-second deadline with zero Linux `ListenOverflows` and
 `ListenDrops`. Also require source-health, outage, reconnect, alias, reload,
-access and write-confirmation coverage. This adoption validation is pending;
-record its exact source and image identities with the results before accepting
-the change.
+access and write-confirmation coverage. The development runs and exact source,
+image and fixture identities are recorded in the
+[adoption evidence report](validation/pvxs-upstream-adoption-2026-10-28.md).
+Integration remains pending current-head required CI and independent review;
+these development results do not qualify a final release candidate.
 
 Keep [#122](https://github.com/fermi-ad/redis-pvxs-ioc/issues/122) and
 [#138](https://github.com/fermi-ad/redis-pvxs-ioc/issues/138) open until final

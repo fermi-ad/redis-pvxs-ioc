@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
     eventually([&] { return count("started") == 8; });
     auto refusedOp = call("RPC:secured", 0, "refused", refused);
     eventually([&] { return queue->stats().queued == 1; });
+    const auto deniedBefore = access->status().operationsDenied;
     assert(asInitMem("ASG(CONTROL) { RULE(1, READ) }\n", nullptr) == 0);
     holding.wait(); refused.wait();
     const auto records = auditRecords(captured.finish());
@@ -166,7 +167,7 @@ int main(int argc, char** argv) {
     for (const auto& record : records)
       if (record.phase == "authorization" && record.result == "allowed") admitted = record.id;
     assert(deniedAtDispatch(records, admitted, "rpc"));
-    assert(access->status().operationsDenied == 1);
+    assert(access->status().operationsDenied == deniedBefore + 1);
   }
 
   Completion shuttingDown;

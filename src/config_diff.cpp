@@ -65,6 +65,38 @@ ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
   }
   for (const auto& item : newPVs) if (!oldPVs.count(item.first)) diff.added.push_back(item.first);
 
+  std::map<std::string, const GatewayPVConfig*> oldGateways, newGateways;
+  for (const auto& pv : before.pvaGateway.pvs) oldGateways.emplace(fullGatewayName(before.server, pv), &pv);
+  for (const auto& pv : after.pvaGateway.pvs) newGateways.emplace(fullGatewayName(after.server, pv), &pv);
+  const auto erase = [](auto& values, const std::string& name) {
+    values.erase(std::remove(values.begin(), values.end(), name), values.end());
+  };
+  for (const auto& item : oldGateways) {
+    const auto next = newGateways.find(item.first);
+    if (next == newGateways.end()) {
+      if (newPVs.count(item.first)) {
+        erase(diff.added, item.first);
+        diff.replaced.push_back(item.first);
+      } else diff.removed.push_back(item.first);
+      continue;
+    }
+    const bool accessChanged = !sameAccessAssignment(
+        item.second->access.value_or(before.access.defaults.pv),
+        next->second->access.value_or(after.access.defaults.pv));
+    if (item.second->upstream != next->second->upstream || item.second->server != next->second->server || accessChanged)
+      diff.replaced.push_back(item.first);
+    if (accessChanged) diff.accessChanged.push_back(item.first);
+  }
+  for (const auto& item : newGateways) {
+    if (oldGateways.count(item.first)) continue;
+    if (oldPVs.count(item.first)) {
+      erase(diff.removed, item.first);
+      diff.replaced.push_back(item.first);
+    } else diff.added.push_back(item.first);
+  }
+  std::sort(diff.added.begin(), diff.added.end());
+  std::sort(diff.removed.begin(), diff.removed.end());
+
   std::set<std::string> backends;
   for (const auto& entry : before.redisBackends) backends.insert(entry.first);
   for (const auto& entry : after.redisBackends) backends.insert(entry.first);

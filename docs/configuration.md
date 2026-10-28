@@ -32,11 +32,12 @@ alarms: {}                # optional
 channelfinder: {}         # optional
 discovery: {}             # optional; automatic RecCeiver registration enabled
 limits: {}                # optional; bounded write queues, deadlines and payloads
-pvs: []                   # optional when rpc_services is non-empty
-rpc_services: []          # optional when pvs is non-empty
+pvs: []                   # optional with RPC services or selected gateway PVs
+rpc_services: []          # optional with PVs or selected gateway PVs
+pva_gateway: {}           # optional; explicitly selected upstream PVA channels
 ```
 
-At least one `pvs` or `rpc_services` entry is required. The old `PVList`,
+At least one `pvs`, `rpc_services`, or `pva_gateway.pvs` entry is required. The old `PVList`,
 `PVBase`, and `RedisBase` prototype keys are rejected.
 
 ## Operation limits
@@ -93,6 +94,86 @@ Native EPICS ACF access control is opt-in and startup-immutable. When enabled,
 the policy, macros, defaults, endpoint assignments, and optional file watcher
 are hot-reloadable. See [Access control](access-control.md) for the complete
 schema, authorization behavior, and reload guarantees.
+
+## `pva_gateway`
+
+The optional gateway exposes selected PVA channels read-only from explicitly
+configured device addresses. No Redis-backed PVs are required for a gateway-only
+IOC, but the usual Redis backend configuration remains required for the IOC's
+alarm publisher. For example:
+
+```yaml
+server:
+  instance: camera-gateway
+  namespace: VIEW
+redis:
+  base_key: gateway
+  host: redis
+  port: 6379
+access:
+  enabled: true
+  file: /etc/redis-pvxs-ioc/access.acf
+pva_gateway:
+  pvs:
+    - name: image
+      upstream: "CAMERA:IMAGE"
+      server: "192.0.2.10:5075"
+      access: {asg: CAMERA, asl: 0}
+```
+
+This serves `VIEW:image` from the exact upstream name `CAMERA:IMAGE` using a
+direct PVA connection to the configured server's numeric IPv4 address and TCP
+port. Each PV requires its own `server`; no UDP search, environment-provided
+address list or name server is used. Unspecified, multicast, limited broadcast,
+`.255` addresses, and addresses identified as local-interface broadcasts are
+rejected. The same upstream PV may be selected from different servers, but a
+server/PV pair may appear only once. Direct addressing selects a network target;
+it does not provide cryptographic server authentication.
+
+The configured TCP port must remain valid across device restarts. Some XRM
+application ports may change when the device or application restarts; verify
+the new endpoint and reload the configuration if that happens. Until then the
+gateway remains disconnected rather than searching for a replacement server.
+
+Local names must be unique across the IOC namespace, aliases, diagnostics and
+reflected RPCs. An upstream name may not match any local endpoint, including a
+reflected RPC. During reload it also may not match an endpoint of the still-active
+generation; remove that endpoint in one reload before selecting that upstream in
+a subsequent reload. These checks prevent the IOC from resolving a gateway
+subscription back to its own published endpoint. They do not detect a forwarding
+cycle involving other independent gateways.
+
+The gateway preserves the upstream PVA structure, metadata and updates. A GET
+returns the latest monitor snapshot; GET and monitor `pvRequest` options are
+not forwarded upstream. Fields describing request behavior can therefore
+describe the gateway's upstream monitor rather than the downstream request.
+For example, an EPICS group may return `record._options.queueSize=0` for its own
+GET and `4` for the gateway's monitor, and `record[atomic=false]` on a gateway
+GET does not request a non-atomic upstream GET. Use a direct device connection
+when operation-specific GET or monitor options are required. Field selection on
+the cached result remains local. If the upstream disconnects, the local
+channel closes until a fresh snapshot arrives. The gateway rejects every PUT
+execution, including when ACF is disabled or grants write access; it never
+sends a PUT upstream. PVA may still allow PUT setup and expose the value type
+before execution is rejected. The gateway does not proxy PVA RPC operations,
+and its upstream monitor does not apply the Redis-source payload limit to
+incoming device values.
+Terminal upstream monitor rejections are retried at most once every five seconds;
+the exported channel stays disconnected until a fresh snapshot arrives.
+
+Gateway channels use `access.defaults.pv` or their explicit `access` assignment.
+When enabled, ACF checks local clients on reads and monitors; gateway PUTs are
+always rejected. Upstream device authorization remains independent and sees the
+gateway client's identity, not the downstream user's identity. Changes to
+selected channels, targets, and assignments can be reloaded: unchanged channels
+retain their subscriptions; replaced and removed channels retire at namespace
+cutover, and failed candidates leave the active generation in place. The
+configured gateway names are included
+in RecCeiver and ChannelFinder catalogs even while a device is disconnected.
+The Redis source `ready` diagnostic does not report gateway connectivity; use
+the exported channel's connection state to detect an unavailable upstream.
+Writable forwarding and gateway health are future work tracked in
+[#149](https://github.com/fermi-ad/redis-pvxs-ioc/issues/149).
 
 ## Redis backends
 

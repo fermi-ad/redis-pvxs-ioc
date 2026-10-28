@@ -1,4 +1,5 @@
 #include "redis_pvxs_ioc/operation_queue.h"
+#include <epicsExit.h>
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
@@ -17,6 +18,10 @@ struct Gate {
   void release() { std::lock_guard<std::mutex> lock(mutex); open = true; event.notify_all(); }
   void wait() { std::unique_lock<std::mutex> lock(mutex); event.wait(lock, [&] { return open; }); }
 };
+
+void countThreadExit(void* context) {
+  ++*static_cast<std::atomic<unsigned>*>(context);
+}
 
 int main() {
   const auto unexpected = [](OperationFailure, const std::string&) { assert(false); };
@@ -103,5 +108,32 @@ int main() {
     queue.shutdown();
     queue.shutdown();
     assert(queue.stats().residentBytes == 0 && queue.stats().queued == 0);
+  }
+  {
+    std::atomic<unsigned> workerExits{0}, timerExits{0};
+    OperationQueue queue({1, 16, 4096});
+    Gate active;
+    std::promise<void> started, expired;
+    assert(queue.submit({"active", 1, OperationQueue::Clock::now() + 3s,
+        [&] {
+          assert(epicsAtThreadExit(countThreadExit, &workerExits) == 0);
+          started.set_value();
+          active.wait();
+        }, unexpected}));
+    assert(started.get_future().wait_for(1s) == std::future_status::ready);
+    assert(queue.submit({"expiring", 1, OperationQueue::Clock::now() + 50ms,
+        [] { assert(false); },
+        [&](OperationFailure why, const auto&) {
+          assert(why == OperationFailure::Deadline);
+          assert(epicsAtThreadExit(countThreadExit, &timerExits) == 0);
+          expired.set_value();
+        }}));
+    assert(expired.get_future().wait_for(1s) == std::future_status::ready);
+    assert(workerExits == 0 && timerExits == 0);
+    active.release();
+    idle(queue);
+    assert(workerExits == 0 && timerExits == 0);
+    queue.shutdown();
+    assert(workerExits == 1 && timerExits == 1);
   }
 }

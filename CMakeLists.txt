@@ -186,6 +186,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/operation_queue.cpp
   src/app.cpp
   src/pv_registry.cpp
+  src/gateway_pv.cpp
   ${REDIS_ADAPTER_SOURCES}
 )
 
@@ -256,8 +257,9 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   find_package(Threads REQUIRED)
 
   add_executable(operation_queue_tests tests/operation_queue_tests.cpp src/operation_queue.cpp)
-  target_include_directories(operation_queue_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  target_link_libraries(operation_queue_tests PRIVATE Threads::Threads)
+  target_include_directories(operation_queue_tests PRIVATE ${CMAKE_SOURCE_DIR}/include
+    ${EPICS_BASE}/include ${EPICS_BASE}/include/${EPICS_COMPILER_DIR} ${EPICS_BASE}/include/${EPICS_OS_DIR})
+  target_link_libraries(operation_queue_tests PRIVATE Threads::Threads ${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT})
   target_compile_options(operation_queue_tests PRIVATE -UNDEBUG)
   add_test(NAME operation_queue_tests COMMAND operation_queue_tests)
   set_tests_properties(operation_queue_tests PROPERTIES TIMEOUT 15)
@@ -275,6 +277,18 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     --fixture $<TARGET_FILE:qualification_probe_fixture> --probe $<TARGET_FILE:qualification_probe>)
   set_tests_properties(qualification_probe_e2e PROPERTIES TIMEOUT 25)
   find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  add_executable(gateway_pva_tests tests/gateway_pva_tests.cpp)
+  target_link_libraries(gateway_pva_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(gateway_pva_tests PRIVATE -UNDEBUG)
+  add_test(NAME gateway_pva_tests COMMAND gateway_pva_tests)
+  set_tests_properties(gateway_pva_tests PROPERTIES TIMEOUT 45)
+  add_executable(gateway_app_tests tests/gateway_app_tests.cpp)
+  target_link_libraries(gateway_app_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(gateway_app_tests PRIVATE -UNDEBUG)
+  add_test(NAME gateway_app_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:gateway_app_tests>)
+  set_tests_properties(gateway_app_tests PROPERTIES TIMEOUT 75)
   if(REDIS_PVXS_IOC_ENABLE_GRPC)
     set(RPC_FIXTURE_PROTO "${CMAKE_SOURCE_DIR}/tests/rpc_fixture.proto")
     set(RPC_FIXTURE_DIR "${CMAKE_BINARY_DIR}/rpc-fixture")
@@ -421,6 +435,7 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
 
   add_executable(config_tests tests/config_tests.cpp)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(config_tests PRIVATE -UNDEBUG)
   add_test(NAME config_tests COMMAND config_tests)
 
   add_executable(access_control_tests tests/access_control_tests.cpp)
@@ -483,6 +498,7 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
     add_executable(channelfinder_tests tests/channelfinder_tests.cpp)
     target_link_libraries(channelfinder_tests PRIVATE redis-pvxs-channelfinder)
+  target_compile_options(channelfinder_tests PRIVATE -UNDEBUG)
     target_compile_options(channelfinder_tests PRIVATE -UNDEBUG)
     add_test(NAME channelfinder_tests COMMAND channelfinder_tests)
     add_test(NAME channelfinder_http_tests COMMAND ${Python3_EXECUTABLE}

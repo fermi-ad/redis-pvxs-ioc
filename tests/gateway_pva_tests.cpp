@@ -3,11 +3,13 @@
 #endif
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/gateway_pv.h"
+#include "../src/gateway_dispatch_fence.h"
 
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,13 +27,74 @@
 using namespace redis_pvxs_ioc;
 using namespace std::chrono_literals;
 
-template<typename F> void eventually(F predicate) {
+void testConnectionSendFence() {
+  GatewayDispatchFence fence;
+  fence.connect();
+  fence.activate();
+  const auto admitted = fence.admit();
+  assert(admitted);
+
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool insideSend = false, releaseSend = false, disconnectStarted = false;
+  bool sent = false, disconnected = false;
+  std::thread sender([&] {
+    assert(fence.dispatch(*admitted, [&] {
+      std::unique_lock<std::mutex> lock(mutex);
+      insideSend = true;
+      changed.notify_all();
+      changed.wait(lock, [&] { return releaseSend; });
+      sent = true;
+    }));
+  });
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    assert(changed.wait_for(lock, 5s, [&] { return insideSend; }));
+  }
+  std::thread monitor([&] {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      disconnectStarted = true;
+      changed.notify_all();
+    }
+    fence.disconnect();
+    std::lock_guard<std::mutex> lock(mutex);
+    disconnected = true;
+    changed.notify_all();
+  });
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    assert(changed.wait_for(lock, 5s, [&] { return disconnectStarted; }));
+    // The disconnect cannot invalidate the checked generation during send.
+    assert(!changed.wait_for(lock, 100ms, [&] { return disconnected; }));
+    releaseSend = true;
+  }
+  changed.notify_all();
+  sender.join();
+  monitor.join();
+  assert(sent && disconnected);
+
+  fence.connect();
+  bool staleSent = false;
+  assert(!fence.dispatch(*admitted, [&] { staleSent = true; }));
+  assert(!staleSent);
+  const auto fresh = fence.admit();
+  assert(fresh && *fresh != *admitted);
+  assert(fence.dispatch(*fresh, [&] { sent = true; }));
+  fence.retire();
+  assert(!fence.admit() && !fence.dispatch(*fresh, [] {}));
+}
+
+template<typename F> void eventuallyAt(int line, F predicate) {
   const auto deadline = std::chrono::steady_clock::now() + 8s;
   while (!predicate()) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      std::fprintf(stderr, "gateway test timed out at line %d\n", line);
     assert(std::chrono::steady_clock::now() < deadline);
     std::this_thread::sleep_for(5ms);
   }
 }
+#define eventually(...) eventuallyAt(__LINE__, __VA_ARGS__)
 
 template<typename T> pvxs::shared_array<const T> array(std::initializer_list<T> values) {
   pvxs::shared_array<T> result(values.size());
@@ -175,6 +238,7 @@ private:
 };
 
 int main() {
+  testConnectionSendFence();
   // Separate isolated servers ensure the gateway must use its supplied upstream
   // context and cannot accidentally find its own exported channel.
   auto upstreamServer = pvxs::server::Config::isolated(AF_INET).build();
@@ -366,6 +430,65 @@ int main() {
   assert(deniedGet && deniedMonitor && puts == 2);
   policy("WRITE");
   assert(access->reload("test", error));
+
+  // An admitted PUT waiting in the queue belongs to its original connection
+  // generation. It must not reach the device after a disconnect/reconnect.
+  entered = false;
+  release = false;
+  const auto reconnectBlock = queue->submit({"export:table", 256, OperationQueue::Clock::now() + 5s,
+      [&] {
+        std::unique_lock<std::mutex> lock(blockMutex);
+        entered = true;
+        blockChanged.notify_all();
+        blockChanged.wait(lock, [&] { return release; });
+      }, [](OperationFailure, const std::string&) {}});
+  assert(reconnectBlock);
+  {
+    std::unique_lock<std::mutex> lock(blockMutex);
+    assert(blockChanged.wait_for(lock, 5s, [&] { return entered; }));
+  }
+  // Disable client-side automatic re-execution so the fixture submits one
+  // request even when the local exported channel disconnects.
+  std::mutex staleMutex;
+  std::condition_variable staleChanged;
+  pvxs::Value stalePrototype;
+  bool staleInit = false, staleFinished = false, staleFailed = false;
+  auto stale = client.put("export:table").field("value.reading").autoExec(false)
+      .onInit([&](const pvxs::Value& value) {
+        std::lock_guard<std::mutex> lock(staleMutex);
+        stalePrototype = value.cloneEmpty();
+        staleInit = true;
+        staleChanged.notify_all();
+      }).exec();
+  {
+    std::unique_lock<std::mutex> lock(staleMutex);
+    assert(staleChanged.wait_for(lock, 5s, [&] { return staleInit; }));
+    stalePrototype["value.reading"] = array<double>({12.0});
+  }
+  stale->reExecPut(stalePrototype, [&](pvxs::client::Result&& result) {
+    bool failed = false;
+    try { result(); } catch (const std::exception&) { failed = true; }
+    std::lock_guard<std::mutex> lock(staleMutex);
+    staleFailed = failed;
+    staleFinished = true;
+    staleChanged.notify_all();
+  });
+  eventually([&] { return queue->stats().queued == 1; });
+  upstream.close();
+  eventually([&] { return !gateway->connected(); });
+  upstream.open(initialTable);
+  eventually([&] { return gateway->connected(); });
+  {
+    std::lock_guard<std::mutex> lock(blockMutex);
+    release = true;
+  }
+  blockChanged.notify_all();
+  {
+    std::unique_lock<std::mutex> lock(staleMutex);
+    assert(staleChanged.wait_for(lock, 5s, [&] { return staleFinished; }));
+    assert(staleFailed);
+  }
+  assert(puts == 2);
 
   // A remote monitor setup error is terminal in PVXS. The application pump
   // retries at a bounded cadence and resumes once the upstream allows it.

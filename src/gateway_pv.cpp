@@ -5,6 +5,7 @@
 
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/queued_exec.h"
+#include "gateway_dispatch_fence.h"
 
 #include <atomic>
 #include <charconv>
@@ -120,30 +121,28 @@ struct GatewayPV::State : public std::enable_shared_from_this<GatewayPV::State> 
     // Only one monitor owns this state. The mutex also serializes an explicit
     // shutdown against an in-progress open/post/close sequence.
     std::lock_guard<std::mutex> lock(monitorMutex);
-    if (!alive) return;
+    if (!fence.alive()) return;
+    const auto disconnected = [&] {
+      fence.disconnect();
+      pv.close();
+    };
     for (;;) {
       try {
         auto update = sub.pop();
         if (!update) break;
-        if (!alive) break;
+        if (!fence.alive()) break;
         if (!pv.isOpen()) pv.open(update);
         else pv.post(update);
-        isConnected = true;
+        fence.connect();
       } catch (const pvxs::client::Finished&) {
-        isConnected = false;
-        ++epoch;
-        pv.close();
+        disconnected();
         monitorNeedsRetry = true;
         break;
       } catch (const pvxs::client::Disconnect&) {
-        isConnected = false;
-        ++epoch;
-        pv.close();
+        disconnected();
       } catch (const std::exception&) {
         // Remote monitor errors cannot be represented as a valid cached value.
-        isConnected = false;
-        ++epoch;
-        pv.close();
+        disconnected();
         monitorNeedsRetry = true;
         break;
       }
@@ -151,8 +150,8 @@ struct GatewayPV::State : public std::enable_shared_from_this<GatewayPV::State> 
   }
 
   void put(std::unique_ptr<pvxs::server::ExecOp>&& op, pvxs::Value&& value) {
-    if (!alive || !active || !isConnected) { op->error("upstream unavailable"); return; }
-    const auto admittedEpoch = epoch.load();
+    const auto admittedEpoch = fence.admit();
+    if (!admittedEpoch) { op->error("upstream unavailable"); return; }
     size_t bytes;
     pvxs::Value pvRequest;
     try {
@@ -165,7 +164,7 @@ struct GatewayPV::State : public std::enable_shared_from_this<GatewayPV::State> 
     auto pending = QueuedExec::create(std::move(op), queue);
     auto self = shared_from_this();
     const auto ticket = queue->submit({served, bytes, deadline,
-        [self, pending, admittedEpoch, deadline, pvRequest = std::move(pvRequest), value = std::move(value)]() mutable {
+        [self, pending, admittedEpoch = *admittedEpoch, deadline, pvRequest = std::move(pvRequest), value = std::move(value)]() mutable {
           self->dispatch(pending, admittedEpoch, deadline, std::move(pvRequest), std::move(value));
         },
         [pending](OperationFailure, const std::string& message) { pending->error(message); }});
@@ -175,7 +174,7 @@ struct GatewayPV::State : public std::enable_shared_from_this<GatewayPV::State> 
   void dispatch(const std::shared_ptr<QueuedExec>& pending, uint64_t admittedEpoch,
                 OperationQueue::Clock::time_point deadline, pvxs::Value pvRequest, pvxs::Value value) {
     if (pending->stopped()) return;
-    if (!alive || !active || !isConnected || epoch != admittedEpoch) {
+    if (!fence.current(admittedEpoch)) {
       pending->error("upstream connection changed before dispatch; not retried"); return;
     }
     try {
@@ -211,32 +210,30 @@ struct GatewayPV::State : public std::enable_shared_from_this<GatewayPV::State> 
         else prototype = waiter->prototype;
       }
       if (!setupError.empty()) { pending->error(setupError); return; }
-      if (!alive || !active || !isConnected || epoch != admittedEpoch) {
+      if (!fence.current(admittedEpoch)) {
         pending->error("upstream connection changed before dispatch; not retried"); return;
       }
       if (!prototype.equalType(value)) { pending->error("upstream put type changed"); return; }
       auto outgoing = prototype.cloneEmpty();
       outgoing.assign(value);
       std::string dispatchError;
-      {
-        // retireWrites() takes the same fence in the last publication action.
-        // Scheduling before that fence counts as dispatch; queued work behind
-        // it can never be sent by this retired mapping.
-        std::lock_guard<std::mutex> lock(dispatchMutex);
+      bool stopped = false;
+      // Connection transitions and retirement use this same fence. The actual
+      // PVXS send is scheduled without waiting while the fence is held.
+      const bool current = fence.dispatch(admittedEpoch, [&] {
         auto request = pending->operation();
-        if (!request || pending->stopped()) return;
-        if (!alive || !active || !isConnected || epoch != admittedEpoch) {
-          dispatchError = "upstream connection changed before dispatch; not retried";
+        if (!request || pending->stopped()) {
+          stopped = true;
         } else if (!authorizeWriteDispatch(*request, value)) {
           dispatchError = "access denied";
         } else if (pending->stopped()) {
-          return;
-        } else if (!alive || !active || !isConnected || epoch != admittedEpoch) {
-          dispatchError = "upstream connection changed before dispatch; not retried";
+          stopped = true;
         } else {
           operation->reExecPut(outgoing, [waiter](pvxs::client::Result&& result) { waiter->complete(std::move(result)); });
         }
-      }
+      });
+      if (!current) { pending->error("upstream connection changed before dispatch; not retried"); return; }
+      if (stopped) return;
       if (!dispatchError.empty()) { pending->error(dispatchError); return; }
       std::string completionError;
       {
@@ -259,9 +256,9 @@ struct GatewayPV::State : public std::enable_shared_from_this<GatewayPV::State> 
   uint32_t timeoutMs;
   size_t payloadLimit;
   pvxs::server::SharedPV pv;
-  std::atomic<bool> alive{true}, active{false}, retired{false}, isConnected{false}, monitorNeedsRetry{false};
-  std::atomic<uint64_t> epoch{0};
-  std::mutex monitorMutex, dispatchMutex;
+  GatewayDispatchFence fence;
+  std::atomic<bool> monitorNeedsRetry{false};
+  std::mutex monitorMutex;
 };
 
 GatewayPV::GatewayPV(std::shared_ptr<State> state, std::shared_ptr<pvxs::client::Context> context)
@@ -305,32 +302,26 @@ GatewayPV::~GatewayPV() {
   // explicitly cancel there: implicit cancellation was configured async.
   // Normal retirement calls deactivate() on the application thread first.
   retireWrites();
-  state_->alive = false;
+  state_->fence.stop();
   monitor_.reset();
 }
 
 pvxs::server::SharedPV& GatewayPV::sharedPV() { return state_->pv; }
 void GatewayPV::activate() {
-  std::lock_guard<std::mutex> lock(state_->dispatchMutex);
-  if (!state_->alive || state_->retired) throw std::logic_error("cannot activate a retired gateway");
-  state_->active = true;
+  state_->fence.activate();
 }
 void GatewayPV::retireWrites() noexcept {
-  std::lock_guard<std::mutex> lock(state_->dispatchMutex);
-  state_->active = false;
-  state_->retired = true;
-  ++state_->epoch;
+  state_->fence.retire();
 }
 void GatewayPV::deactivate() {
   retireWrites();
-  state_->alive = false;
-  state_->isConnected = false;
+  state_->fence.stop();
   if (monitor_) monitor_->cancel();
   std::lock_guard<std::mutex> lock(state_->monitorMutex);
   state_->pv.close();
 }
 void GatewayPV::pump() {
-  if (!state_->alive || !state_->monitorNeedsRetry || OperationQueue::Clock::now() < nextMonitorRetry_) return;
+  if (!state_->fence.alive() || !state_->monitorNeedsRetry || OperationQueue::Clock::now() < nextMonitorRetry_) return;
   nextMonitorRetry_ = OperationQueue::Clock::now() + std::chrono::seconds(5);
   // Explicit cancel synchronizes with the previous callback. Clear its retry
   // flag only after it is gone so an immediate failure of the new monitor is
@@ -343,6 +334,6 @@ void GatewayPV::pump() {
     state_->monitorNeedsRetry = true;
   }
 }
-bool GatewayPV::connected() const { return state_->alive && state_->isConnected; }
+bool GatewayPV::connected() const { return state_->fence.connected(); }
 
 } // namespace redis_pvxs_ioc

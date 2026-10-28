@@ -22,6 +22,8 @@
 
 ## Integrators
 
+- [XRM waveform stream](xrm-stream.md): bounded companion, Redis contract,
+  source-time quality and waveform mapping.
 - [Redis-backed NTNDArray](ntndarray.md): versioned image envelope, validation,
   acquisition-time provenance, and normative-value mapping.
 - [ChannelFinder sync](channelfinder-sync.md): preview and publish configured PV

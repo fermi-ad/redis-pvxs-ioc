@@ -72,6 +72,7 @@ RUN ctest --test-dir build --output-on-failure
 RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" && \
     mkdir -p /opt/runtime/bin /opt/runtime/lib/epics-base /opt/runtime/lib/pvxs /opt/runtime/lib/libevent && \
     cp build/redis-pvxs-ioc /opt/runtime/bin/redis-pvxs-ioc && \
+    cp build/xrm-stream /opt/runtime/bin/xrm-stream && \
     cp build/redis-pvxs-channelfinder-sync /opt/runtime/bin/redis-pvxs-channelfinder-sync && \
     cp -R "third_party/epics-base/lib/${EPICS_HOST_ARCH}/." /opt/runtime/lib/epics-base/ && \
     cp -R "third_party/pvxs/lib/${EPICS_HOST_ARCH}/." /opt/runtime/lib/pvxs/ && \
@@ -132,7 +133,7 @@ RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 RUN groupadd --gid 10001 ioc && \
     useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ioc
 
-ENV PATH=/opt/redis-pvxs-ioc/bin/pvxs:/opt/redis-pvxs-ioc/bin/epics-base:$PATH
+ENV PATH=/opt/redis-pvxs-ioc/bin:/opt/redis-pvxs-ioc/bin/pvxs:/opt/redis-pvxs-ioc/bin/epics-base:$PATH
 ENV LD_LIBRARY_PATH=/opt/redis-pvxs-ioc/lib/epics-base:/opt/redis-pvxs-ioc/lib/pvxs:/opt/redis-pvxs-ioc/lib/libevent
 
 USER 10001:10001

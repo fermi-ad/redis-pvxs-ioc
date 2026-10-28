@@ -38,6 +38,13 @@ enum class PVKind {
   NTNDArray,
 };
 
+// Legacy streams encode acquisition time in their Redis ID. XRM streams use
+// independently ordered IDs and carry the source time and quality in fields.
+enum class StreamProtocol {
+  Legacy,
+  XrmV1,
+};
+
 enum class DisplayForm {
   Default,
   String,
@@ -181,6 +188,7 @@ struct PVConfig {
   std::string name;
   std::vector<std::string> aliases;
   PVKind kind = PVKind::Value;
+  StreamProtocol streamProtocol = StreamProtocol::Legacy;
   PrimitiveType type = PrimitiveType::Float64;
   Shape shape = Shape::Scalar;
   RouteConfig read;

@@ -390,6 +390,12 @@ false retains source diagnostics and health alarms. `stale_after_ms` defaults to
 zero (cadence unspecified); otherwise it is 1–86400000 ms. Freshness measures
 time since the last valid snapshot/update was received on the IOC's monotonic
 clock. It does not estimate acquisition age from the legacy source timestamp.
+For `stream_protocol: xrm_v1`, `stale_after_ms` is required and must be nonzero.
+Choose the interval to match the acquisition and trigger cadence, including
+expected quiet periods, so a stopped stream becomes invalid without treating
+normal trigger gaps as outages. See [XRM waveform stream](xrm-stream.md) for
+the versioned Redis contract, timestamp and validity behavior, and a complete
+configuration example.
 An idle source with valid data and no cadence stays fresh; a source that has
 never supplied valid data remains unready. A freshness failure retains the
 last-good value and source timestamp with an INVALID alarm. Health diagnostics

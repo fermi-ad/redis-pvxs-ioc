@@ -1,6 +1,7 @@
 #include "redis_pvxs_ioc/runtime.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <condition_variable>
@@ -24,6 +25,8 @@
 #include "redis_pvxs_ioc/queued_exec.h"
 #include "redis_pvxs_ioc/ntndarray.h"
 #include "redis_pvxs_ioc/util.h"
+#include "redis_pvxs_ioc/xrm_latest_reader.h"
+#include "redis_pvxs_ioc/xrm_pipeline_lag.h"
 
 namespace redis_pvxs_ioc {
 namespace {
@@ -42,6 +45,153 @@ std::string batchHealthError(const RedisAdapter::ReaderStatus& current,
   if (current.readRejections > metadata.readRejections)
     return "Source read rejected; waiting for valid data";
   return {};
+}
+
+struct SourceTimestamp {
+  uint64_t nanoseconds = 0;
+  bool valid = false;
+  std::string error;
+};
+
+struct XrmMetadata {
+  bool present = false;
+  std::string session;
+  uint64_t connection = 0, batch = 0, sampleRateHz = 0, sampleCount = 0;
+  uint32_t channel = 0, sampleBytes = 0;
+  std::string sourceValidity = "unknown";
+  bool acqTimeValid = false, acqTimePresent = false, acqTimeParsed = false;
+};
+
+struct XrmSequenceCounters {
+  uint64_t missingBatches = 0, discontinuities = 0, sessionChanges = 0;
+  uint64_t connectionChanges = 0, sequenceDiscontinuities = 0;
+};
+
+void saturatingAdd(uint64_t& value, uint64_t increment) {
+  value = increment > UINT64_MAX - value ? UINT64_MAX : value + increment;
+}
+
+bool parseUnsignedDecimal(const std::string& text, uint64_t& output) {
+  if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char ch) { return ch >= '0' && ch <= '9'; }))
+    return false;
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), output);
+  return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
+}
+
+uint32_t channelFromSubKey(const std::string& key) {
+  const auto separator = key.rfind(':');
+  const auto name = key.substr(separator == std::string::npos ? 0 : separator + 1);
+  uint64_t channel = 0;
+  if (name.size() > 2 && name.compare(0, 2, "CH") == 0 &&
+      parseUnsignedDecimal(name.substr(2), channel) && channel >= 1 && channel <= 32)
+    return static_cast<uint32_t>(channel);
+  return 0;
+}
+
+bool parseXrmMetadata(const RedisAdapter::Attrs& fields, XrmMetadata& output) {
+  const auto schema = fields.find("schema");
+  const auto session = fields.find("session");
+  const auto connection = fields.find("connection");
+  const auto batch = fields.find("batch");
+  const auto channel = fields.find("channel");
+  const auto sampleRate = fields.find("sample_rate_hz");
+  const auto count = fields.find("sample_count");
+  const auto width = fields.find("sample_bytes");
+  const auto sourceValidity = fields.find("source_validity");
+  const auto timeValidity = fields.find("acq_time_valid");
+  if (schema == fields.end() || schema->second != "fermi-ad/xrm-waveform:1" ||
+      session == fields.end() || session->second.empty() || session->second.size() > 128 ||
+      !std::all_of(session->second.begin(), session->second.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '_' || c == '-' || c == ':' || c == '.';
+      }) ||
+      connection == fields.end() || batch == fields.end() || channel == fields.end() ||
+      sampleRate == fields.end() || count == fields.end() || width == fields.end() ||
+      sourceValidity == fields.end() || (sourceValidity->second != "unknown" &&
+          sourceValidity->second != "valid" && sourceValidity->second != "invalid") ||
+      timeValidity == fields.end() || (timeValidity->second != "0" && timeValidity->second != "1"))
+    return false;
+
+  XrmMetadata result;
+  uint64_t channelNumber = 0, sampleWidth = 0;
+  if (!parseUnsignedDecimal(connection->second, result.connection) || !result.connection ||
+      !parseUnsignedDecimal(batch->second, result.batch) || !result.batch ||
+      !parseUnsignedDecimal(channel->second, channelNumber) || !channelNumber || channelNumber > 32 ||
+      !parseUnsignedDecimal(sampleRate->second, result.sampleRateHz) || !result.sampleRateHz ||
+      result.sampleRateHz > 100000000 ||
+      !parseUnsignedDecimal(count->second, result.sampleCount) || !result.sampleCount ||
+      !parseUnsignedDecimal(width->second, sampleWidth) || !sampleWidth || sampleWidth > 4)
+    return false;
+
+  result.present = true;
+  result.session = session->second;
+  result.channel = static_cast<uint32_t>(channelNumber);
+  result.sampleBytes = static_cast<uint32_t>(sampleWidth);
+  result.sourceValidity = sourceValidity->second;
+  result.acqTimeValid = timeValidity->second == "1";
+  const auto time = fields.find("acq_time_ns");
+  result.acqTimePresent = time != fields.end();
+  uint64_t ignored = 0;
+  result.acqTimeParsed = result.acqTimePresent && parseUnsignedDecimal(time->second, ignored);
+  output = std::move(result);
+  return true;
+}
+
+SourceTimestamp xrmTimestamp(const RedisAdapter::Attrs& fields) {
+  uint64_t nanoseconds = 0;
+  const auto time = fields.find("acq_time_ns");
+  const bool haveTimestamp = time != fields.end() && parseUnsignedDecimal(time->second, nanoseconds);
+  if (!haveTimestamp) nanoseconds = 0;
+
+  SourceTimestamp result{nanoseconds, true, {}};
+  const auto validity = fields.find("acq_time_valid");
+  if (validity == fields.end() || (validity->second != "0" && validity->second != "1"))
+    result = {nanoseconds, false, "Invalid XRM acquisition time validity"};
+  else if (validity->second == "0") result = {nanoseconds, false, "XRM acquisition time unavailable or invalid"};
+  else if (!haveTimestamp) result = {0, false, "Invalid XRM acquisition time"};
+
+  const auto sourceValidity = fields.find("source_validity");
+  std::string sourceError;
+  if (sourceValidity != fields.end() && sourceValidity->second == "invalid")
+    sourceError = "XRM source reports invalid waveform";
+  else if (sourceValidity != fields.end() && sourceValidity->second == "unknown")
+    sourceError = "XRM source validity is unknown";
+  if (!sourceError.empty()) {
+    if (!result.error.empty()) result.error += "; ";
+    result.error += sourceError;
+    result.valid = false;
+  }
+  return result;
+}
+
+// The protocol describes integer sample storage as little-endian bytes. The
+// configured PV type supplies signedness; no native-endian memcpy is used.
+template <typename T>
+bool decodeXrmWaveform(const RedisAdapter::Attrs& fields, const XrmMetadata& metadata,
+                       std::vector<T>& output, uint64_t maxBytes) {
+  static_assert(std::is_integral_v<T> && !std::is_same_v<T, bool> && sizeof(T) <= 4);
+  const auto payload = fields.find("_");
+  if (metadata.sampleBytes != sizeof(T) ||
+      payload == fields.end() || payload->second.empty() || payload->second.size() > maxBytes ||
+      payload->second.size() % sizeof(T) != 0 || payload->second.size() / sizeof(T) != metadata.sampleCount)
+    return false;
+
+  std::vector<T> decoded;
+  decoded.reserve(payload->second.size() / sizeof(T));
+  for (size_t offset = 0; offset < payload->second.size(); offset += sizeof(T)) {
+    uint64_t bits = 0;
+    for (size_t byte = 0; byte < sizeof(T); ++byte)
+      bits |= static_cast<uint64_t>(static_cast<unsigned char>(payload->second[offset + byte])) << (byte * 8);
+    if constexpr (std::is_signed_v<T>) {
+      constexpr auto widthBits = sizeof(T) * 8;
+      const auto value = (bits & (uint64_t{1} << (widthBits - 1)))
+          ? static_cast<int64_t>(bits) - static_cast<int64_t>(uint64_t{1} << widthBits)
+          : static_cast<int64_t>(bits);
+      decoded.push_back(static_cast<T>(value));
+    } else decoded.push_back(static_cast<T>(bits));
+  }
+  output = std::move(decoded);
+  return true;
 }
 
 std::shared_ptr<RedisAdapter> resolveBackend(const RedisBackendRegistry& redisBackends,
@@ -277,13 +427,15 @@ public:
                std::shared_ptr<RedisAdapter> confirmRedis,
                std::shared_ptr<AlarmPublisher> alarmPublisher, uint64_t generation,
                std::shared_ptr<OperationQueue> operations, OperationLimitsConfig limits,
-               uint32_t readProbeMs, uint32_t confirmProbeMs)
-      : config_(std::move(config)), readRedis_(std::move(readRedis)),
+               uint32_t readProbeMs, uint32_t confirmProbeMs, std::optional<RedisConfig> xrmBackend)
+      : config_(std::move(config)), protocol_(config_.streamProtocol),
+        expectedChannel_(channelFromSubKey(config_.read.key)), readRedis_(std::move(readRedis)),
         writeRedis_(std::move(writeRedis)), confirmRedis_(std::move(confirmRedis)),
         alarmPublisher_(std::move(alarmPublisher)), fullName_(fullPVName(serverConfig, config_)),
         generation_(generation), operations_(std::move(operations)), limits_(limits),
         confirmationMs_(config_.confirm ? config_.confirm->timeoutMs : 0),
         readProbeMs_(readProbeMs), confirmProbeMs_(confirmProbeMs),
+        xrmBackend_(std::move(xrmBackend)),
         pv_(config_.write ? pvxs::server::SharedPV::buildMailbox() : pvxs::server::SharedPV::buildReadonly()) {}
 
   ~TypedRuntime() override { deactivate("runtime destroyed"); }
@@ -291,23 +443,54 @@ public:
   void initialize() {
     if constexpr (Array) lastRaw_ = initialVectorOr<T>(config_.initialValue);
     else lastRaw_ = initialScalarOr<T>(config_.initialValue, T{});
-    const auto snapshot = readRedis_->getStreamSnapshot(config_.read.key);
+    auto weak = this->weak_from_this();
+    RedisAdapter::StreamSnapshot snapshot;
+    if (protocol_ == StreamProtocol::XrmV1) {
+      if (!xrmBackend_) throw std::runtime_error("xrm_v1 requires its Redis backend configuration");
+      xrmReader_ = std::make_unique<XrmLatestReader>(*xrmBackend_, config_.read.key, limits_.maxPayloadBytes, 20,
+          [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
+            if (const auto self = weak.lock()) self->handleRead(data, true, false, metadata);
+          });
+      snapshot = xrmReader_->snapshot();
+    } else snapshot = readRedis_->getStreamSnapshot(config_.read.key);
     readCursor_ = snapshot.id;
     ValueType decoded{};
-    if (snapshot.present() && decode(snapshot.fields, decoded) && RA_Time(snapshot.id).ok()) {
+    XrmMetadata xrm;
+    const auto timestamp = sourceTimestamp(snapshot.fields, snapshot.id);
+    if (snapshot.present() && decode(snapshot.fields, decoded, &xrm) &&
+        (protocol_ == StreamProtocol::XrmV1 || timestamp.valid)) {
       lastRaw_ = std::move(decoded);
-      lastTimestampNs_ = static_cast<uint64_t>(RA_Time(snapshot.id).value);
-      sourceValid_ = true;
-      readSample_.accept(snapshot.id, 1);
+      if (protocol_ == StreamProtocol::XrmV1) lastXrm_ = std::move(xrm);
+      lastTimestampNs_ = timestamp.nanoseconds;
+      sourceValid_ = timestamp.valid;
+      sourceError_ = timestamp.error;
+      if (sourceValid_) readSample_.accept(snapshot.id, 1);
+      else readSample_.reject(sourceError_);
     } else {
-      sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : "No source data; using initial fallback";
-      if (snapshot.present()) readSample_.reject(sourceError_);
+      sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : snapshot.rejected ? "Redis snapshot rejected"
+                                                                                     : "No source data; using initial fallback";
+      if (snapshot.present() || snapshot.rejected) readSample_.reject(sourceError_);
     }
     auto initial = createInitialValue(config_);
+    if (protocol_ == StreamProtocol::XrmV1) {
+      using pvxs::Member;
+      using pvxs::TypeCode;
+      auto type = pvxs::TypeDef(initial);
+      type += {Member(TypeCode::Struct, "xrm", "fermi-ad:xrm-waveform-meta:1.0", {
+          Member(TypeCode::Bool, "present"), Member(TypeCode::String, "session"),
+          Member(TypeCode::UInt64, "connection"), Member(TypeCode::UInt64, "batch"),
+          Member(TypeCode::UInt32, "channel"), Member(TypeCode::UInt64, "sampleRateHz"),
+          Member(TypeCode::UInt64, "sampleCount"), Member(TypeCode::UInt32, "sampleBytes"),
+          Member(TypeCode::String, "sourceValidity"), Member(TypeCode::Bool, "acqTimeValid"),
+          Member(TypeCode::Bool, "acqTimePresent"), Member(TypeCode::Bool, "acqTimeParsed"),
+          Member(TypeCode::UInt64, "missingBatches"), Member(TypeCode::UInt64, "discontinuities"),
+          Member(TypeCode::UInt64, "sessionChanges"), Member(TypeCode::UInt64, "connectionChanges"),
+          Member(TypeCode::UInt64, "sequenceDiscontinuities")})};
+      initial = type.create();
+    }
     const auto initialAlarm = populateValue(initial);
     if (alarmPublisher_) alarmRegistration_ = alarmPublisher_->prepare(fullName_, initialAlarm);
     pv_.open(initial);
-    auto weak = this->weak_from_this();
     if (config_.write) {
       pv_.onPut([weak](pvxs::server::SharedPV&, std::unique_ptr<pvxs::server::ExecOp>&& op,
                        pvxs::Value&& value) {
@@ -319,10 +502,11 @@ public:
     RedisAdapter::SubscriptionOptions selection;
     selection.afterId = readCursor_; selection.probeMs = readProbeMs_;
     std::lock_guard<std::mutex> guard(mutex_);
-    readReader_ = readRedis_->subscribeStreamWithMetadata(config_.read.key,
-        [weak, readConfirms](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
-          if (const auto self = weak.lock()) self->handleRead(data, true, readConfirms, metadata);
-        }, selection);
+    if (xrmReader_) xrmReader_->start();
+    else readReader_ = readRedis_->subscribeStreamWithMetadata(config_.read.key,
+          [weak, readConfirms](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
+            if (const auto self = weak.lock()) self->handleRead(data, true, readConfirms, metadata);
+          }, selection);
     if (config_.confirm && !readConfirms) {
       const auto confirmation = confirmRedis_->getStreamSnapshot(config_.confirm->key);
       ValueType raw{};
@@ -417,6 +601,7 @@ public:
       // real transform change, but do not publish the retained sample again.
       if (samePresentedPayload(priorPayload, value["value"])) value["value"].unmark();
       value["timeStamp"].unmark();
+      if (protocol_ == StreamProtocol::XrmV1) value["xrm"].unmark();
       pv_.post(value);
       recordAlarmLocked(state);
     }
@@ -425,22 +610,34 @@ public:
   void deactivate(const std::string& reason) override {
     if (!alive_.exchange(false)) return;
     RedisAdapter::ReaderHandle retiredRead, retiredConfirm;
+    std::unique_ptr<XrmLatestReader> retiredXrm;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++commandEpoch_;
       if (alarmRegistration_) alarmRegistration_->retire();
       failPendingLocked(std::make_shared<const std::string>(reason));
       retiredRead = std::move(readReader_); retiredConfirm = std::move(confirmReader_);
+      retiredXrm = std::move(xrmReader_);
     }
     retiredRead.reset(); retiredConfirm.reset();
+    if (retiredXrm) retiredXrm->reset();
     if (pv_.isOpen()) pv_.close();
   }
 
   std::vector<SourceStatus> sourceHealth(SourceClock::time_point now) override {
     std::lock_guard<std::mutex> guard(mutex_);
     const bool sameConfirmation = config_.confirm && sameRouteTarget(config_.read, *config_.confirm);
-    auto read = assessSource(readSample_, readReader_.status(), config_, fullName_, config_.read,
+    auto read = assessSource(readSample_, readStatusLocked(), config_, fullName_, config_.read,
         sameConfirmation ? "read-confirm" : "read", alive_ && committed_, readProbeMs_, now);
+    const auto lagError = read.ready ? xrmLagErrorLocked() : std::string{};
+    const bool lagStale = !lagError.empty();
+    if (lagStale) {
+      if (!pipelineLagStale_) ++readSample_.staleTransitions;
+      read.staleTransitions = readSample_.staleTransitions;
+      read.stale = true; read.fresh = false; read.ready = false;
+      read.state = "stale"; read.error = lagError;
+    }
+    pipelineLagStale_ = lagStale;
     std::vector<SourceStatus> result;
     const auto confirmationEpoch = sameConfirmation ? read.reader.epoch : confirmReader_.status().epoch;
     if (alive_ && committed_) {
@@ -494,9 +691,64 @@ private:
     std::condition_variable cv;
   };
 
-  bool decode(const RedisAdapter::Attrs& fields, ValueType& raw) const {
+  bool decode(const RedisAdapter::Attrs& fields, ValueType& raw, XrmMetadata* metadata = nullptr) const {
+    if (protocol_ == StreamProtocol::XrmV1) {
+      if constexpr (Array && std::is_integral_v<T> && !std::is_same_v<T, bool> && sizeof(T) <= 4) {
+        XrmMetadata parsed;
+        if (!parseXrmMetadata(fields, parsed) || (expectedChannel_ && parsed.channel != expectedChannel_) ||
+            !decodeXrmWaveform(fields, parsed, raw, limits_.maxPayloadBytes))
+          return false;
+        if (metadata) *metadata = std::move(parsed);
+        return true;
+      } else return false;
+    }
     if constexpr (Array) return RedisAdapter::decodeArray(fields, raw, limits_.maxPayloadBytes);
     else return RedisAdapter::decodeScalar(fields, raw, limits_.maxPayloadBytes);
+  }
+
+  SourceTimestamp sourceTimestamp(const RedisAdapter::Attrs& fields, const std::string& streamId) const {
+    if (protocol_ == StreamProtocol::XrmV1) return xrmTimestamp(fields);
+    const auto legacy = RA_Time(streamId);
+    if (!legacy.ok()) return {0, false, "Invalid Redis source timestamp"};
+    return {static_cast<uint64_t>(legacy.value), true, {}};
+  }
+
+  void applyXrmMetadata(pvxs::Value& value) const {
+    value["xrm.present"] = lastXrm_.present;
+    value["xrm.session"] = lastXrm_.session;
+    value["xrm.connection"] = lastXrm_.connection;
+    value["xrm.batch"] = lastXrm_.batch;
+    value["xrm.channel"] = lastXrm_.channel;
+    value["xrm.sampleRateHz"] = lastXrm_.sampleRateHz;
+    value["xrm.sampleCount"] = lastXrm_.sampleCount;
+    value["xrm.sampleBytes"] = lastXrm_.sampleBytes;
+    value["xrm.sourceValidity"] = lastXrm_.sourceValidity;
+    value["xrm.acqTimeValid"] = lastXrm_.acqTimeValid;
+    value["xrm.acqTimePresent"] = lastXrm_.acqTimePresent;
+    value["xrm.acqTimeParsed"] = lastXrm_.acqTimeParsed;
+    value["xrm.missingBatches"] = xrmCounters_.missingBatches;
+    value["xrm.discontinuities"] = xrmCounters_.discontinuities;
+    value["xrm.sessionChanges"] = xrmCounters_.sessionChanges;
+    value["xrm.connectionChanges"] = xrmCounters_.connectionChanges;
+    value["xrm.sequenceDiscontinuities"] = xrmCounters_.sequenceDiscontinuities;
+  }
+
+  void acceptXrmMetadata(const XrmMetadata& next) {
+    if (lastXrm_.present) {
+      if (lastXrm_.session != next.session) {
+        saturatingAdd(xrmCounters_.sessionChanges, 1);
+        saturatingAdd(xrmCounters_.discontinuities, 1);
+      } else if (lastXrm_.connection != next.connection) {
+        saturatingAdd(xrmCounters_.connectionChanges, 1);
+        saturatingAdd(xrmCounters_.discontinuities, 1);
+      } else if (next.batch > lastXrm_.batch) {
+        saturatingAdd(xrmCounters_.missingBatches, next.batch - lastXrm_.batch - 1);
+      } else {
+        saturatingAdd(xrmCounters_.sequenceDiscontinuities, 1);
+        saturatingAdd(xrmCounters_.discontinuities, 1);
+      }
+    }
+    lastXrm_ = next;
   }
 
   AlarmState populateValue(pvxs::Value& value, const PVConfig& config) {
@@ -504,6 +756,7 @@ private:
     if constexpr (Array) assignArrayValue(value, present);
     else assignScalarValue(value, present);
     applyStandardMetadata(value, config);
+    if (protocol_ == StreamProtocol::XrmV1) applyXrmMetadata(value);
     if (lastTimestampNs_) applyTimestamp(value, lastTimestampNs_);
     else {
       value["timeStamp.secondsPastEpoch"] = static_cast<int64_t>(0);
@@ -537,18 +790,22 @@ private:
     for (const auto& entry : data) {
       if (!alive_) return;
       ValueType raw{};
-      const auto timestamp = RA_Time(entry.first);
-      if (!decode(entry.second, raw) || !timestamp.ok()) {
-        if (!markInvalid("Invalid Redis payload or source timestamp", updateValue, metadata.epoch)) return;
+      XrmMetadata xrm;
+      const auto timestamp = sourceTimestamp(entry.second, entry.first);
+      if (!decode(entry.second, raw, &xrm) || (protocol_ == StreamProtocol::Legacy && !timestamp.valid)) {
+        const auto error = protocol_ == StreamProtocol::XrmV1 ? "Invalid XRM waveform schema or payload"
+                                                              : "Invalid Redis payload or source timestamp";
+        if (!markInvalid(error, updateValue, metadata.epoch)) return;
         continue;
       }
-      if (!handleRawUpdate(raw, static_cast<uint64_t>(timestamp.value), updateValue, canConfirm, entry.first, &metadata)) return;
+      if (!handleRawUpdate(raw, timestamp.nanoseconds, updateValue, canConfirm, entry.first, &metadata,
+                           timestamp.valid, timestamp.error, &xrm)) return;
     }
   }
 
   bool acceptEpochLocked(bool read, uint64_t epoch, RedisAdapter::ReaderStatus* current = nullptr) {
     if (!alive_) return false;
-    auto status = (read ? readReader_ : confirmReader_).status();
+    auto status = read ? readStatusLocked() : confirmReader_.status();
     const bool matches = status.epoch == epoch;
     if (current) *current = std::move(status);
     if (matches) return true;
@@ -575,7 +832,9 @@ private:
 
   bool handleRawUpdate(const ValueType& raw, uint64_t timestamp, bool updateValue,
                        bool canConfirm = false, const std::string& streamId = {},
-                       const RedisAdapter::StreamBatchMetadata* metadata = nullptr) {
+                       const RedisAdapter::StreamBatchMetadata* metadata = nullptr,
+                       bool sourceValid = true, const std::string& sourceError = {},
+                       const XrmMetadata* xrm = nullptr) {
     AlarmState state;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -585,10 +844,11 @@ private:
       if (epoch) {
         if (!acceptEpochLocked(updateValue, epoch, &current)) return false;
         auto& sample = updateValue ? readSample_ : confirmSample_;
-        sample.accept(streamId, epoch);
+        if (sourceValid) sample.accept(streamId, epoch);
+        else sample.reject(sourceError, epoch);
         sample.acceptedReadRejections = metadata->readRejections;
       }
-      if (canConfirm) {
+      if (canConfirm && sourceValid) {
         for (auto& item : pendingPuts_) {
           auto& pending = *item.second;
           if (!pending.done && pending.sourceEpoch != epoch) {
@@ -604,10 +864,19 @@ private:
       }
       if (!updateValue) return true;
       lastRaw_ = raw;
+      if (protocol_ == StreamProtocol::XrmV1 && xrm) acceptXrmMetadata(*xrm);
       lastTimestampNs_ = timestamp;
-      sourceValid_ = true;
-      sourceError_.clear();
-      if (epoch) healthError_ = batchHealthError(current, *metadata);
+      sourceValid_ = sourceValid;
+      sourceError_ = sourceError;
+      if (epoch) {
+        healthError_ = batchHealthError(current, *metadata);
+        const auto lagError = sourceValid ? xrmLagErrorLocked() : std::string{};
+        if (!lagError.empty()) {
+          if (!pipelineLagStale_) ++readSample_.staleTransitions;
+          if (healthError_.empty()) healthError_ = lagError;
+        }
+        pipelineLagStale_ = !lagError.empty();
+      }
       auto value = pv_.fetch();
       state = populateValue(value);
       // Serialize value and alarm-state updates with commit and retirement.
@@ -623,6 +892,23 @@ private:
       item.second->error = reason;
       item.second->cv.notify_all();
     }
+  }
+
+  RedisAdapter::ReaderStatus readStatusLocked() const {
+    if (protocol_ == StreamProtocol::XrmV1)
+      return xrmReader_ ? xrmReader_->status() : RedisAdapter::ReaderStatus{};
+    return readReader_.status();
+  }
+
+  std::string xrmLagErrorLocked() const {
+    if (protocol_ != StreamProtocol::XrmV1 || !xrmReader_ || !lastXrm_.present) return {};
+    const auto tail = xrmReader_->tailMetadata();
+    if (xrmTailIdentityChanged(lastXrm_.session, lastXrm_.connection, tail))
+      return "XRM pipeline is awaiting a newer producer session or connection";
+    if (xrmNominalPipelineLagExceeds(lastXrm_.session, lastXrm_.connection, lastXrm_.batch,
+            lastXrm_.sampleCount, lastXrm_.sampleRateHz, tail, config_.sourceHealth.staleAfterMs))
+      return "XRM nominal pipeline lag exceeds freshness deadline";
+    return {};
   }
 
   void handlePut(std::unique_ptr<pvxs::server::ExecOp>&& op, pvxs::Value&& value) {
@@ -761,6 +1047,8 @@ private:
 
   mutable std::mutex mutex_;
   PVConfig config_;
+  const StreamProtocol protocol_;
+  const uint32_t expectedChannel_;
   std::shared_ptr<RedisAdapter> readRedis_, writeRedis_, confirmRedis_;
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
   std::shared_ptr<AlarmPublisher::Registration> alarmRegistration_;
@@ -771,14 +1059,19 @@ private:
   const OperationLimitsConfig limits_;
   const int confirmationMs_;
   const uint32_t readProbeMs_, confirmProbeMs_;
+  const std::optional<RedisConfig> xrmBackend_;
   pvxs::server::SharedPV pv_;
   std::atomic<bool> alive_{true};       // false once retired
   std::atomic<bool> committed_{false};  // true after staging commits
   RedisAdapter::ReaderHandle readReader_, confirmReader_;
+  std::unique_ptr<XrmLatestReader> xrmReader_;
   SourceSampleState readSample_, confirmSample_;
   std::string healthError_;
   std::string readCursor_;
   ValueType lastRaw_{};
+  XrmMetadata lastXrm_;
+  XrmSequenceCounters xrmCounters_;
+  bool pipelineLagStale_ = false;
   uint64_t lastTimestampNs_ = 0;
   bool sourceValid_ = false;
   std::string sourceError_;
@@ -795,6 +1088,12 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
                                                 std::shared_ptr<OperationQueue> operations,
                                                 OperationLimitsConfig limits, const RedisBackendConfigs& readerPolicies) {
   const auto fullName = fullPVName(serverConfig, config);
+  std::optional<RedisConfig> xrmBackend;
+  if (config.streamProtocol == StreamProtocol::XrmV1) {
+    const auto backend = readerPolicies.find(config.read.backend);
+    if (backend == readerPolicies.end()) throw std::runtime_error("xrm_v1 requires its Redis backend configuration");
+    xrmBackend = backend->second;
+  }
   auto runtime = std::make_shared<TypedRuntime<T, Array>>(
       serverConfig,
       config,
@@ -804,7 +1103,8 @@ std::shared_ptr<PVRuntimeBase> makeTypedRuntime(const ServerConfig& serverConfig
       alarmPublisher,
       generation, std::move(operations), limits,
       readerPolicies.count(config.read.backend) ? readerPolicies.at(config.read.backend).readerProbeMs : 1000,
-      config.confirm && readerPolicies.count(config.confirm->backend) ? readerPolicies.at(config.confirm->backend).readerProbeMs : 1000);
+      config.confirm && readerPolicies.count(config.confirm->backend) ? readerPolicies.at(config.confirm->backend).readerProbeMs : 1000,
+      std::move(xrmBackend));
   runtime->initialize();
   return runtime;
 }
@@ -820,6 +1120,15 @@ std::shared_ptr<PVRuntimeBase> makeRuntime(const ServerConfig& serverConfig,
                                                 OperationLimitsConfig limits,
                                                 std::shared_ptr<RuntimeStats> stats,
                                                 const RedisBackendConfigs& readerPolicies) {
+  if (config.streamProtocol == StreamProtocol::XrmV1) {
+    const bool supportedType = config.type == PrimitiveType::Int8 || config.type == PrimitiveType::UInt8 ||
+        config.type == PrimitiveType::Int16 || config.type == PrimitiveType::UInt16 ||
+        config.type == PrimitiveType::Int32 || config.type == PrimitiveType::UInt32;
+    if (config.kind != PVKind::Value || config.shape != Shape::Array || !supportedType || config.write || config.confirm)
+      throw std::runtime_error("xrm_v1 requires a read-only 8-, 16-, or 32-bit integer array");
+    if (!config.sourceHealth.staleAfterMs)
+      throw std::runtime_error("xrm_v1 requires a nonzero source freshness deadline");
+  }
   if (config.kind == PVKind::NTNDArray)
     return makeNDArrayRuntime(serverConfig, config, redisBackends, alarmPublisher,
                               stats ? stats : std::make_shared<RuntimeStats>(), generation, limits.maxPayloadBytes,

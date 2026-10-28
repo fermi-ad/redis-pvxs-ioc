@@ -601,7 +601,7 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
 }
 
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health"});
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "stream_protocol", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -630,6 +630,12 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
     } else if (kind != "value" && kind != "scalar" && kind != "array") {
       fail(path + ".kind", "unsupported PV kind '" + kind + "'");
     }
+  }
+
+  if (node["stream_protocol"]) {
+    const auto protocol = lowerCopy(parseString(node["stream_protocol"], path + ".stream_protocol"));
+    if (protocol == "xrm_v1") pv.streamProtocol = StreamProtocol::XrmV1;
+    else if (protocol != "legacy") fail(path + ".stream_protocol", "unsupported stream protocol '" + protocol + "'");
   }
 
   if (pv.kind == PVKind::NTNDArray) {
@@ -680,6 +686,15 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
     fail(path + ".type", "this array element type is unsupported");
+  }
+  if (pv.streamProtocol == StreamProtocol::XrmV1) {
+    const bool supportedType = pv.type == PrimitiveType::Int8 || pv.type == PrimitiveType::UInt8 ||
+        pv.type == PrimitiveType::Int16 || pv.type == PrimitiveType::UInt16 ||
+        pv.type == PrimitiveType::Int32 || pv.type == PrimitiveType::UInt32;
+    if (pv.kind != PVKind::Value || pv.shape != Shape::Array || !supportedType || pv.write || pv.confirm)
+      fail(path + ".stream_protocol", "xrm_v1 requires a read-only integer array with 1, 2, or 4 byte elements");
+    if (!pv.sourceHealth.staleAfterMs)
+      fail(path + ".source_health.stale_after_ms", "xrm_v1 requires an explicit nonzero freshness interval");
   }
   if (pv.transform.has_value() && !isFloatingPointType(pv.type)) {
     fail(path + ".transform", "linear transforms are only supported for floating-point PVs");
@@ -1140,6 +1155,7 @@ bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs) {
 
   return lhs.name == rhs.name &&
          lhs.kind == rhs.kind &&
+         lhs.streamProtocol == rhs.streamProtocol &&
          lhs.type == rhs.type &&
          lhs.shape == rhs.shape &&
          lhs.maxFrameBytes == rhs.maxFrameBytes &&

@@ -1,5 +1,16 @@
 # Path to v0.9.0 and a v1.0 release candidate
 
+This is the historical v0.9.0 planning record. Its platform requirements and
+unchecked planning items describe that release's work, not current completion
+status or forward CI policy. Published v0.9.0 qualification retains its original
+required macOS development evidence. Forward platform scope is superseded by
+[v1.0 planning (#144)](https://github.com/fermi-ad/redis-pvxs-ioc/issues/144): Linux
+amd64 is required, existing Linux arm64 CI remains informational, and macOS is
+outside current CI and release qualification. Linux arm64 release support is an
+explicit pending v1.0 decision, leaning toward exclusion; no arm64 expansion is
+included now. Future platform expansion should prioritize Linux arm64 over macOS
+when justified by a deployment need.
+
 The release sequence is **v0.8.2 → v0.9.0 candidates → v0.9.0 → v1.0.0-rc.1**.
 The [v0.9.0 milestone](https://github.com/fermi-ad/redis-pvxs-ioc/milestone/1)
 and [tracking issue #99](https://github.com/fermi-ad/redis-pvxs-ioc/issues/99)

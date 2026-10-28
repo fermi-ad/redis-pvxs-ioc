@@ -71,6 +71,8 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "proof bundle"):
             release.verify_record(record, workflow, "0.9.0", SHA, "qualification")
         record.update(schema=1, evidence={"proof.json": "d" * 64, "policy.json": "e" * 64})
+        self.assertNotIn("native-macos", record["checks"])
+        self.assertEqual(set(record["checks"]), release.qualification.CHECKS)
         release.verify_record(record, workflow, "0.9.0", SHA, "qualification")
         for updates in ({"soak_seconds": 86399}, {"rollback_version": "0.8.1"}, {"checks": []}):
             with self.subTest(updates=updates), self.assertRaises(ValueError):

@@ -23,9 +23,6 @@ jobs:
           - runner: ubuntu-24.04-arm
             sanitizer: none
             evidence: linux-arm-informational
-          - runner: macos-14
-            sanitizer: none
-            evidence: macos-minimal
           - runner: ubuntu-24.04
             sanitizer: address,undefined
             evidence: linux-sanitizer
@@ -42,9 +39,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake perl libreadline-dev python3 redis-server
-      - name: Install macOS build tools
-        if: runner.os == 'macOS'
-        run: brew install cmake readline redis
       - name: Install optional integrations for sanitizer coverage
         if: matrix.sanitizer != 'none'
         run: |

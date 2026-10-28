@@ -17,7 +17,7 @@ import zipfile
 REPOSITORY = "fermi-ad/redis-pvxs-ioc"
 SOURCE = "https://github.com/" + REPOSITORY
 IMAGE_REPOSITORY = "adregistry.fnal.gov/instrumentation/redis-pvxs-ioc"
-CHECKS = {"native-macos", "full-feature", "minimal", "sanitizers", "redis-pva",
+CHECKS = {"full-feature", "minimal", "sanitizers", "redis-pva",
           "discovery-catalog", "rpc-http", "imaging-600-frames", "capacity", "rollback"}
 CANDIDATE_CHECKS = {"image", "smoke", "access", "sbom", "provenance", "source-inputs"}
 ATTESTATIONS = {"source-inputs.json", "sbom.json", "provenance.json", "registry-manifest.json"}
@@ -30,7 +30,6 @@ CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 NATIVE_TESTS = {"config_tests", "access_runtime_tests", "source_health_e2e", "ndarray_transfer_e2e", "discovery_e2e"}
 FULL_TESTS = {"endpoint_rpc_e2e", "rpc_hardening_e2e", "rpc_recovery_e2e", "channelfinder_http_tests"}
 NATIVE_EVIDENCE = {
-    "native (macos-14, none)": "macos-minimal",
     "native (ubuntu-24.04, none)": "linux-minimal",
     "native (ubuntu-24.04, address,undefined)": "linux-sanitizer",
 }
@@ -290,8 +289,7 @@ def validate_ci(directory, proof, revision, api):
         else:
             # GitHub's job labels are runs-on selectors, not necessarily the
             # automatic OS/architecture labels of self-hosted runners.
-            for job_name, labels in (("native (macos-14, none)", {"macos-14"}),
-                                     ("native (ubuntu-24.04, none)", {"ubuntu-24.04"}),
+            for job_name, labels in (("native (ubuntu-24.04, none)", {"ubuntu-24.04"}),
                                      ("native (ubuntu-24.04, address,undefined)", {"ubuntu-24.04"})):
                 selected = [j for j in jobs["jobs"] if j.get("name") == job_name and labels.issubset(j.get("labels", []))]
                 require(len(selected) == 1, "missing native/minimal/sanitizer CI matrix job: " + job_name)

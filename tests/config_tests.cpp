@@ -782,6 +782,32 @@ pvs:
   const auto disabled = loadConfigString(std::string(kLegacyConfig) + "\ndiscovery: {enabled: false}\n");
   assert(!disabled.discovery.enabled);
 
+  const auto xrmBase = std::string("server: {instance: xrm}\nredis: {base_key: xrm, host: localhost, port: 6379}\npvs: [");
+  const auto xrm = loadConfigString(xrmBase + "{name: wave, type: int16, shape: array, stream_protocol: xrm_v1, read: {key: wave}, source_health: {stale_after_ms: 5000}}]");
+  assert(xrm.pvs[0].streamProtocol == StreamProtocol::XrmV1);
+  auto legacyWave = xrm.pvs[0];
+  legacyWave.streamProtocol = StreamProtocol::Legacy;
+  assert(!sameReaderTopology(xrm.pvs[0], legacyWave));
+  assert(defaults.pvs[0].streamProtocol == StreamProtocol::Legacy);
+  for (const auto* pv : {
+      "{name: wave, type: int16, shape: scalar, stream_protocol: xrm_v1, read: {key: wave}, source_health: {stale_after_ms: 5000}}",
+      "{name: wave, type: float32, shape: array, stream_protocol: xrm_v1, read: {key: wave}, source_health: {stale_after_ms: 5000}}",
+      "{name: wave, type: int16, shape: array, stream_protocol: xrm_v1, read: {key: wave}, write: {key: command}, source_health: {stale_after_ms: 5000}}",
+      "{name: wave, type: int16, shape: array, stream_protocol: xrm_v1, read: {key: wave}}",
+      "{name: wave, type: int16, shape: array, stream_protocol: xrm_v1, read: {key: wave}, source_health: {stale_after_ms: 0}}",
+      "{name: wave, type: int16, shape: array, stream_protocol: invalid, read: {key: wave}}"}) {
+    const auto text = xrmBase + pv + "]";
+    assert(throwsConfig(text.c_str()));
+  }
+  try {
+    static_cast<void>(loadConfigString(xrmBase +
+        "{name: wave, type: int16, shape: array, stream_protocol: xrm_v1, read: {key: wave}}]"));
+    assert(false);
+  } catch (const std::exception& ex) {
+    assert(std::string(ex.what()).find("source_health.stale_after_ms") != std::string::npos);
+    assert(std::string(ex.what()).find("explicit nonzero") != std::string::npos);
+  }
+
   const std::string gatewayBase =
       "server: {instance: gateway, namespace: EXPORT}\n"
       "redis: {base_key: gateway, host: localhost, port: 6379}\n";

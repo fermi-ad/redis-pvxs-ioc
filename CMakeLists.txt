@@ -24,6 +24,7 @@ set(EPICS_BASE "${CMAKE_SOURCE_DIR}/third_party/epics-base" CACHE PATH "Path to 
 set(PVXS_ROOT "${CMAKE_SOURCE_DIR}/third_party/pvxs" CACHE PATH "Path to built pvxs")
 
 find_package(Perl REQUIRED)
+find_package(Threads REQUIRED)
 if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
   find_package(CURL REQUIRED)
 endif()
@@ -183,6 +184,7 @@ add_library(redis-pvxs-ioc-core STATIC
   src/alarm_worker.cpp
   src/ntndarray.cpp
   src/runtime.cpp
+  src/xrm_hash_reader.cpp
   src/operation_queue.cpp
   src/app.cpp
   src/pv_registry.cpp
@@ -233,6 +235,12 @@ endif()
 add_executable(redis-pvxs-ioc src/main.cpp)
 target_link_libraries(redis-pvxs-ioc PRIVATE redis-pvxs-ioc-core)
 
+add_library(xrm-acquisition STATIC src/xrm_acquisition.cpp)
+target_include_directories(xrm-acquisition PUBLIC ${CMAKE_SOURCE_DIR}/include)
+add_executable(xrm-stream tools/xrm_stream.cpp)
+target_link_libraries(xrm-stream PRIVATE xrm-acquisition Threads::Threads)
+install(TARGETS xrm-stream RUNTIME DESTINATION bin)
+
 if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
   add_library(redis-pvxs-channelfinder STATIC src/channelfinder.cpp)
   target_link_libraries(redis-pvxs-channelfinder PUBLIC redis-pvxs-ioc-core)
@@ -277,6 +285,38 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     --fixture $<TARGET_FILE:qualification_probe_fixture> --probe $<TARGET_FILE:qualification_probe>)
   set_tests_properties(qualification_probe_e2e PROPERTIES TIMEOUT 25)
   find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  add_executable(xrm_acquisition_tests tests/xrm_acquisition_tests.cpp)
+  target_link_libraries(xrm_acquisition_tests PRIVATE xrm-acquisition)
+  target_compile_options(xrm_acquisition_tests PRIVATE -UNDEBUG)
+  add_test(NAME xrm_acquisition_tests COMMAND xrm_acquisition_tests)
+  set_tests_properties(xrm_acquisition_tests PROPERTIES TIMEOUT 30)
+
+  add_executable(xrm_stream_deadline_tests tests/xrm_stream_deadline_tests.cpp)
+  target_link_libraries(xrm_stream_deadline_tests PRIVATE xrm-acquisition Threads::Threads)
+  target_compile_options(xrm_stream_deadline_tests PRIVATE -UNDEBUG)
+  add_test(NAME xrm_stream_deadline_tests COMMAND xrm_stream_deadline_tests)
+  set_tests_properties(xrm_stream_deadline_tests PROPERTIES TIMEOUT 30)
+
+  add_test(NAME xrm_stream_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/xrm_stream_e2e.py $<TARGET_FILE:xrm-stream>)
+  set_tests_properties(xrm_stream_e2e PROPERTIES TIMEOUT 90)
+  add_test(NAME xrm_pva_e2e COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --timeout 45 --
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/xrm_pva_e2e.py
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --stream $<TARGET_FILE:xrm-stream>
+    --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget)
+  set_tests_properties(xrm_pva_e2e PROPERTIES TIMEOUT 60)
+
+  foreach(test_name IN ITEMS xrm_bounded_reader_tests xrm_runtime_tests)
+    add_executable(${test_name} tests/${test_name}.cpp)
+    target_link_libraries(${test_name} PRIVATE redis-pvxs-ioc-core)
+    target_compile_options(${test_name} PRIVATE -UNDEBUG)
+    add_test(NAME ${test_name} COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+      -- $<TARGET_FILE:${test_name}>)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 75)
+  endforeach()
   add_executable(gateway_pva_tests tests/gateway_pva_tests.cpp)
   target_link_libraries(gateway_pva_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(gateway_pva_tests PRIVATE -UNDEBUG)

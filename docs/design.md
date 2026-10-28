@@ -48,9 +48,9 @@ read route, optional write route, and optional confirmation/readback route.
 Floating-point values and arrays may use a linear scale/offset transform; clients
 always see served-unit values.
 
-Selected gateway channels preserve the upstream PVA value structure. See the
-[gateway configuration](configuration.md#pva_gateway) for the cached GET,
-monitor, PUT, and security semantics and their limitations.
+Selected gateway channels preserve the upstream PVA value structure and reject
+PUT execution. See the [gateway configuration](configuration.md#pva_gateway)
+for cached GET, monitor, and security semantics and their limitations.
 
 ## Generation-based hot reload
 

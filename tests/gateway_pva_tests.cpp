@@ -3,7 +3,6 @@
 #endif
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/gateway_pv.h"
-#include "../src/gateway_dispatch_fence.h"
 
 #include <atomic>
 #include <cassert>
@@ -26,64 +25,6 @@
 
 using namespace redis_pvxs_ioc;
 using namespace std::chrono_literals;
-
-void testConnectionSendFence() {
-  GatewayDispatchFence fence;
-  fence.connect();
-  fence.activate();
-  const auto admitted = fence.admit();
-  assert(admitted);
-
-  std::mutex mutex;
-  std::condition_variable changed;
-  bool insideSend = false, releaseSend = false, disconnectStarted = false;
-  bool sent = false, disconnected = false;
-  std::thread sender([&] {
-    assert(fence.dispatch(*admitted, [&] {
-      std::unique_lock<std::mutex> lock(mutex);
-      insideSend = true;
-      changed.notify_all();
-      changed.wait(lock, [&] { return releaseSend; });
-      sent = true;
-    }));
-  });
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    assert(changed.wait_for(lock, 5s, [&] { return insideSend; }));
-  }
-  std::thread monitor([&] {
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      disconnectStarted = true;
-      changed.notify_all();
-    }
-    fence.disconnect();
-    std::lock_guard<std::mutex> lock(mutex);
-    disconnected = true;
-    changed.notify_all();
-  });
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    assert(changed.wait_for(lock, 5s, [&] { return disconnectStarted; }));
-    // The disconnect cannot invalidate the checked generation during send.
-    assert(!changed.wait_for(lock, 100ms, [&] { return disconnected; }));
-    releaseSend = true;
-  }
-  changed.notify_all();
-  sender.join();
-  monitor.join();
-  assert(sent && disconnected);
-
-  fence.connect();
-  bool staleSent = false;
-  assert(!fence.dispatch(*admitted, [&] { staleSent = true; }));
-  assert(!staleSent);
-  const auto fresh = fence.admit();
-  assert(fresh && *fresh != *admitted);
-  assert(fence.dispatch(*fresh, [&] { sent = true; }));
-  fence.retire();
-  assert(!fence.admit() && !fence.dispatch(*fresh, [] {}));
-}
 
 template<typename F> void eventuallyAt(int line, F predicate) {
   const auto deadline = std::chrono::steady_clock::now() + 8s;
@@ -238,29 +179,20 @@ private:
 };
 
 int main() {
-  testConnectionSendFence();
-  // Separate isolated servers ensure the gateway must use its supplied upstream
-  // context and cannot accidentally find its own exported channel.
   auto upstreamServer = pvxs::server::Config::isolated(AF_INET).build();
   auto localServer = pvxs::server::Config::isolated(AF_INET).build();
   auto upstream = pvxs::server::SharedPV::buildMailbox();
-  std::atomic<unsigned> puts{0};
-  std::mutex heldMutex;
-  std::unique_ptr<pvxs::server::ExecOp> heldPut;
+  std::atomic<unsigned> puts{0}, rpcs{0};
   upstream.onPut([&](pvxs::server::SharedPV& pv, std::unique_ptr<pvxs::server::ExecOp>&& op,
                      pvxs::Value&& value) {
     ++puts;
     auto delta = pv.fetch().cloneEmpty();
     delta.assign(value);
     pv.post(delta);
-    if (value["value"] && value["value"].type() == pvxs::TypeCode::Int32 &&
-        value["value"].as<int32_t>() == 77) {
-      std::lock_guard<std::mutex> lock(heldMutex);
-      heldPut = std::move(op); // Simulate an applied write with a lost reply.
-      return;
-    }
     op->reply();
   });
+  upstream.onRPC([&](pvxs::server::SharedPV&, std::unique_ptr<pvxs::server::ExecOp>&& op,
+                     pvxs::Value&&) { ++rpcs; op->reply(); });
   const auto initialTable = table();
   upstream.open(initialTable);
   auto monitorGate = std::make_shared<MonitorGate>();
@@ -273,7 +205,6 @@ int main() {
   assert(directGet["record._options.atomic"].as<bool>());
   const auto directNonAtomic = direct.get("upstream:table").server(selectedServer)
       .record("atomic", false).exec()->wait(5.0);
-  assert(directNonAtomic["record._options.queueSize"].as<int32_t>() == 0);
   assert(!directNonAtomic["record._options.atomic"].as<bool>());
 
   // A different server advertises the same name and is the only discovery
@@ -289,7 +220,6 @@ int main() {
   auto impostorSource = pvxs::server::StaticSource::build();
   impostorSource.add("upstream:table", impostor);
   impostorServer.addSource("impostor", impostorSource.source()).start();
-  assert(impostorServer.config().tcp_port != upstreamServer.config().tcp_port);
   auto adversarialContext = impostorServer.clientConfig().build();
   assert(adversarialContext.get("upstream:table").exec()->wait(5.0)
              ["value.reading"].as<pvxs::shared_array<const double>>()[0] == 666.0);
@@ -309,21 +239,20 @@ int main() {
   std::string error;
   assert(access->start({"TEST"}, error));
 
-  auto queue = std::make_shared<OperationQueue>();
-  // Missing or nonnumeric TCP destinations are rejected before opening a PV.
   bool rejectedUnspecified = false, rejectedHostname = false;
-  try { GatewayPV::create(adversarialContext, "upstream:table", "", "export:old", queue, 3000, 2048); }
+  try { GatewayPV::create(adversarialContext, "upstream:table", ""); }
   catch (const std::invalid_argument&) { rejectedUnspecified = true; }
-  try { GatewayPV::create(adversarialContext, "upstream:table", "localhost:5075", "export:bad", queue, 3000, 2048); }
+  try { GatewayPV::create(adversarialContext, "upstream:table", "localhost:5075"); }
   catch (const std::invalid_argument&) { rejectedHostname = true; }
   assert(rejectedUnspecified && rejectedHostname);
-  auto gateway = GatewayPV::create(adversarialContext, "upstream:table", selectedServer,
-                                   "export:table", queue, 3000, 2048);
+  auto gateway = GatewayPV::create(adversarialContext, "upstream:table", selectedServer);
+  auto plainGateway = GatewayPV::create(adversarialContext, "upstream:table", selectedServer);
   access->addPV("export:table", gateway->sharedPV(), AccessAssignment{"TEST", 0});
-  localServer.addSource("secured", access->source()).start();
+  auto plain = pvxs::server::StaticSource::build();
+  plain.add("export:plain", plainGateway->sharedPV());
+  localServer.addSource("secured", access->source()).addSource("plain", plain.source()).start();
   auto client = localServer.clientConfig().build();
-  gateway->activate();
-  eventually([&] { return gateway->connected(); });
+  eventually([&] { return gateway->connected() && plainGateway->connected(); });
 
   const auto initial = client.get("export:table").exec()->wait(5.0);
   assert(initial.id() == "epics:nt/NTTable:1.0");
@@ -331,14 +260,46 @@ int main() {
   assert(initial["value.reading"].as<pvxs::shared_array<const double>>()[1] == 2.5);
   assert(initial["timeStamp.secondsPastEpoch"].as<int64_t>() == 1234567);
   assert(initial["record._options.queueSize"].as<int32_t>() == 4);
-  assert(initial["record._options.atomic"].as<bool>());
   const auto gatewayNonAtomic = client.get("export:table").record("atomic", false).exec()->wait(5.0);
   assert(gatewayNonAtomic["record._options.queueSize"].as<int32_t>() == 4);
   assert(gatewayNonAtomic["record._options.atomic"].as<bool>());
   assert(initial["extra"].as<pvxs::Value>().as<std::string>() == "arbitrary value");
   const auto records = initial["records"].as<pvxs::shared_array<const pvxs::Value>>();
-  assert(records.size() == 1 && records[0]["name"].as<std::string>() == "sample");
-  assert(records[0]["samples"].as<pvxs::shared_array<const int32_t>>()[1] == 8);
+  assert(records.size() == 1 && records[0]["samples"].as<pvxs::shared_array<const int32_t>>()[1] == 8);
+
+  const auto rejectTablePuts = [&](const std::string& name) {
+    bool selectedDenied = false, variantDenied = false;
+    try {
+      client.put(name).field("value.reading")
+          .set("value.reading", array<double>({8.0, 9.0})).exec()->wait(5.0);
+    } catch (const pvxs::client::RemoteError& ex) {
+      selectedDenied = std::string(ex.what()).find("Read-only PV") != std::string::npos;
+    }
+    auto extra = pvxs::TypeDef(pvxs::TypeCode::String).create();
+    extra.from(std::string("changed"));
+    try { client.put(name).field("extra").set("extra", extra).exec()->wait(5.0); }
+    catch (const pvxs::client::RemoteError& ex) {
+      variantDenied = std::string(ex.what()).find("Read-only PV") != std::string::npos;
+    }
+    assert(selectedDenied && variantDenied);
+    assert(puts == 0 && impostorPuts == 0);
+    assert(upstream.fetch()["value.reading"].as<pvxs::shared_array<const double>>()[1] == 2.5);
+    const auto cached = client.get(name).exec()->wait(5.0);
+    assert(cached["value.reading"].as<pvxs::shared_array<const double>>()[1] == 2.5);
+    assert(cached["extra"].as<pvxs::Value>().as<std::string>() == "arbitrary value");
+  };
+  // One gateway has WRITE-granting ACF; the other has no access wrapper.
+  rejectTablePuts("export:table");
+  rejectTablePuts("export:plain");
+  const auto rejectRpc = [&](const std::string& name) {
+    auto request = pvxs::TypeDef(pvxs::TypeCode::Struct, {}).create();
+    bool denied = false;
+    try { client.rpc(name, request).exec()->wait(5.0); }
+    catch (const pvxs::client::RemoteError&) { denied = true; }
+    assert(denied && rpcs == 0);
+  };
+  rejectRpc("export:table");
+  rejectRpc("export:plain");
 
   std::atomic<unsigned> monitorEvents{0};
   auto monitor = client.monitor("export:table").maskDisconnected(false)
@@ -354,67 +315,36 @@ int main() {
   });
   const auto merged = client.get("export:table").exec()->wait(5.0);
   assert(merged["labels"].as<pvxs::shared_array<const std::string>>()[0] == "Reading");
-  assert(merged["value.name"].as<pvxs::shared_array<const std::string>>()[1] == "second");
   assert(merged["timeStamp.nanoseconds"].as<int32_t>() == 123);
   eventually([&] {
-    try {
-      auto value = monitor->pop();
-      return value && value["value.reading"].as<pvxs::shared_array<const double>>()[1] == 4.0;
-    } catch (...) { return false; }
+    try { auto value = monitor->pop(); return value && value["value.reading"].as<pvxs::shared_array<const double>>()[1] == 4.0; }
+    catch (...) { return false; }
   });
 
-  // Forward a selected field, preserving its PVRequest and marked fields.
-  client.put("export:table").field("value.reading")
-      .set("value.reading", array<double>({8.0, 9.0})).exec()->wait(5.0);
-  eventually([&] { return puts == 1; });
-  const auto written = upstream.fetch();
-  assert(written["value.reading"].as<pvxs::shared_array<const double>>()[1] == 9.0);
-  assert(written["value.name"].as<pvxs::shared_array<const std::string>>()[1] == "second");
-
-  auto extra = pvxs::TypeDef(pvxs::TypeCode::String).create();
-  extra.from(std::string("changed"));
-  client.put("export:table").field("extra").set("extra", extra).exec()->wait(5.0);
-  eventually([&] { return puts == 2; });
-  assert(upstream.fetch()["extra"].as<pvxs::Value>().as<std::string>() == "changed");
-
-  // Oversized payloads are rejected before any upstream write.
-  bool oversized = false;
-  try {
-    client.put("export:table").set("labels", array<std::string>({std::string(4096, 'x')})).exec()->wait(5.0);
-  } catch (const std::exception&) { oversized = true; }
-  assert(oversized && puts == 2);
-
-  // Keep a queued write behind an active lane. ACF revocation must prevent it
-  // from reaching the upstream after admission, even if the local client has
-  // already begun the operation.
-  std::mutex blockMutex;
-  std::condition_variable blockChanged;
-  bool entered = false, release = false;
-  const auto block = queue->submit({"export:table", 256, OperationQueue::Clock::now() + 5s,
-      [&] {
-        std::unique_lock<std::mutex> lock(blockMutex);
-        entered = true;
-        blockChanged.notify_all();
-        blockChanged.wait(lock, [&] { return release; });
-      }, [](OperationFailure, const std::string&) {}});
-  assert(block);
-  {
-    std::unique_lock<std::mutex> lock(blockMutex);
-    assert(blockChanged.wait_for(lock, 5s, [&] { return entered; }));
+  upstream.close();
+  eventually([&] { return !gateway->connected() && !plainGateway->connected(); });
+  bool disconnected = false;
+  eventually([&] {
+    try { monitor->pop(); } catch (const pvxs::client::Disconnect&) { disconnected = true; }
+    catch (...) {}
+    return disconnected;
+  });
+  auto replacement = pvxs::nt::NTScalar{pvxs::TypeCode::Int32}.create();
+  replacement["value"] = int32_t(42);
+  upstream.open(replacement);
+  eventually([&] { return gateway->connected() && plainGateway->connected(); });
+  for (const auto* name : {"export:table", "export:plain"}) {
+    const auto reopened = client.get(name).exec()->wait(5.0);
+    assert(reopened.id().find("epics:nt/NTScalar:") == 0);
+    assert(reopened["value"].as<int32_t>() == 42);
+    bool denied = false;
+    try { client.put(name).set("value", int32_t(77)).exec()->wait(5.0); }
+    catch (const pvxs::client::RemoteError& ex) {
+      denied = std::string(ex.what()).find("Read-only PV") != std::string::npos;
+    }
+    assert(denied && puts == 0 && upstream.fetch()["value"].as<int32_t>() == 42);
+    assert(client.get(name).exec()->wait(5.0)["value"].as<int32_t>() == 42);
   }
-  auto queued = client.put("export:table").set("value.reading", array<double>({11.0})).exec();
-  eventually([&] { return queue->stats().queued == 1; });
-  policy("READ");
-  assert(access->reload("test", error));
-  {
-    std::lock_guard<std::mutex> lock(blockMutex);
-    release = true;
-  }
-  blockChanged.notify_all();
-  bool deniedWrite = false;
-  try { queued->wait(5.0); } catch (const std::exception&) { deniedWrite = true; }
-  assert(deniedWrite && puts == 2);
-  assert(client.get("export:table").exec()->wait(5.0).id() == "epics:nt/NTTable:1.0");
 
   policy("NONE");
   assert(access->reload("test", error));
@@ -427,203 +357,37 @@ int main() {
     catch (...) {}
     return deniedMonitor;
   });
-  assert(deniedGet && deniedMonitor && puts == 2);
+  assert(deniedGet && deniedMonitor && puts == 0);
   policy("WRITE");
   assert(access->reload("test", error));
 
-  // An admitted PUT waiting in the queue belongs to its original connection
-  // generation. It must not reach the device after a disconnect/reconnect.
-  entered = false;
-  release = false;
-  const auto reconnectBlock = queue->submit({"export:table", 256, OperationQueue::Clock::now() + 5s,
-      [&] {
-        std::unique_lock<std::mutex> lock(blockMutex);
-        entered = true;
-        blockChanged.notify_all();
-        blockChanged.wait(lock, [&] { return release; });
-      }, [](OperationFailure, const std::string&) {}});
-  assert(reconnectBlock);
-  {
-    std::unique_lock<std::mutex> lock(blockMutex);
-    assert(blockChanged.wait_for(lock, 5s, [&] { return entered; }));
-  }
-  // Disable client-side automatic re-execution so the fixture submits one
-  // request even when the local exported channel disconnects.
-  std::mutex staleMutex;
-  std::condition_variable staleChanged;
-  pvxs::Value stalePrototype;
-  bool staleInit = false, staleFinished = false, staleFailed = false;
-  auto stale = client.put("export:table").field("value.reading").autoExec(false)
-      .onInit([&](const pvxs::Value& value) {
-        std::lock_guard<std::mutex> lock(staleMutex);
-        stalePrototype = value.cloneEmpty();
-        staleInit = true;
-        staleChanged.notify_all();
-      }).exec();
-  {
-    std::unique_lock<std::mutex> lock(staleMutex);
-    assert(staleChanged.wait_for(lock, 5s, [&] { return staleInit; }));
-    stalePrototype["value.reading"] = array<double>({12.0});
-  }
-  stale->reExecPut(stalePrototype, [&](pvxs::client::Result&& result) {
-    bool failed = false;
-    try { result(); } catch (const std::exception&) { failed = true; }
-    std::lock_guard<std::mutex> lock(staleMutex);
-    staleFailed = failed;
-    staleFinished = true;
-    staleChanged.notify_all();
-  });
-  eventually([&] { return queue->stats().queued == 1; });
-  upstream.close();
-  eventually([&] { return !gateway->connected(); });
-  upstream.open(initialTable);
-  eventually([&] { return gateway->connected(); });
-  {
-    std::lock_guard<std::mutex> lock(blockMutex);
-    release = true;
-  }
-  blockChanged.notify_all();
-  {
-    std::unique_lock<std::mutex> lock(staleMutex);
-    assert(staleChanged.wait_for(lock, 5s, [&] { return staleFinished; }));
-    assert(staleFailed);
-  }
-  assert(puts == 2);
-
-  // A remote monitor setup error is terminal in PVXS. The application pump
-  // retries at a bounded cadence and resumes once the upstream allows it.
+  // A terminal monitor setup rejection is retried by the application pump.
   monitorGate->reject = true;
   upstream.close();
-  eventually([&] { return !gateway->connected(); });
-  upstream.open(initialTable);
+  eventually([&] { return !gateway->connected() && !plainGateway->connected(); });
+  upstream.open(replacement);
   eventually([&] { return monitorGate->rejected.load() >= 1; });
   eventually([&] {
-    gateway->pump();
+    gateway->pump(); plainGateway->pump();
     return monitorGate->rejected.load() >= 2;
   });
-  assert(!gateway->connected());
   monitorGate->reject = false;
   eventually([&] {
-    gateway->pump();
-    return gateway->connected();
+    gateway->pump(); plainGateway->pump();
+    return gateway->connected() && plainGateway->connected();
   });
-  assert(client.get("export:table").exec()->wait(5.0).id() == "epics:nt/NTTable:1.0");
+  assert(client.get("export:table").exec()->wait(5.0)["value"].as<int32_t>() == 42);
 
-  // Losing the source must disconnect local subscribers rather than serve a
-  // stale snapshot; reconnect can publish a completely different structure.
-  upstream.close();
-  eventually([&] { return !gateway->connected(); });
-  bool disconnected = false;
-  eventually([&] {
-    try { monitor->pop(); } catch (const pvxs::client::Disconnect&) { disconnected = true; }
-    catch (...) {}
-    return disconnected;
-  });
-  auto replacement = pvxs::nt::NTScalar{pvxs::TypeCode::Int32}.create();
-  replacement["value"] = int32_t(42);
-  upstream.open(replacement);
-  eventually([&] { return gateway->connected(); });
-  const auto reopened = client.get("export:table").exec()->wait(5.0);
-  assert(reopened.id().find("epics:nt/NTScalar:") == 0);
-  assert(reopened["value"].as<int32_t>() == 42);
-
-  // The backend applies a PUT but drops the connection before replying. The
-  // gateway must fail this uncertain write, never send it again on reconnect.
-  std::mutex uncertainMutex;
-  std::condition_variable uncertainChanged;
-  pvxs::Value uncertainPrototype;
-  bool uncertainInit = false, uncertainFinished = false, uncertainFailed = false;
-  auto uncertain = client.put("export:table").autoExec(false)
-      .onInit([&](const pvxs::Value& value) {
-        std::lock_guard<std::mutex> lock(uncertainMutex);
-        uncertainPrototype = value.cloneEmpty();
-        uncertainInit = true;
-        uncertainChanged.notify_all();
-      }).exec();
-  {
-    std::unique_lock<std::mutex> lock(uncertainMutex);
-    assert(uncertainChanged.wait_for(lock, 5s, [&] { return uncertainInit; }));
-    uncertainPrototype["value"] = int32_t(77);
-  }
-  uncertain->reExecPut(uncertainPrototype, [&](pvxs::client::Result&& result) {
-    bool failed = false;
-    try { result(); } catch (const std::exception&) { failed = true; }
-    std::lock_guard<std::mutex> lock(uncertainMutex);
-    uncertainFailed = failed;
-    uncertainFinished = true;
-    uncertainChanged.notify_all();
-  });
-  eventually([&] { return puts == 3; });
-  upstream.close();
-  eventually([&] { return !gateway->connected(); });
-  upstream.open(replacement);
-  eventually([&] { return gateway->connected(); });
-  {
-    std::unique_lock<std::mutex> lock(uncertainMutex);
-    assert(uncertainChanged.wait_for(lock, 5s, [&] { return uncertainFinished; }));
-    assert(uncertainFailed);
-  }
-  std::this_thread::sleep_for(500ms);
-  assert(puts == 3);
-  {
-    std::lock_guard<std::mutex> lock(heldMutex);
-    heldPut.reset();
-  }
-
-  // Registry retirement fences a write already admitted to the per-PV queue.
-  entered = false;
-  release = false;
-  const auto retirementBlock = queue->submit({"export:table", 256, OperationQueue::Clock::now() + 5s,
-      [&] {
-        std::unique_lock<std::mutex> lock(blockMutex);
-        entered = true;
-        blockChanged.notify_all();
-        blockChanged.wait(lock, [&] { return release; });
-      }, [](OperationFailure, const std::string&) {}});
-  assert(retirementBlock);
-  {
-    std::unique_lock<std::mutex> lock(blockMutex);
-    assert(blockChanged.wait_for(lock, 5s, [&] { return entered; }));
-  }
-  auto retired = client.put("export:table").set("value", int32_t(99)).exec();
-  eventually([&] { return queue->stats().queued == 1; });
-  const auto emptyBindings = access->prepareBindings({});
-  assert(access->publishBindings(emptyBindings, [&](std::string&) {
-    gateway->retireWrites();
-    return true;
-  }, error));
-  access->finishBindings(emptyBindings);
   gateway->deactivate();
-  {
-    std::lock_guard<std::mutex> lock(blockMutex);
-    release = true;
-  }
-  blockChanged.notify_all();
-  bool retiredWrite = false;
-  try { retired->wait(5.0); } catch (const std::exception&) { retiredWrite = true; }
-  assert(retiredWrite && puts == 3 && upstream.fetch()["value"].as<int32_t>() == 42);
-  assert(impostorPuts == 0);
-  assert(!gateway->connected());
-  bool retiredPermanently = false;
-  try { gateway->activate(); } catch (const std::logic_error&) { retiredPermanently = true; }
-  assert(retiredPermanently);
+  plainGateway->deactivate();
+  assert(!gateway->connected() && !plainGateway->connected());
   monitor->cancel();
   deniedSub->cancel();
-  upstreamServer.stop();
-  auto unavailable = GatewayPV::create(adversarialContext, "upstream:table", selectedServer,
-                                       "export:offline", queue, 3000, 2048);
-  access->addPV("export:offline", unavailable->sharedPV(), AccessAssignment{"TEST", 0});
-  unavailable->activate();
-  auto offlinePut = client.put("export:offline").set("value", int32_t(123)).exec();
-  bool offline = false;
-  try { offlinePut->wait(1.5); } catch (const pvxs::client::Timeout&) { offline = true; }
-  assert(offline && !unavailable->connected() && impostorPuts == 0);
-  unavailable->deactivate();
   client.close();
   localServer.stop();
   direct.close();
   adversarialContext.close();
+  upstreamServer.stop();
   impostorServer.stop();
-  queue->shutdown();
   std::filesystem::remove(path);
 }

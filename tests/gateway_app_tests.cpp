@@ -106,8 +106,13 @@ int main() {
   const auto count = get("SYS:gateway-app:discovery:status")["records"].as<uint64_t>();
   ServerConfig names; names.instance = "gateway-app"; names.nameSpace = "EXPORT";
   assert(count == adminPVNames(names).size() + 2);
-  client.put("EXPORT:first").set("value", int32_t(11)).exec()->wait(4.0);
-  eventually([&] { return writes.load() == 1 && first.fetch()["value"].as<int32_t>() == 11; });
+  const auto putDenied = [&] {
+    try { client.put("EXPORT:first").set("value", int32_t(99)).exec()->wait(4.0); }
+    catch (const std::exception&) { return true; }
+    return false;
+  };
+  // Even a WRITE-granting policy cannot enable gateway writes.
+  assert(putDenied() && writes.load() == 0 && first.fetch()["value"].as<int32_t>() == 10);
 
   std::atomic<unsigned> wakeups{0};
   auto monitor = client.monitor("EXPORT:second").maskConnected(true).maskDisconnected(false)
@@ -121,18 +126,19 @@ int main() {
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 1);
   const auto loopError = get("SYS:gateway-app:config:lastError")["value"].as<std::string>();
   assert(loopError.find("currently served endpoint") != std::string::npos);
-  assert(get("EXPORT:first")["value"].as<int32_t>() == 11);
+  assert(get("EXPORT:first")["value"].as<int32_t>() == 10);
 
   // An invalid candidate policy cannot replace a working gateway generation.
   config(true); policy("NOT_A_PERMISSION"); app.requestReload(); app.pump();
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 1);
-  assert(get("EXPORT:first")["value"].as<int32_t>() == 11);
+  assert(get("EXPORT:first")["value"].as<int32_t>() == 10);
   assert(get("SYS:gateway-app:config:reloadStatus")["state"].as<std::string>() == "rejected");
 
   policy("WRITE"); app.requestReload(); app.pump();
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 2);
   eventually([&] { try { return get("EXPORT:first")["value"].as<int32_t>() == 30; }
                    catch (const std::exception&) { return false; } });
+  assert(putDenied() && writes.load() == 0 && replacement.fetch()["value"].as<int32_t>() == 30);
   auto next = second.fetch(); next["value"] = int32_t(21); second.post(next);
   bool disconnected = false;
   eventually([&] {
@@ -153,18 +159,57 @@ int main() {
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 3);
   eventually([&] { try { return get("EXPORT:first")["value"].as<int32_t>() == 40; }
                    catch (const std::exception&) { return false; } });
+  assert(putDenied() && writes.load() == 0 && alternate.fetch()["value"].as<int32_t>() == 40);
   status = get("SYS:gateway-app:config:reloadStatus");
   assert(status["recreated"].as<uint64_t>() == 1 && status["retained"].as<uint64_t>() == 1);
 
   // The gateway assignment participates in normal ACF policy reloads.
   policy("READ"); app.requestReload(); app.pump();
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 4);
-  bool denied = false;
-  try { client.put("EXPORT:first").set("value", int32_t(99)).exec()->wait(4.0); }
-  catch (const std::exception&) { denied = true; }
-  assert(denied && writes.load() == 1 && alternate.fetch()["value"].as<int32_t>() == 40);
+  assert(putDenied() && writes.load() == 0 && alternate.fetch()["value"].as<int32_t>() == 40);
   assert(get("EXPORT:first")["value"].as<int32_t>() == 40);
   monitor->cancel();
-  client.close(); app.stop(); upstreamServer.stop(); alternateServer.stop();
+  client.close(); app.stop();
+
+  // The full application also rejects executed PUTs when ACF is disabled.
+  const int plainListener = socket(AF_INET, SOCK_STREAM, 0);
+  assert(plainListener >= 0);
+  sockaddr_in plainLocal{};
+  plainLocal.sin_family = AF_INET; plainLocal.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  assert(bind(plainListener, reinterpret_cast<sockaddr*>(&plainLocal), sizeof(plainLocal)) == 0);
+  socklen_t plainLength = sizeof(plainLocal);
+  assert(getsockname(plainListener, reinterpret_cast<sockaddr*>(&plainLocal), &plainLength) == 0);
+  const auto plainPort = ntohs(plainLocal.sin_port);
+  close(plainListener);
+  {
+    std::ofstream out(configFile);
+    out << "server: {instance: gateway-plain, namespace: PLAIN, interfaces: [127.0.0.1], tcp_port: "
+        << plainPort << ", udp_port: " << plainPort << ", auto_beacon: false}\n"
+        << "redis: {base_key: gateway-plain, host: 127.0.0.1, port: "
+        << std::getenv("REDIS_PVXS_TEST_REDIS_PORT") << "}\n"
+        << "discovery: {enabled: false}\n"
+        << "pva_gateway: {pvs: [{name: first, upstream: 'DEVICE:first', server: '127.0.0.1:"
+        << upstreamPort << "'}]}\n";
+    assert(out.good());
+  }
+  Application plainApp(configFile.string());
+  assert(plainApp.start(error));
+  pvxs::client::Config plainClientConfig;
+  plainClientConfig.autoAddrList = false;
+  plainClientConfig.addressList = {"127.0.0.1:" + std::to_string(plainPort)};
+  auto plainClient = plainClientConfig.build();
+  eventually([&] {
+    try { return plainClient.get("PLAIN:first").exec()->wait(2.0)["value"].as<int32_t>() == 10; }
+    catch (const std::exception&) { return false; }
+  });
+  bool plainDenied = false;
+  try { plainClient.put("PLAIN:first").set("value", int32_t(99)).exec()->wait(4.0); }
+  catch (const pvxs::client::RemoteError& ex) {
+    plainDenied = std::string(ex.what()).find("Read-only PV") != std::string::npos;
+  }
+  assert(plainDenied && writes.load() == 0 && first.fetch()["value"].as<int32_t>() == 10);
+  assert(plainClient.get("PLAIN:first").exec()->wait(2.0)["value"].as<int32_t>() == 10);
+  plainClient.close(); plainApp.stop();
+  upstreamServer.stop(); alternateServer.stop();
   std::filesystem::remove_all(directory);
 }

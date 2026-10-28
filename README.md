@@ -46,8 +46,8 @@ Redis-backed process variables and selected upstream PVA channels defined by YAM
 - **Dynamic integrations:** one-shot ChannelFinder publishing and
   reflection-based PVA RPC to gRPC forwarding without service-specific generated
   code in the IOC.
-- **Selected PVA gateway:** expose explicitly mapped upstream channels at
-  configured TCP addresses with local access policy, reload, and discovery.
+- **Selected PVA gateway:** expose explicitly mapped upstream channels read-only
+  at configured TCP addresses with local access policy, reload, and discovery.
   See [gateway configuration](docs/configuration.md#pva_gateway) for its
   operation and security limits.
 - **Container tooling:** released images include `pvxget`, `pvxput`, and other

@@ -97,10 +97,10 @@ schema, authorization behavior, and reload guarantees.
 
 ## `pva_gateway`
 
-The optional gateway exposes selected PVA channels from explicitly configured
-device addresses. No Redis-backed PVs are required for a gateway-only IOC, but
-the usual Redis backend configuration remains required for the IOC's alarm
-publisher. For example:
+The optional gateway exposes selected PVA channels read-only from explicitly
+configured device addresses. No Redis-backed PVs are required for a gateway-only
+IOC, but the usual Redis backend configuration remains required for the IOC's
+alarm publisher. For example:
 
 ```yaml
 server:
@@ -152,26 +152,28 @@ GET and `4` for the gateway's monitor, and `record[atomic=false]` on a gateway
 GET does not request a non-atomic upstream GET. Use a direct device connection
 when operation-specific GET or monitor options are required. Field selection on
 the cached result remains local. If the upstream disconnects, the local
-channel closes until a fresh snapshot arrives. PUTs are forwarded once, without
-retry, through the bounded write queue. `limits.max_payload_bytes` bounds a
-forwarded PUT and `limits.operation_timeout_ms` sets its deadline (default
-5000 ms). A timeout after dispatch can leave the device outcome uncertain.
-The gateway does not proxy PVA RPC operations, and the gateway monitor does not
-apply the Redis-source payload limit to incoming device values.
+channel closes until a fresh snapshot arrives. The gateway rejects every PUT
+execution, including when ACF is disabled or grants write access; it never
+sends a PUT upstream. PVA may still allow PUT setup and expose the value type
+before execution is rejected. The gateway does not proxy PVA RPC operations,
+and its upstream monitor does not apply the Redis-source payload limit to
+incoming device values.
 Terminal upstream monitor rejections are retried at most once every five seconds;
 the exported channel stays disconnected until a fresh snapshot arrives.
 
 Gateway channels use `access.defaults.pv` or their explicit `access` assignment.
-When enabled, ACF checks local clients on reads, monitors and writes; upstream
-device authorization remains independent and sees the gateway client's identity,
-not the downstream user's identity. Without ACF, local clients can write whenever
-the upstream channel permits it. Changes to selected channels, targets, and
-assignments can be reloaded: unchanged channels retain their subscriptions;
-replaced and removed channels retire at namespace cutover, and failed candidates
-leave the active generation in place. The configured gateway names are included
+When enabled, ACF checks local clients on reads and monitors; gateway PUTs are
+always rejected. Upstream device authorization remains independent and sees the
+gateway client's identity, not the downstream user's identity. Changes to
+selected channels, targets, and assignments can be reloaded: unchanged channels
+retain their subscriptions; replaced and removed channels retire at namespace
+cutover, and failed candidates leave the active generation in place. The
+configured gateway names are included
 in RecCeiver and ChannelFinder catalogs even while a device is disconnected.
 The Redis source `ready` diagnostic does not report gateway connectivity; use
 the exported channel's connection state to detect an unavailable upstream.
+Writable forwarding and gateway health are future work tracked in
+[#149](https://github.com/fermi-ad/redis-pvxs-ioc/issues/149).
 
 ## Redis backends
 

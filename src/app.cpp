@@ -1269,7 +1269,6 @@ void Application::stop() {
   if (!started_ && !impl_->hasConfig) return;
   impl_->discovery.reset();
   impl_->catalog.reset();
-  for (auto& item : impl_->gateways) item.second.pv->retireWrites();
   if (impl_->access) impl_->access->clearBindings();
   else impl_->registry->clear();
   for (auto& item : impl_->runtimes) item.second->deactivate("application stopping");
@@ -1368,7 +1367,7 @@ bool Application::applyGeneration(const AppConfig& config,
           throw std::runtime_error("gateway upstream '" + pv.upstream + "' matches a currently served endpoint");
     }
     GatewayMap nextGateways;
-    std::vector<std::shared_ptr<GatewayPV>> addedGateways, retiredGateways;
+    std::vector<std::shared_ptr<GatewayPV>> retiredGateways;
     pvxs::client::Context gatewayContext;
     bool contextCreated = false;
     for (const auto& pv : config.pvaGateway.pvs) {
@@ -1386,10 +1385,7 @@ bool Application::applyGeneration(const AppConfig& config,
           gatewayContext = clientConfig.build();
           contextCreated = true;
         }
-        auto gateway = GatewayPV::create(gatewayContext, pv.upstream, pv.server, name, impl_->operations,
-                                         config.limits.operationTimeoutMs.value_or(5000),
-                                         static_cast<size_t>(config.limits.maxPayloadBytes));
-        addedGateways.push_back(gateway);
+        auto gateway = GatewayPV::create(gatewayContext, pv.upstream, pv.server);
         nextGateways.emplace(name, GatewayState{pv, std::move(gateway)});
       }
     }
@@ -1437,10 +1433,6 @@ bool Application::applyGeneration(const AppConfig& config,
       if (policy && !impl_->access->activateConfiguration(policy, failure)) return false;
       for (const auto& update : updates) update->commit();
       for (const auto& runtime : added) runtime->activate();
-      for (const auto& gateway : addedGateways) gateway->activate();
-      // Fence the final upstream send against cutover. A send already
-      // scheduled is in flight; no later send may use a retiring mapping.
-      for (const auto& gateway : retiredGateways) gateway->retireWrites();
       return true;
     };
     const bool published = impl_->access

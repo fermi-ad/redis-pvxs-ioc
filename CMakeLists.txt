@@ -257,8 +257,9 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   find_package(Threads REQUIRED)
 
   add_executable(operation_queue_tests tests/operation_queue_tests.cpp src/operation_queue.cpp)
-  target_include_directories(operation_queue_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  target_link_libraries(operation_queue_tests PRIVATE Threads::Threads)
+  target_include_directories(operation_queue_tests PRIVATE ${CMAKE_SOURCE_DIR}/include
+    ${EPICS_BASE}/include ${EPICS_BASE}/include/${EPICS_COMPILER_DIR} ${EPICS_BASE}/include/${EPICS_OS_DIR})
+  target_link_libraries(operation_queue_tests PRIVATE Threads::Threads ${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT})
   target_compile_options(operation_queue_tests PRIVATE -UNDEBUG)
   add_test(NAME operation_queue_tests COMMAND operation_queue_tests)
   set_tests_properties(operation_queue_tests PROPERTIES TIMEOUT 15)

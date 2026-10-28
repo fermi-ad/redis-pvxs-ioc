@@ -1,5 +1,7 @@
 #include "redis_pvxs_ioc/operation_queue.h"
 
+#include <epicsExit.h>
+
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -13,6 +15,15 @@
 #include <vector>
 
 namespace redis_pvxs_ioc {
+
+namespace {
+// PVXS may register EPICS thread-exit callbacks when a std::thread performs a
+// synchronous operation. Unlike epicsThread, std::thread does not drain them.
+// Declare this before thread-local work so captures and locks are gone first.
+struct EpicsThreadExit {
+  ~EpicsThreadExit() { epicsExitCallAtThreadExits(); }
+};
+} // namespace
 
 struct OperationQueue::Impl {
   struct Task;
@@ -63,6 +74,7 @@ struct OperationQueue::Impl {
   }
 
   void worker() {
+    EpicsThreadExit threadExit;
     for (;;) {
       std::shared_ptr<Task> task;
       bool pastDeadline = false;
@@ -113,6 +125,7 @@ struct OperationQueue::Impl {
   }
 
   void expire() {
+    EpicsThreadExit threadExit;
     std::unique_lock<std::mutex> lock(mutex);
     while (!stopped) {
       if (deadlines.empty()) { changed.wait(lock); continue; }

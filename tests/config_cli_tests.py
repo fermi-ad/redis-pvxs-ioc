@@ -48,6 +48,29 @@ def main():
         del selected["pvs"]
         checked = check(selected)
         assert checked["pv_count"] == 0 and checked["gateway_pv_count"] == 1
+        manifest_path = directory / "gateway.json"
+        manifest_path.write_text(json.dumps(dict(schema_version=1, revision="r1", pvs=[
+            dict(name="remote", upstream="DEVICE:remote", server="127.0.0.1:15075", aliases=["LEGACY:remote"])])))
+        external = copy.deepcopy(base)
+        external["pva_gateway"] = dict(file=str(manifest_path), watch=dict(enabled=True, interval_ms=100, settle_ms=0))
+        assert check(external)["gateway_pv_count"] == 1
+        report = diff(external)
+        assert report["gateway_manifest_changed"] and report["additions"] == ["C:remote"]
+        injected = json.loads(manifest_path.read_text())
+        injected["pvs"][0]["access"] = dict(asg="WRITE_ANYTHING")
+        manifest_path.write_text(json.dumps(injected))
+        assert "unknown key" in check(external, False)["error"]
+        cached = directory / "last-good.json"
+        cached.write_text(json.dumps(dict(schema_version=1, revision="cached", pvs=[
+            dict(name="cached", upstream="DEVICE:cached", server="127.0.0.1:15075")])))
+        external_cached = copy.deepcopy(external)
+        external_cached["pva_gateway"]["cache_file"] = str(cached)
+        assert check(external_cached)["gateway_pv_count"] == 1
+        manifest_path.unlink()
+        assert check(external)["gateway_pv_count"] == 0
+        manifest_path.write_text(json.dumps(dict(schema_version=1, revision="r1", pvs=[])))
+        assert check(dict(base, access=dict(enabled=True)))["valid"]
+        check(dict(base, access=dict(enabled=True, watch=dict(enabled=True))), False)
         versioned = dict(base, schema_version=1)
         assert check(versioned)["legacy_input"] is False
         unchanged(diff(versioned))

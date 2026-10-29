@@ -6,6 +6,13 @@
 #include <chrono>
 #include <cstdio>
 #include <future>
+#include <filesystem>
+#include <iomanip>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <yaml-cpp/yaml.h>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -103,6 +110,50 @@ struct ReloadStatus {
   std::vector<BackendPreparation> backends;
 };
 
+// Content identities are diagnostic fingerprints, not authorization tokens.
+std::string manifestHash(const std::string& text) {
+  uint64_t hash = 1469598103934665603ull;
+  for (const unsigned char ch : text) { hash ^= ch; hash *= 1099511628211ull; }
+  std::ostringstream out;
+  out << std::hex << std::setfill('0') << std::setw(16) << hash;
+  return out.str();
+}
+
+void writeManifestCache(const std::string& path, const std::string& text) {
+  std::string temporary = path + ".tmp.XXXXXX";
+  int fd = mkstemp(temporary.data());
+  if (fd < 0) throw std::runtime_error("manifest cache open failed: " + std::string(std::strerror(errno)));
+  try {
+    size_t written = 0;
+    while (written < text.size()) {
+      const auto count = write(fd, text.data() + written, text.size() - written);
+      if (count < 0 && errno == EINTR) continue;
+      if (count <= 0) throw std::runtime_error("manifest cache write failed");
+      written += static_cast<size_t>(count);
+    }
+    if (fsync(fd)) throw std::runtime_error("manifest cache sync failed");
+    const int closing = fd;
+    fd = -1;
+    if (close(closing)) throw std::runtime_error("manifest cache close failed");
+    if (rename(temporary.c_str(), path.c_str())) throw std::runtime_error("manifest cache rename failed");
+    auto parent = std::filesystem::path(path).parent_path();
+    if (parent.empty()) parent = ".";
+    const int directory = open(parent.c_str(), O_RDONLY | O_DIRECTORY);
+    if (directory < 0) throw std::runtime_error("manifest cache directory open failed");
+    const int syncResult = fsync(directory);
+    close(directory);
+    if (syncResult) throw std::runtime_error("manifest cache directory sync failed");
+  } catch (...) { if (fd >= 0) close(fd); unlink(temporary.c_str()); throw; }
+}
+
+struct GatewayReport {
+  std::string state = "disabled", file, cacheFile, activeRevision, activeHash, attemptRevision, attemptHash, lastError, cacheError;
+  bool watchEnabled = false, cacheLoaded = false;
+  uint64_t attempts = 0, generation = 0, pvCount = 0, aliasCount = 0;
+  struct Source { std::string name, upstream, server; GatewayPV::Status stats; };
+  std::vector<Source> sources;
+};
+
 template<class T, class Select>
 pvxs::shared_array<const T> sourceColumn(const std::vector<SourceStatus>& sources, Select select) {
   pvxs::shared_array<T> values(sources.size());
@@ -156,6 +207,22 @@ public:
     discoveryName_ = adminPVName(serverConfig, "discovery:status");
     using pvxs::TypeCode;
     using pvxs::Member;
+    gatewayName_ = adminPVName(serverConfig, "gateway:status");
+    gatewayStatus_.open(pvxs::TypeDef(TypeCode::Struct, "redis-pvxs-ioc:gateway:1.0", {
+      Member(TypeCode::String, "state"), Member(TypeCode::String, "file"), Member(TypeCode::String, "cacheFile"),
+      Member(TypeCode::String, "activeRevision"), Member(TypeCode::String, "activeHash"),
+      Member(TypeCode::String, "attemptRevision"), Member(TypeCode::String, "attemptHash"),
+      Member(TypeCode::String, "lastError"), Member(TypeCode::String, "cacheError"),
+      Member(TypeCode::Bool, "watchEnabled"), Member(TypeCode::Bool, "cacheLoaded"),
+      Member(TypeCode::UInt64, "attempts"), Member(TypeCode::UInt64, "generation"),
+      Member(TypeCode::UInt64, "pvCount"), Member(TypeCode::UInt64, "aliasCount"),
+      Member(TypeCode::Struct, "sources", {
+        Member(TypeCode::StringA, "name"), Member(TypeCode::StringA, "upstream"), Member(TypeCode::StringA, "server"),
+        Member(TypeCode::BoolA, "connected"), Member(TypeCode::UInt64A, "channels"), Member(TypeCode::UInt64A, "inFlight"),
+        Member(TypeCode::UInt64A, "operations"), Member(TypeCode::UInt64A, "monitors"), Member(TypeCode::UInt64A, "completed"),
+        Member(TypeCode::UInt64A, "failed"), Member(TypeCode::UInt64A, "rejected"), Member(TypeCode::UInt64A, "uncertain")
+      })
+    }).create());
     sourceName_ = adminPVName(serverConfig, "source:status");
     readyName_ = adminPVName(serverConfig, "ready");
     auto ready = makeAdminValue(TypeCode::Bool, "All required Redis data sources are ready");
@@ -462,6 +529,27 @@ public:
     alarms_.post(value);
   }
 
+  void setGatewayStatus(const GatewayReport& report) {
+    auto value = gatewayStatus_.fetch();
+#define GATEWAY_FIELD(FIELD) value[#FIELD] = report.FIELD
+    GATEWAY_FIELD(state); GATEWAY_FIELD(file); GATEWAY_FIELD(cacheFile); GATEWAY_FIELD(activeRevision); GATEWAY_FIELD(activeHash);
+    GATEWAY_FIELD(attemptRevision); GATEWAY_FIELD(attemptHash); GATEWAY_FIELD(lastError); GATEWAY_FIELD(cacheError);
+    GATEWAY_FIELD(watchEnabled); GATEWAY_FIELD(cacheLoaded); GATEWAY_FIELD(attempts); GATEWAY_FIELD(generation);
+    GATEWAY_FIELD(pvCount); GATEWAY_FIELD(aliasCount);
+#undef GATEWAY_FIELD
+#define GATEWAY_COLUMN(TYPE, FIELD, EXPR) { pvxs::shared_array<TYPE> column(report.sources.size()); \
+    for (size_t i = 0; i < report.sources.size(); ++i) column[i] = report.sources[i].EXPR; \
+    value["sources." #FIELD] = column.freeze(); }
+    GATEWAY_COLUMN(std::string, name, name); GATEWAY_COLUMN(std::string, upstream, upstream); GATEWAY_COLUMN(std::string, server, server);
+    GATEWAY_COLUMN(bool, connected, stats.connected); GATEWAY_COLUMN(uint64_t, channels, stats.channels);
+    GATEWAY_COLUMN(uint64_t, inFlight, stats.inFlight); GATEWAY_COLUMN(uint64_t, operations, stats.operations);
+    GATEWAY_COLUMN(uint64_t, monitors, stats.monitors); GATEWAY_COLUMN(uint64_t, completed, stats.completed);
+    GATEWAY_COLUMN(uint64_t, failed, stats.failed); GATEWAY_COLUMN(uint64_t, rejected, stats.rejected);
+    GATEWAY_COLUMN(uint64_t, uncertain, stats.uncertain);
+#undef GATEWAY_COLUMN
+    gatewayStatus_.post(value);
+  }
+
   void setSourceStatus(std::vector<SourceStatus> sources, uint64_t generation) {
     std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {
       return std::tie(a.pv, a.role) < std::tie(b.pv, b.role);
@@ -518,6 +606,7 @@ public:
     add(rpcName_, rpc_, defaults.adminRead);
     add(alarmName_, alarms_, defaults.adminRead);
     add(discoveryName_, discovery_, defaults.adminRead);
+    add(gatewayName_, gatewayStatus_, defaults.adminRead);
     add(reloadName_, reloadCommand_, defaults.adminWrite);
     add(versionName_, version_, defaults.adminRead);
     add(revisionName_, revision_, defaults.adminRead);
@@ -625,6 +714,8 @@ private:
   std::string alarmName_;
   pvxs::server::SharedPV discovery_ = pvxs::server::SharedPV::buildReadonly();
   std::string discoveryName_;
+  pvxs::server::SharedPV gatewayStatus_ = pvxs::server::SharedPV::buildReadonly();
+  std::string gatewayName_;
   pvxs::server::SharedPV reloadCommand_;
   pvxs::server::SharedPV accessReloadCommand_;
   pvxs::server::SharedPV version_;
@@ -795,7 +886,9 @@ std::set<std::string> requiredAccessAsgs(const AppConfig& config) {
   groups.insert(config.access.defaults.adminRead.asg);
   groups.insert(config.access.defaults.adminWrite.asg);
   for (const auto& pv : config.pvs) groups.insert(pv.access.value_or(config.access.defaults.pv).asg);
-  for (const auto& pv : config.pvaGateway.pvs) groups.insert(pv.access.value_or(config.access.defaults.pv).asg);
+  for (const auto& pv : config.pvaGateway.pvs)
+    for (const auto& name : fullGatewayNames(config.server, pv)) groups.insert(gatewayAccess(config, pv, name).asg);
+  for (const auto& entry : config.pvaGateway.accessOverrides) groups.insert(entry.second.asg);
   for (const auto& service : config.rpcServices) {
     groups.insert(service.access.value_or(config.access.defaults.rpc).asg);
   }
@@ -902,7 +995,7 @@ std::shared_ptr<const DiscoveryCatalog> buildDiscoveryCatalog(
     records.push_back(std::move(record));
   }
   for (const auto& pv : config.pvaGateway.pvs)
-    records.push_back({fullGatewayName(config.server, pv), "pvxs:gateway", {},
+    records.push_back({fullGatewayName(config.server, pv), "pvxs:gateway", pv.aliases,
                        {{"protocol", "pva"}, {"source", "pva-gateway"}, {"upstream", pv.upstream},
                         {"upstream_server", pv.server}}});
   for (const auto& name : adminPVNames(config.server))
@@ -929,6 +1022,29 @@ struct Application::Impl {
   std::shared_ptr<AdminNamespace> admin;
   std::shared_ptr<PVRegistry> registry = std::make_shared<PVRegistry>();
   AppConfig currentConfig;
+  AppConfig gatewayBaseConfig, gatewayCandidateBase;
+  GatewayReport gatewayReport;
+  std::string gatewayActiveText, gatewayCandidateText, gatewayCandidateRevision;
+  bool gatewayCandidateLoaded = false, gatewayCandidateCache = false, gatewayCacheDirty = false;
+  std::string gatewayObservedText, gatewayProcessedText;
+  bool gatewayProcessed = false, gatewayObserved = false;
+  std::chrono::steady_clock::time_point gatewayNextPoll{}, gatewayObservedAt{};
+
+  void publishGatewayStatus() {
+    auto& report = gatewayReport;
+    if (hasConfig) {
+      report.file = gatewayBaseConfig.pvaGateway.file; report.cacheFile = gatewayBaseConfig.pvaGateway.cacheFile;
+      report.watchEnabled = gatewayBaseConfig.pvaGateway.watch.enabled;
+    }
+    report.generation = generation; report.pvCount = gateways.size(); report.aliasCount = 0;
+    report.sources.clear();
+    for (const auto& entry : gateways) {
+      report.aliasCount += entry.second.config.aliases.size();
+      report.sources.push_back({entry.first, entry.second.config.upstream, entry.second.config.server, entry.second.pv->status()});
+    }
+    std::sort(report.sources.begin(), report.sources.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
+    if (admin) admin->setGatewayStatus(report);
+  }
   bool hasConfig = false;
   uint64_t generation = 0;
   RedisBackendRegistry redisBackends;
@@ -936,6 +1052,7 @@ struct Application::Impl {
   std::shared_ptr<RuntimeStats> runtimeStats = std::make_shared<RuntimeStats>();
   RuntimeMap runtimes;
   GatewayMap gateways;
+  std::shared_ptr<GatewayPV::Budget> gatewayBudget;
   RpcMap rpcPVs;
   AssignmentMap rpcAssignments;
   RpcServices rpcServices;
@@ -1022,7 +1139,7 @@ Application::~Application() {
 
 bool Application::validateOnly(std::string& summary, std::string& error, AppConfig* normalized) const {
   try {
-    const auto config = loadConfigFile(configPath_);
+    auto config = loadConfigForDiff(configPath_);
 #if !REDIS_PVXS_IOC_ENABLE_GRPC
     if (!config.rpcServices.empty())
       throw std::runtime_error("rpc_services requires a build with REDIS_PVXS_IOC_ENABLE_GRPC=ON");
@@ -1048,7 +1165,8 @@ bool Application::validateOnly(std::string& summary, std::string& error, AppConf
 bool Application::start(std::string& error) {
   impl_->beginReload("startup");
   try {
-    const auto config = loadConfigFile(configPath_);
+    auto config = loadConfigFile(configPath_);
+    resolveGatewayManifest(config, true);
     impl_->describeReload(config);
     impl_->operations = std::make_shared<OperationQueue>(OperationQueueLimits{
         config.limits.writeWorkers, config.limits.queuedWritesPerPV, static_cast<size_t>(config.limits.queuedWriteBytes)});
@@ -1073,6 +1191,7 @@ bool Application::start(std::string& error) {
       impl_->finishReload(false, error);
       return false;
     }
+    acceptGatewayManifest();
     impl_->server.start();
     if (config.discovery.enabled) {
       impl_->discovery = std::make_unique<DiscoveryPublisher>(config.discovery);
@@ -1109,8 +1228,10 @@ void Application::pump() {
     impl_->beginReload("reload");
     try {
       auto config = loadConfigFile(configPath_);
+      resolveGatewayManifest(config, false, true);
       std::string error;
       const bool accepted = applyConfig(config, false, error);
+      if (accepted) acceptGatewayManifest();
       if (!accepted && impl_->admin) {
         impl_->admin->setStatus("reload rejected");
         impl_->admin->setError(error);
@@ -1125,6 +1246,7 @@ void Application::pump() {
     }
   }
 
+  pumpGatewayManifest();
   if (impl_->access) impl_->access->pump();
   for (auto& gateway : impl_->gateways) gateway.second.pv->pump();
   pumpRpcRecovery();
@@ -1142,8 +1264,146 @@ void Application::pump() {
       impl_->admin->setDiscoveryStatus(impl_->discovery ? impl_->discovery->status() : DiscoveryStatus{});
       impl_->admin->setAccessStatus(impl_->access ? impl_->access->status() : AccessStatus{});
       impl_->admin->setRuntimeStats(*impl_->runtimeStats);
+      impl_->publishGatewayStatus();
     }
   }
+}
+
+void Application::resolveGatewayManifest(AppConfig& config, bool initialLoad, bool strict, const std::string* settledText) {
+  impl_->gatewayCandidateBase = config;
+  impl_->gatewayCandidateText.clear(); impl_->gatewayCandidateRevision.clear();
+  impl_->gatewayCandidateLoaded = false; impl_->gatewayCandidateCache = false;
+  auto& report = impl_->gatewayReport;
+  report.file = config.pvaGateway.file; report.cacheFile = config.pvaGateway.cacheFile;
+  report.watchEnabled = config.pvaGateway.watch.enabled;
+  report.attemptRevision.clear(); report.attemptHash.clear(); report.lastError.clear();
+  if (config.pvaGateway.file.empty()) { report.state = config.pvaGateway.pvs.empty() ? "disabled" : "ready"; return; }
+  ++report.attempts;
+  std::string text;
+  bool present = false;
+  try {
+    if (settledText) { text = *settledText; present = true; }
+    else present = readGatewayManifestFile(config.pvaGateway.file, text);
+    if (present) {
+      report.attemptHash = manifestHash(text);
+      impl_->gatewayProcessedText = text; impl_->gatewayProcessed = true;
+      try { const auto root = YAML::Load(text); if (root.IsMap() && root["revision"].IsScalar()) report.attemptRevision = root["revision"].as<std::string>().substr(0, 256); }
+      catch (const std::exception&) {}
+      const auto manifest = loadGatewayManifestString(text, config);
+      config = withGatewayManifest(config, manifest);
+      impl_->gatewayCandidateText = std::move(text); impl_->gatewayCandidateRevision = manifest.revision;
+      impl_->gatewayCandidateLoaded = true; report.state = "staging";
+      return;
+    }
+    report.lastError = "manifest file is missing";
+  } catch (const std::exception& error) {
+    report.lastError = std::string(error.what()).substr(0, 2048);
+    if (strict) { report.state = "rejected"; impl_->publishGatewayStatus(); throw; }
+  }
+  // A bad or absent producer file never withdraws a previously accepted set.
+  if (!initialLoad && impl_->gatewayBaseConfig.pvaGateway.file == config.pvaGateway.file &&
+      !impl_->gatewayActiveText.empty()) {
+    const auto manifest = loadGatewayManifestString(impl_->gatewayActiveText, config);
+    config = withGatewayManifest(config, manifest);
+    impl_->gatewayCandidateText = impl_->gatewayActiveText; impl_->gatewayCandidateRevision = manifest.revision;
+    impl_->gatewayCandidateLoaded = true; impl_->gatewayCandidateCache = report.cacheLoaded;
+    report.state = "stale";
+    return;
+  }
+  if (!config.pvaGateway.cacheFile.empty()) {
+    try {
+      if (readGatewayManifestFile(config.pvaGateway.cacheFile, text)) {
+        const auto manifest = loadGatewayManifestString(text, config);
+        config = withGatewayManifest(config, manifest);
+        impl_->gatewayCandidateText = std::move(text); impl_->gatewayCandidateRevision = manifest.revision;
+        impl_->gatewayCandidateLoaded = true; impl_->gatewayCandidateCache = true;
+        report.state = "stale";
+        return;
+      }
+    } catch (const std::exception& error) { report.cacheError = std::string(error.what()).substr(0, 2048); }
+  }
+  report.state = present ? "rejected" : "waiting";
+  if (strict && !initialLoad && !impl_->gatewayActiveText.empty() &&
+      impl_->gatewayBaseConfig.pvaGateway.file != config.pvaGateway.file) {
+    report.state = "rejected";
+    throw std::runtime_error("replacement manifest is unavailable; active gateway mapping preserved");
+  }
+}
+
+void Application::acceptGatewayManifest() {
+  const bool changed = impl_->gatewayCandidateText != impl_->gatewayActiveText ||
+      impl_->gatewayBaseConfig.pvaGateway.cacheFile != impl_->gatewayCandidateBase.pvaGateway.cacheFile;
+  impl_->gatewayBaseConfig = impl_->gatewayCandidateBase;
+  impl_->gatewayActiveText = impl_->gatewayCandidateText;
+  auto& report = impl_->gatewayReport;
+  report.activeRevision = impl_->gatewayCandidateRevision;
+  report.activeHash = impl_->gatewayCandidateLoaded ? manifestHash(impl_->gatewayActiveText) : std::string{};
+  report.cacheLoaded = impl_->gatewayCandidateCache;
+  if (report.state == "staging") report.state = "ready";
+  impl_->gatewayObservedText.clear(); impl_->gatewayObserved = false;
+  impl_->gatewayNextPoll = std::chrono::steady_clock::now();
+  if (report.cacheFile.empty()) { impl_->gatewayCacheDirty = false; report.cacheError.clear(); }
+  if (changed && impl_->gatewayCandidateLoaded && !impl_->gatewayCandidateCache) impl_->gatewayCacheDirty = true;
+  if (impl_->gatewayCacheDirty && impl_->gatewayCandidateLoaded && !report.cacheFile.empty()) {
+    try {
+      writeManifestCache(report.cacheFile, impl_->gatewayActiveText);
+      impl_->gatewayCacheDirty = false; report.cacheError.clear();
+    } catch (const std::exception& error) { report.cacheError = std::string(error.what()).substr(0, 2048); }
+  }
+  impl_->publishGatewayStatus();
+}
+
+void Application::pumpGatewayManifest() {
+  const auto& gateway = impl_->gatewayBaseConfig.pvaGateway;
+  if (gateway.file.empty() || !gateway.watch.enabled) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (now < impl_->gatewayNextPoll) return;
+  impl_->gatewayNextPoll = now + std::chrono::milliseconds(gateway.watch.intervalMs);
+  auto& report = impl_->gatewayReport;
+  std::string text;
+  try {
+    if (!readGatewayManifestFile(gateway.file, text)) throw std::runtime_error("manifest file is missing");
+  } catch (const std::exception& error) {
+    const std::string message = std::string(error.what()).substr(0, 2048);
+    if (report.lastError != message) { ++report.attempts; report.lastError = message; }
+    report.attemptRevision.clear(); report.attemptHash.clear();
+    report.state = impl_->gatewayActiveText.empty() ? "waiting" : "stale";
+    impl_->gatewayObservedText.clear(); impl_->gatewayObserved = false; impl_->publishGatewayStatus(); return;
+  }
+  if (impl_->gatewayProcessed && text == impl_->gatewayProcessedText) {
+    if (text == impl_->gatewayActiveText && (!report.lastError.empty() || report.state != "ready")) {
+      ++report.attempts; report.attemptRevision = report.activeRevision; report.attemptHash = manifestHash(text);
+      report.lastError.clear(); report.state = "ready"; report.cacheLoaded = false; impl_->publishGatewayStatus();
+    }
+    return;
+  }
+  if (!impl_->gatewayObserved || text != impl_->gatewayObservedText) {
+    impl_->gatewayObservedText = text; impl_->gatewayObserved = true; impl_->gatewayObservedAt = now;
+    if (gateway.watch.settleMs) return;
+  }
+  if (now - impl_->gatewayObservedAt < std::chrono::milliseconds(gateway.watch.settleMs)) return;
+  impl_->gatewayProcessedText = text; impl_->gatewayProcessed = true;
+  impl_->beginReload("gateway-manifest");
+  std::string error;
+  bool accepted = false;
+  try {
+    auto config = impl_->gatewayBaseConfig;
+    resolveGatewayManifest(config, false, true, &text);
+    // Suppress rewrites with identical contents, including source recovery.
+    if (impl_->gatewayCandidateText == impl_->gatewayActiveText) {
+      report.state = "ready"; report.lastError.clear(); report.cacheLoaded = false;
+      impl_->publishGatewayStatus();
+      impl_->reload.state = "unchanged"; impl_->reload.phase = "complete";
+      impl_->publishReload(); return;
+    }
+    accepted = applyConfig(config, false, error, true);
+    if (accepted) acceptGatewayManifest();
+  } catch (const std::exception& failure) { error = failure.what(); }
+  if (!accepted) {
+    report.lastError = error.substr(0, 2048); report.state = "rejected";
+    impl_->publishGatewayStatus();
+  }
+  impl_->finishReload(accepted, error);
 }
 
 void Application::pumpRpcRecovery() {
@@ -1185,8 +1445,9 @@ void Application::pumpRpcRecovery() {
           for (const auto& pv : config.pvaGateway.pvs) {
             const auto name = fullGatewayName(config.server, pv);
             const auto& gateway = impl_->gateways.at(name).pv;
-            bindings.emplace(name, PVBinding{gateway->sharedPV(), gateway,
-                                              pv.access.value_or(config.access.defaults.pv)});
+            for (const auto& exported : fullGatewayNames(config.server, pv))
+              bindings.emplace(exported, PVBinding{pvxs::server::SharedPV{}, gateway, gatewayAccess(config, pv, exported),
+                [gateway](PVRegistry::Channel&& channel) { gateway->attach(std::move(channel)); }});
           }
           for (const auto& rpc : rpcs)
             bindings.emplace(rpc.first, PVBinding{*rpc.second, rpc.second, assignments.at(rpc.first)});
@@ -1277,6 +1538,7 @@ void Application::stop() {
   if (impl_->rpcOperations) impl_->rpcOperations->shutdown();
   impl_->runtimes.clear();
   impl_->gateways.clear();
+  impl_->gatewayBudget.reset();
   impl_->rpcPVs.clear();
   impl_->rpcServices.clear();
   impl_->redisBackends.clear();
@@ -1292,7 +1554,7 @@ void Application::stop() {
   started_ = false;
 }
 
-bool Application::applyConfig(const AppConfig& config, const bool initialLoad, std::string& error) {
+bool Application::applyConfig(const AppConfig& config, const bool initialLoad, std::string& error, bool preserveAccess) {
   impl_->describeReload(config);
   if (!initialLoad && !sameOperationLimits(impl_->currentConfig.limits, config.limits)) {
     error = "operation limits are immutable after startup; restart is required";
@@ -1312,12 +1574,12 @@ bool Application::applyConfig(const AppConfig& config, const bool initialLoad, s
     error = "discovery listener settings are immutable after startup; restart is required";
     return false;
   }
-  return applyGeneration(config, impl_->generation + 1, error);
+  return applyGeneration(config, impl_->generation + 1, error, preserveAccess);
 }
 
 bool Application::applyGeneration(const AppConfig& config,
                                    const uint64_t generation,
-                                   std::string& error) {
+                                   std::string& error, bool preserveAccess) {
   bool committed = false;
   try {
     AppConfig nextConfig = config;
@@ -1375,8 +1637,8 @@ bool Application::applyGeneration(const AppConfig& config,
       const auto existing = impl_->gateways.find(name);
       if (existing != impl_->gateways.end() && existing->second.config.upstream == pv.upstream &&
           existing->second.config.server == pv.server &&
-          sameAccessAssignment(existing->second.config.access.value_or(impl_->currentConfig.access.defaults.pv),
-                               pv.access.value_or(config.access.defaults.pv))) {
+          sameAccessAssignment(gatewayAccess(impl_->currentConfig, existing->second.config, name),
+                               gatewayAccess(config, pv, name))) {
         nextGateways.emplace(name, GatewayState{pv, existing->second.pv});
       } else {
         if (!contextCreated) {
@@ -1385,7 +1647,13 @@ bool Application::applyGeneration(const AppConfig& config,
           gatewayContext = clientConfig.build();
           contextCreated = true;
         }
-        auto gateway = GatewayPV::create(gatewayContext, pv.upstream, pv.server);
+        GatewayPV::Limits gatewayLimits;
+        gatewayLimits.maxPayloadBytes = config.limits.maxPayloadBytes;
+        gatewayLimits.maxInFlightBytes = config.limits.queuedWriteBytes;
+        gatewayLimits.maxInFlight = std::max<uint32_t>(1, config.limits.queuedWritesPerPV);
+        gatewayLimits.timeoutMs = config.limits.operationTimeoutMs.value_or(5000);
+        if (!impl_->gatewayBudget) impl_->gatewayBudget = std::make_shared<GatewayPV::Budget>(gatewayLimits);
+        auto gateway = GatewayPV::create(gatewayContext, pv.upstream, pv.server, gatewayLimits, impl_->gatewayBudget);
         nextGateways.emplace(name, GatewayState{pv, std::move(gateway)});
       }
     }
@@ -1412,7 +1680,10 @@ bool Application::applyGeneration(const AppConfig& config,
     for (const auto& pv : config.pvaGateway.pvs) {
       const auto name = fullGatewayName(config.server, pv);
       const auto& gateway = nextGateways.at(name).pv;
-      bind(name, gateway->sharedPV(), gateway, pv.access.value_or(config.access.defaults.pv));
+      for (const auto& exported : fullGatewayNames(config.server, pv))
+        if (!bindings.emplace(exported, PVBinding{pvxs::server::SharedPV{}, gateway, gatewayAccess(config, pv, exported),
+              [gateway](PVRegistry::Channel&& channel) { gateway->attach(std::move(channel)); }}).second)
+          throw std::runtime_error("duplicate endpoint binding: " + exported);
     }
 
     std::shared_ptr<AccessController::PreparedConfiguration> policy;
@@ -1420,7 +1691,8 @@ bool Application::applyGeneration(const AppConfig& config,
     std::shared_ptr<PVRegistry::Prepared> plain;
     impl_->reloadPhase("policy");
     if (impl_->access) {
-      if (impl_->hasConfig) policy = impl_->access->prepareConfiguration(config.access, requiredAccessAsgs(config));
+      if (preserveAccess) impl_->access->validateActiveAsgs(requiredAccessAsgs(config));
+      else if (impl_->hasConfig) policy = impl_->access->prepareConfiguration(config.access, requiredAccessAsgs(config));
       secured = impl_->access->prepareBindings(bindings);
     } else {
       plain = impl_->registry->prepare(std::move(bindings));

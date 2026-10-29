@@ -1,44 +1,67 @@
 #pragma once
 
-#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 
 #include <pvxs/client.h>
-#include <pvxs/sharedpv.h>
+#include <pvxs/source.h>
 
 namespace redis_pvxs_ioc {
 
-// One explicitly selected, read-only upstream PVA channel. The caller supplies
-// a numeric unicast IPv4 TCP endpoint; monitors connect without search. GETs
-// serve the current monitor snapshot. An upstream disconnect closes the local
-// SharedPV until a new snapshot, possibly of a different type, arrives.
+// A canonical upstream channel. Aliases attach through this object while each
+// downstream operation retains its own upstream request and completion.
 class GatewayPV {
 public:
+  using Channel = std::unique_ptr<pvxs::server::ChannelControl>;
+  struct Limits {
+    size_t maxChannels = 4096;
+    size_t maxSetups = 4096;
+    size_t maxInFlight = 256;
+    size_t maxMonitors = 256;
+    size_t maxPayloadBytes = 32u * 1024u * 1024u;
+    size_t maxInFlightBytes = 64u * 1024u * 1024u;
+    size_t maxMonitorQueue = 64;
+    uint32_t timeoutMs = 5000;
+  };
+  struct Status {
+    bool connected = false;
+    uint64_t channels = 0, operations = 0, monitors = 0, inFlight = 0;
+    uint64_t completed = 0, failed = 0, rejected = 0, uncertain = 0;
+  };
+  // One application shares this budget across every canonical upstream.
+  class Budget {
+  public:
+    explicit Budget(const Limits& limits);
+    struct Impl;
+    std::shared_ptr<Impl> impl;
+  };
   static std::shared_ptr<GatewayPV> create(pvxs::client::Context context,
-                                           std::string upstreamName,
-                                           std::string upstreamServer);
+                                          std::string upstreamName,
+                                          std::string upstreamServer);
+  static std::shared_ptr<GatewayPV> create(pvxs::client::Context context,
+                                          std::string upstreamName,
+                                          std::string upstreamServer,
+                                          const Limits& limits);
+  static std::shared_ptr<GatewayPV> create(pvxs::client::Context context,
+                                          std::string upstreamName,
+                                          std::string upstreamServer,
+                                          const Limits& limits,
+                                          std::shared_ptr<Budget> budget);
   ~GatewayPV();
   GatewayPV(const GatewayPV&) = delete;
   GatewayPV& operator=(const GatewayPV&) = delete;
 
-  pvxs::server::SharedPV& sharedPV();
-  // Deactivation is final and must be called outside a PVXS server callback;
-  // it closes local channels and cancels the monitor.
+  void attach(Channel&& channel);
   void deactivate();
-  // Retry terminal upstream monitor errors. Transport disconnects are retried
-  // by PVXS itself.
   void pump();
   bool connected() const;
+  Status status() const;
 
 private:
   struct State;
-  GatewayPV(std::shared_ptr<State> state, std::shared_ptr<pvxs::client::Context> context);
-  void startMonitor();
+  explicit GatewayPV(std::shared_ptr<State> state);
   std::shared_ptr<State> state_;
-  std::shared_ptr<pvxs::client::Context> context_;
-  std::shared_ptr<pvxs::client::Subscription> monitor_;
-  std::chrono::steady_clock::time_point nextMonitorRetry_{};
 };
 
 } // namespace redis_pvxs_ioc

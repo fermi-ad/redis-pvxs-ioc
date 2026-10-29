@@ -18,11 +18,16 @@ public:
   void stop();
 
 private:
-  bool applyConfig(const struct AppConfig& config, bool initialLoad, std::string& error);
+  bool applyConfig(const struct AppConfig& config, bool initialLoad, std::string& error,
+                   bool preserveAccess = false);
   void pumpRpcRecovery();
+  void pumpGatewayManifest();
+  void resolveGatewayManifest(struct AppConfig& config, bool initialLoad, bool strict = false,
+                              const std::string* settledText = nullptr);
+  void acceptGatewayManifest();
   bool applyGeneration(const struct AppConfig& config,
                         uint64_t generation,
-                        std::string& error);
+                        std::string& error, bool preserveAccess);
 
   std::string configPath_;
   std::atomic<bool> reloadRequested_{false};

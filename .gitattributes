@@ -1,0 +1,2 @@
+# Unified patch context includes single-space blank lines by design.
+patches/pvxs/*.patch -whitespace

@@ -31,10 +31,14 @@ access:
 restart the process to enable or disable access control. When disabled,
 endpoint `access` assignments and an enabled watcher are rejected so a file
 cannot accidentally imply protection which is not active. The disabled data
-path continues to use PVXS's built-in static source directly.
+path uses the generation registry without an authorization wrapper.
 
-When enabled, `file` is required. Relative paths resolve against the main YAML
-file. Macros are expanded before validation, fingerprinting, and activation.
+When enabled without `file`, the built-in `ASG(DEFAULT) { RULE(0, READ) }`
+policy makes every default-assigned endpoint read-only, including gateway
+PUT/RPC and admin reload commands. The file watcher and macros require a file.
+A supplied `file` keeps its custom policy semantics; missing or invalid supplied
+files fail closed. Relative paths resolve against the main YAML file. Macros
+are expanded before validation, fingerprinting, and activation.
 `asl` is limited to `0` or `1`. Per-endpoint assignments override the defaults:
 
 ```yaml
@@ -49,6 +53,13 @@ rpc_services:
     access: {asg: QUERY_USERS, asl: 0}
 ```
 
+Gateway manifest entries cannot specify policy. Use main YAML
+`pva_gateway.access_overrides: {"EXACT:EXPORTED:NAME": {asg: OPERATORS, asl: 0}}`
+for explicit canonical-name or alias exceptions in a custom ACF. Gateway aliases
+share their upstream source while authorization remains specific to each exported
+name. The manifest watcher applies transactions internally and works with the
+read-only default policy.
+
 The product validator accepts only `ASG`, `RULE`, `UAG`, `HAG`, ASL 0/1,
 `TRAPWRITE`, and `NOTRAPWRITE`, then activates the exact validated bytes through
 the pinned EPICS `asLib` parser. Unknown constructs fail closed. Deferred
@@ -59,8 +70,9 @@ and match IPv4 client addresses.
 
 ## Authorization behavior
 
-PVA GET, GET_FIELD, and monitor setup require EPICS `READ`; PUT and RPC require
-`WRITE`. PV names remain discoverable, but a denied operation returns
+PVA GET, GET_FIELD, ARRAY reads and monitor setup require EPICS `READ`.
+PUT, PUT_GET, PROCESS, ARRAY writes and RPC require `WRITE`; a GET requesting
+processing also requires `WRITE`. PV names remain discoverable, but a denied operation returns
 `access denied`. The client account and each `role/<role>` credential are
 evaluated independently, and any granting identity allows the operation.
 

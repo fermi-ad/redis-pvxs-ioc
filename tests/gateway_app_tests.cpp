@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -111,8 +112,9 @@ int main() {
     catch (const std::exception&) { return true; }
     return false;
   };
-  // Even a WRITE-granting policy cannot enable gateway writes.
-  assert(putDenied() && writes.load() == 0 && first.fetch()["value"].as<int32_t>() == 10);
+  // Custom WRITE rules authorize exactly one forwarded execution.
+  client.put("EXPORT:first").set("value", int32_t(10)).exec()->wait(4.0);
+  assert(writes.load() == 1 && first.fetch()["value"].as<int32_t>() == 10);
 
   std::atomic<unsigned> wakeups{0};
   auto monitor = client.monitor("EXPORT:second").maskConnected(true).maskDisconnected(false)
@@ -138,7 +140,8 @@ int main() {
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 2);
   eventually([&] { try { return get("EXPORT:first")["value"].as<int32_t>() == 30; }
                    catch (const std::exception&) { return false; } });
-  assert(putDenied() && writes.load() == 0 && replacement.fetch()["value"].as<int32_t>() == 30);
+  client.put("EXPORT:first").set("value", int32_t(30)).exec()->wait(4.0);
+  assert(writes.load() == 2 && replacement.fetch()["value"].as<int32_t>() == 30);
   auto next = second.fetch(); next["value"] = int32_t(21); second.post(next);
   bool disconnected = false;
   eventually([&] {
@@ -159,19 +162,20 @@ int main() {
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 3);
   eventually([&] { try { return get("EXPORT:first")["value"].as<int32_t>() == 40; }
                    catch (const std::exception&) { return false; } });
-  assert(putDenied() && writes.load() == 0 && alternate.fetch()["value"].as<int32_t>() == 40);
+  client.put("EXPORT:first").set("value", int32_t(40)).exec()->wait(4.0);
+  assert(writes.load() == 3 && alternate.fetch()["value"].as<int32_t>() == 40);
   status = get("SYS:gateway-app:config:reloadStatus");
   assert(status["recreated"].as<uint64_t>() == 1 && status["retained"].as<uint64_t>() == 1);
 
   // The gateway assignment participates in normal ACF policy reloads.
   policy("READ"); app.requestReload(); app.pump();
   assert(get("SYS:gateway-app:config:generation")["value"].as<int64_t>() == 4);
-  assert(putDenied() && writes.load() == 0 && alternate.fetch()["value"].as<int32_t>() == 40);
+  assert(putDenied() && writes.load() == 3 && alternate.fetch()["value"].as<int32_t>() == 40);
   assert(get("EXPORT:first")["value"].as<int32_t>() == 40);
   monitor->cancel();
   client.close(); app.stop();
 
-  // The full application also rejects executed PUTs when ACF is disabled.
+  // Disabling ACF permits normal forwarding.
   const int plainListener = socket(AF_INET, SOCK_STREAM, 0);
   assert(plainListener >= 0);
   sockaddr_in plainLocal{};
@@ -202,14 +206,121 @@ int main() {
     try { return plainClient.get("PLAIN:first").exec()->wait(2.0)["value"].as<int32_t>() == 10; }
     catch (const std::exception&) { return false; }
   });
-  bool plainDenied = false;
-  try { plainClient.put("PLAIN:first").set("value", int32_t(99)).exec()->wait(4.0); }
-  catch (const pvxs::client::RemoteError& ex) {
-    plainDenied = std::string(ex.what()).find("Read-only PV") != std::string::npos;
-  }
-  assert(plainDenied && writes.load() == 0 && first.fetch()["value"].as<int32_t>() == 10);
-  assert(plainClient.get("PLAIN:first").exec()->wait(2.0)["value"].as<int32_t>() == 10);
+  plainClient.put("PLAIN:first").set("value", int32_t(10)).exec()->wait(4.0);
+  assert(writes.load() == 4 && first.fetch()["value"].as<int32_t>() == 10);
   plainClient.close(); plainApp.stop();
+
+  // A read-only IOC can ingest an atomically published inventory internally.
+  const auto manifestFile = directory / "gateway.yaml", cacheFile = directory / "state" / "last-good.yaml";
+  {
+    std::ofstream out(configFile);
+    out << "server: {instance: gateway-watch, namespace: WATCH, interfaces: [127.0.0.1], tcp_port: "
+        << plainPort << ", udp_port: " << plainPort << ", auto_beacon: false}\n"
+        << "redis: {base_key: gateway-watch, host: 127.0.0.1, port: " << std::getenv("REDIS_PVXS_TEST_REDIS_PORT") << "}\n"
+        << "discovery: {enabled: false}\naccess: {enabled: true}\n"
+        << "pva_gateway:\n  file: " << manifestFile.string() << "\n  cache_file: " << cacheFile.string()
+        << "\n  watch: {enabled: true, interval_ms: 100, settle_ms: 0}\n"
+        << "  pvs: [{name: first, upstream: 'DEVICE:first', server: '127.0.0.1:" << upstreamPort << "'}]\n";
+    assert(out.good());
+  }
+  Application watchApp(configFile.string());
+  assert(watchApp.start(error));
+  auto watchClient = plainClientConfig.build();
+  const auto watchGet = [&](const std::string& name) { return watchClient.get(name).exec()->wait(2.0); };
+  const std::string statusName = "SYS:gateway-watch:gateway:status";
+  assert(watchGet(statusName)["state"].as<std::string>() == "waiting");
+  assert(watchGet("WATCH:first")["value"].as<int32_t>() == 10);
+  const auto publish = [&](const std::string& text) {
+    const auto temporary = directory / "candidate.yaml";
+    { std::ofstream out(temporary); out << text; assert(out.good()); }
+    std::filesystem::rename(temporary, manifestFile);
+  };
+  const auto inventory = [&](const char* revision, const char* upstream) {
+    return std::string("schema_version: 1\nrevision: ") + revision +
+        "\npvs: [{name: dynamic, upstream: 'DEVICE:" + upstream + "', server: '127.0.0.1:" +
+        std::to_string(upstreamPort) + "', aliases: ['LEGACY:dynamic']}]\n";
+  };
+  publish(inventory("r1", "second"));
+  eventually([&] { watchApp.pump(); return watchGet(statusName)["activeRevision"].as<std::string>() == "r1"; });
+  assert(watchGet("WATCH:dynamic")["value"].as<int32_t>() == 21);
+  assert(watchGet("LEGACY:dynamic")["value"].as<int32_t>() == 21);
+  assert(watchGet(statusName)["pvCount"].as<uint64_t>() == 2);
+  assert(watchGet(statusName)["aliasCount"].as<uint64_t>() == 1);
+  assert(watchGet("SYS:gateway-watch:config:generation")["value"].as<int64_t>() == 2);
+  assert(!watchGet(statusName)["cacheError"].as<std::string>().empty());
+  std::filesystem::create_directory(cacheFile.parent_path());
+  watchApp.requestReload(); watchApp.pump();
+  assert(std::filesystem::exists(cacheFile));
+  assert(watchGet(statusName)["cacheError"].as<std::string>().empty());
+  const auto preservedGeneration = watchGet("SYS:gateway-watch:config:generation")["value"].as<int64_t>();
+  bool defaultDenied = false;
+  try { watchClient.put("LEGACY:dynamic").set("value", int32_t(99)).exec()->wait(2.0); }
+  catch (const std::exception&) { defaultDenied = true; }
+  assert(defaultDenied && writes.load() == 4);
+  publish("schema_version: 1\nrevision: injected\npvs: []\naccess: {enabled: false}\n");
+  eventually([&] { watchApp.pump(); return watchGet(statusName)["state"].as<std::string>() == "rejected"; });
+  const auto rejectedAttempts = watchGet(statusName)["attempts"].as<uint64_t>();
+  for (unsigned i = 0; i < 15; ++i) { watchApp.pump(); std::this_thread::sleep_for(10ms); }
+  assert(watchGet(statusName)["attempts"].as<uint64_t>() == rejectedAttempts);
+  assert(watchGet("SYS:gateway-watch:config:generation")["value"].as<int64_t>() == preservedGeneration);
+  assert(watchGet("LEGACY:dynamic")["value"].as<int32_t>() == 21);
+  std::filesystem::remove(manifestFile);
+  eventually([&] { watchApp.pump(); return watchGet(statusName)["state"].as<std::string>() == "stale"; });
+  publish(inventory("r2", "replacement"));
+  eventually([&] { watchApp.pump(); return watchGet(statusName)["activeRevision"].as<std::string>() == "r2"; });
+  assert(watchGet("LEGACY:dynamic")["value"].as<int32_t>() == 30);
+  const auto acceptedGeneration = watchGet("SYS:gateway-watch:config:generation")["value"].as<int64_t>();
+  publish(inventory("r2", "replacement"));
+  for (unsigned i = 0; i < 15; ++i) { watchApp.pump(); std::this_thread::sleep_for(10ms); }
+  assert(watchGet("SYS:gateway-watch:config:generation")["value"].as<int64_t>() == acceptedGeneration);
+  // Manifest publication cannot activate edits to an unwatched policy file.
+  {
+    std::ofstream policyOut(policyFile);
+    policyOut << "ASG(DEFAULT) { RULE(0, READ) }\nASG(COMMAND) { RULE(0, WRITE) }\n";
+  }
+  std::string watchedConfig;
+  { std::ifstream input(configFile); watchedConfig.assign(std::istreambuf_iterator<char>(input), {}); }
+  const auto accessAt = watchedConfig.find("access: {enabled: true}");
+  assert(accessAt != std::string::npos);
+  watchedConfig.replace(accessAt, std::string("access: {enabled: true}").size(),
+      "access: {enabled: true, file: '" + policyFile.string() + "'}");
+  const auto gatewayAt = watchedConfig.find("pva_gateway:\n");
+  watchedConfig.insert(gatewayAt + std::string("pva_gateway:\n").size(),
+      "  access_overrides: {'LEGACY:dynamic': {asg: COMMAND}}\n");
+  { std::ofstream output(configFile); output << watchedConfig; assert(output.good()); }
+  watchApp.requestReload(); watchApp.pump();
+  watchClient.put("LEGACY:dynamic").set("value", int32_t(30)).exec()->wait(2.0);
+  assert(writes.load() == 5);
+  const auto policyGeneration = watchGet("SYS:gateway-watch:access:generation")["value"].as<int64_t>();
+  {
+    std::ofstream policyOut(policyFile);
+    policyOut << "ASG(DEFAULT) { RULE(0, WRITE) }\nASG(COMMAND) { RULE(0, READ) }\n";
+  }
+  publish(inventory("r3", "second"));
+  eventually([&] { watchApp.pump(); return watchGet(statusName)["activeRevision"].as<std::string>() == "r3"; });
+  assert(watchGet("SYS:gateway-watch:access:generation")["value"].as<int64_t>() == policyGeneration);
+  defaultDenied = false;
+  try { watchClient.put("WATCH:dynamic").set("value", int32_t(21)).exec()->wait(2.0); }
+  catch (const std::exception&) { defaultDenied = true; }
+  assert(defaultDenied && writes.load() == 5);
+  watchClient.put("LEGACY:dynamic").set("value", int32_t(21)).exec()->wait(2.0);
+  assert(writes.load() == 6);
+  watchApp.requestReload(); watchApp.pump();
+  defaultDenied = false;
+  try { watchClient.put("LEGACY:dynamic").set("value", int32_t(21)).exec()->wait(2.0); }
+  catch (const std::exception&) { defaultDenied = true; }
+  assert(defaultDenied && writes.load() == 6);
+  assert(std::filesystem::exists(cacheFile));
+  watchClient.close(); watchApp.stop();
+  std::filesystem::remove(manifestFile);
+  Application warmApp(configFile.string());
+  assert(warmApp.start(error));
+  auto warmClient = plainClientConfig.build();
+  auto warmStatus = warmClient.get(statusName).exec()->wait(2.0);
+  assert(warmStatus["cacheLoaded"].as<bool>() && warmStatus["state"].as<std::string>() == "stale");
+  assert(warmStatus["activeRevision"].as<std::string>() == "r3");
+  assert(warmClient.get("LEGACY:dynamic").exec()->wait(2.0)["value"].as<int32_t>() == 21);
+  warmClient.close(); warmApp.stop();
   upstreamServer.stop(); alternateServer.stop();
   std::filesystem::remove_all(directory);
 }

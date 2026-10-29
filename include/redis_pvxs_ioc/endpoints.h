@@ -57,9 +57,10 @@ inline EndpointRegistry configuredEndpoints(const AppConfig& config) {
   for (size_t index = 0; index < config.pvs.size(); ++index)
     result.addPV(config.server, config.pvs[index], "root.pvs[" + std::to_string(index) + "]");
   for (size_t index = 0; index < config.pvaGateway.pvs.size(); ++index) {
-    const auto name = fullGatewayName(config.server, config.pvaGateway.pvs[index]);
-    result.reserve(name, EndpointKind::Gateway, name,
-                   "root.pva_gateway.pvs[" + std::to_string(index) + "].name");
+    const auto names = fullGatewayNames(config.server, config.pvaGateway.pvs[index]);
+    for (size_t j = 0; j < names.size(); ++j)
+      result.reserve(names[j], j ? EndpointKind::Alias : EndpointKind::Gateway, names.front(),
+                     "root.pva_gateway.pvs[" + std::to_string(index) + "]" + (j ? ".aliases" : ".name"));
   }
   return result;
 }

@@ -400,7 +400,7 @@ struct PreparedPolicy {
 PreparedPolicy preparePolicy(const AccessConfig& config,
                              const std::set<std::string>& requiredAsgs) {
   PreparedPolicy prepared;
-  prepared.raw = readTextFile(config.file);
+  prepared.raw = config.file.empty() ? "ASG(DEFAULT) { RULE(0, READ) }\n" : readTextFile(config.file);
   prepared.rawFingerprint = fingerprint(prepared.raw);
   prepared.expanded = expandMacros(prepared.raw, config.macros);
   prepared.groups = inspectAcf(prepared.expanded);
@@ -652,6 +652,10 @@ public:
   }
 
   uint8_t loadRights() const { return rights.load(std::memory_order_acquire); }
+  std::pair<uint8_t, uint64_t> admission() {
+    std::lock_guard<std::mutex> fence(dispatchFence);
+    return {rights.load(std::memory_order_acquire), rightsEpoch.load(std::memory_order_acquire)};
+  }
 
   void recompute(bool closeOnChange) {
     uint8_t next = 0u;
@@ -663,7 +667,12 @@ public:
         if (raw->trapMask) next |= kTrapWrite;
       }
     }
-    const auto current = rights.exchange(next, std::memory_order_acq_rel);
+    uint8_t current;
+    {
+      std::lock_guard<std::mutex> fence(dispatchFence);
+      current = rights.exchange(next, std::memory_order_acq_rel);
+      if (current != next) ++rightsEpoch;
+    }
     dirty.store(false, std::memory_order_release);
     const auto callbackPrior = rightsBeforeChange.exchange(0u, std::memory_order_acq_rel);
     const auto prior = callbackPrior != 0u ? callbackPrior : current;
@@ -677,7 +686,12 @@ public:
     if (status != asClientCOAR) return;
     auto* self = static_cast<ChannelState*>(asGetClientPvt(client));
     if (!self) return;
-    const auto prior = self->rights.exchange(0u, std::memory_order_acq_rel);
+    uint8_t prior;
+    {
+      std::lock_guard<std::mutex> fence(self->dispatchFence);
+      prior = self->rights.exchange(0u, std::memory_order_acq_rel);
+      ++self->rightsEpoch;
+    }
     self->rightsBeforeChange.fetch_or(prior, std::memory_order_acq_rel);
     if (!self->initialized.load(std::memory_order_acquire)) return;
     if (!self->dirty.exchange(true, std::memory_order_acq_rel)) {
@@ -702,6 +716,8 @@ public:
   std::vector<ASCLIENTPVT> clients;
   std::shared_ptr<CloseHandle> closer;
   std::atomic<uint8_t> rights{0u};
+  std::mutex dispatchFence;
+  std::atomic<uint64_t> rightsEpoch{0};
   // Fixed-size throttling state expires with this live channel. Never retain
   // historical PV/peer keys (a new TCP port used to grow that map indefinitely).
   mutable std::atomic<int64_t> lastDeniedReadMs{0}, lastDeniedWriteMs{0};
@@ -766,24 +782,34 @@ struct AccessOperation {
 class AuthorizedExecOp final : public pvxs::server::ExecOp, public OperationAuthorization {
 public:
   AuthorizedExecOp(std::unique_ptr<pvxs::server::ExecOp> target, std::shared_ptr<ChannelState> state,
-                   const char* operation, bool trap, const pvxs::Value& value)
+                   const char* operation, bool trap, const pvxs::Value& value, uint64_t admittedEpoch)
       : ExecOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
         target_(std::move(target)), state_(std::move(state)),
-        audit_(std::make_shared<AccessOperation>(state_, operation, trap, value)) {
+        audit_(std::make_shared<AccessOperation>(state_, operation, trap, value)),
+        admittedEpoch_(admittedEpoch) {
     auto audit = audit_;
     target_->onCancel([audit] { audit->finish("cancelled"); });
   }
   ~AuthorizedExecOp() override { audit_->finish("abandoned"); }
   void reply() override { target_->reply(); audit_->finish("success"); }
+  void reply(const pvxs::RemoteStatus& status) override { target_->reply(status); audit_->finish("success"); }
+  void reply(const pvxs::Value& value, const pvxs::RemoteStatus& status) override { target_->reply(value, status); audit_->finish("success"); }
   void reply(const pvxs::Value& value) override { target_->reply(value); audit_->finish("success"); }
+  void replyLength(uint64_t length, const pvxs::RemoteStatus& status = {}) {
+    static_cast<pvxs::server::ProxyExecOp&>(*target_).replyLength(length, status);
+    audit_->finish("success");
+  }
   void error(const std::string& message) override { target_->error(message); audit_->finish("error"); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); audit_->finish("error"); }
   void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
   void onCancel(std::function<void()>&& fn) override {
     auto audit = audit_;
     target_->onCancel([audit, fn = std::move(fn)] { audit->finish("cancelled"); if (fn) fn(); });
   }
   bool authorized(const pvxs::Value& value) override {
-    if ((state_->loadRights() & kWrite) != 0u) return authorizeWriteDispatch(*target_, value);
+    const auto snapshot = state_->admission();
+    if ((snapshot.first & kWrite) != 0u && snapshot.second == admittedEpoch_)
+      return authorizeWriteDispatch(*target_, value);
     // Rights changed after admission. Record the refusal under the admitted
     // audit id so it is not mistaken for a later backend error, then close the
     // operation as denied; the caller's PVA error reply cannot reclassify it.
@@ -795,6 +821,11 @@ public:
                                audit_->operation, open && audit_->trap ? audit_->id : 0);
     if (open) audit_->complete("denied");
     return false;
+  }
+  bool commit(const std::function<bool()>& action) noexcept override {
+    std::unique_lock<std::mutex> fence(state_->dispatchFence, std::try_to_lock);
+    return fence.owns_lock() && state_->rightsEpoch.load(std::memory_order_acquire) == admittedEpoch_ &&
+        (state_->loadRights() & kWrite) != 0u && authorizeWriteCommit(*target_, action);
   }
 private:
   pvxs::Timer _timerOneShot(double delay, std::function<void()>&& fn) override {
@@ -808,16 +839,80 @@ private:
   std::unique_ptr<pvxs::server::ExecOp> target_;
   std::shared_ptr<ChannelState> state_;
   std::shared_ptr<AccessOperation> audit_;
+  const uint64_t admittedEpoch_;
+};
+
+bool processingRequest(const pvxs::Value& request) {
+  const auto field = request["record._options.process"];
+  if (!field) return false;
+  std::string text;
+  if (field.as(text)) return text != "false" && text != "0";
+  bool value = false;
+  return !field.as(value) || value;
+}
+
+class AuthorizedProxyExec final : public pvxs::server::ProxyExecOp, public OperationAuthorization {
+public:
+  AuthorizedProxyExec(std::unique_ptr<pvxs::server::ProxyExecOp> target, std::shared_ptr<ChannelState> state,
+                      bool trap, const pvxs::Value& value, uint64_t admittedEpoch)
+      : ProxyExecOp(target->name(), target->credentials(), target->kind(), target->action(), target->pvRequest()),
+        secured_(std::make_unique<AuthorizedExecOp>(std::move(target), std::move(state), "proxy", trap, value, admittedEpoch)) {}
+  void reply() override { secured_->reply(); }
+  void reply(const pvxs::RemoteStatus& status) override { secured_->reply(status); }
+  void reply(const pvxs::Value& value, const pvxs::RemoteStatus& status) override { secured_->reply(value, status); }
+  void reply(const pvxs::Value& value) override { secured_->reply(value); }
+  void replyLength(uint64_t length) override { secured_->replyLength(length); }
+  void replyLength(uint64_t length, const pvxs::RemoteStatus& status) override { secured_->replyLength(length, status); }
+  void error(const std::string& message) override { secured_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { secured_->error(status); }
+  void logRemote(pvxs::Level level, const std::string& message) override { secured_->logRemote(level, message); }
+  void onCancel(std::function<void()>&& fn) override { secured_->onCancel(std::move(fn)); }
+  bool authorized(const pvxs::Value& value) override { return secured_->authorized(value); }
+  bool commit(const std::function<bool()>& action) noexcept override { return secured_->commit(action); }
+private:
+  pvxs::Timer _timerOneShot(double delay, std::function<void()>&& fn) override { return secured_->timerOneShot(delay, std::move(fn)); }
+  std::unique_ptr<AuthorizedExecOp> secured_;
+};
+
+class AuthorizedProxySetup final : public pvxs::server::ProxySetupOp {
+public:
+  AuthorizedProxySetup(std::unique_ptr<pvxs::server::ProxySetupOp> target, std::shared_ptr<ChannelState> state)
+      : ProxySetupOp(target->name(), target->credentials(), target->kind(), target->pvRequest()),
+        target_(std::move(target)), state_(std::move(state)) {}
+  void connect(const pvxs::ProxyPrototype& type) override { target_->connect(type); }
+  void connect(const pvxs::ProxyPrototype& type, const pvxs::RemoteStatus& status) override { target_->connect(type, status); }
+  void error(const std::string& message) override { target_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); }
+  void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
+  void onClose(std::function<void(const std::string&)>&& fn) override { target_->onClose(std::move(fn)); }
+  void onExec(std::function<void(std::unique_ptr<pvxs::server::ProxyExecOp>&&, pvxs::ProxyRequest&&)>&& fn) override {
+    auto state = state_;
+    target_->onExec([state, fn = std::move(fn)](std::unique_ptr<pvxs::server::ProxyExecOp>&& op, pvxs::ProxyRequest&& request) {
+      const auto admitted = state->admission();
+      const auto rights = admitted.first;
+      const bool write = request.mutating();
+      if ((rights & (write ? kWrite : kRead)) == 0u) {
+        state->owner.recordDenied(*state, write, write ? &request.value : nullptr, "proxy");
+        op->error("access denied"); return;
+      }
+      if (write) fn(std::make_unique<AuthorizedProxyExec>(std::move(op), state, (rights & kTrapWrite) != 0u, request.value, admitted.second), std::move(request));
+      else fn(std::move(op), std::move(request));
+    });
+  }
+private:
+  std::unique_ptr<pvxs::server::ProxySetupOp> target_;
+  std::shared_ptr<ChannelState> state_;
 };
 
 class AuthorizedConnectOp final : public pvxs::server::ConnectOp {
 public:
   AuthorizedConnectOp(std::unique_ptr<pvxs::server::ConnectOp> target,
                       std::shared_ptr<ChannelState> state)
-      : ConnectOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
+      : ConnectOp(target->name(), target->credentials(), target->op(), target->pvRequest(), target->subField()),
         target_(std::move(target)), state_(std::move(state)) {}
 
-  void connect(const pvxs::Value& prototype) override {
+  void connect(const pvxs::Value& prototype) override { connect(prototype, pvxs::RemoteStatus{}); }
+  void connect(const pvxs::Value& prototype, const pvxs::RemoteStatus& status) override {
     // GET_FIELD is a one-shot ConnectOp and never invokes onGet().  Enforce
     // READ here for that operation while leaving GET/PUT setup alone so their
     // execution paths retain the single cached-rights load.
@@ -826,10 +921,11 @@ public:
       target_->error("access denied");
       return;
     }
-    target_->connect(prototype);
+    target_->connect(prototype, status);
   }
 
   void error(const std::string& message) override { target_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); }
   void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
   void onClose(std::function<void(const std::string&)>&& fn) override { target_->onClose(std::move(fn)); }
 
@@ -841,7 +937,15 @@ public:
         op->error("access denied");
         return;
       }
-      fn(std::move(op));
+      if (processingRequest(op->pvRequest())) {
+        const auto admitted = state->admission();
+      const auto rights = admitted.first;
+        if ((rights & kWrite) == 0u) {
+          state->owner.recordDenied(*state, true, nullptr, "get-process");
+          op->error("access denied"); return;
+        }
+        fn(std::make_unique<AuthorizedExecOp>(std::move(op), state, "get-process", (rights & kTrapWrite) != 0u, pvxs::Value{}, admitted.second));
+      } else fn(std::move(op));
     });
   }
 
@@ -849,13 +953,14 @@ public:
     auto state = state_;
     target_->onPut([state, fn = std::move(fn)](std::unique_ptr<pvxs::server::ExecOp>&& op,
                                                pvxs::Value&& value) mutable {
-      const auto rights = state->loadRights();
+      const auto admitted = state->admission();
+      const auto rights = admitted.first;
       if ((rights & kWrite) == 0u) {
         state->owner.recordDenied(*state, true, &value);
         op->error("access denied");
         return;
       }
-      auto secured = std::make_unique<AuthorizedExecOp>(std::move(op), state, "put", (rights & kTrapWrite) != 0u, value);
+      auto secured = std::make_unique<AuthorizedExecOp>(std::move(op), state, "put", (rights & kTrapWrite) != 0u, value, admitted.second);
       fn(std::move(secured), std::move(value));
     });
   }
@@ -887,17 +992,24 @@ public:
     });
   }
 
+  void onProxy(std::function<void(std::unique_ptr<pvxs::server::ProxySetupOp>&&)>&& fn) override {
+    auto state = state_;
+    target_->onProxy([state, fn = std::move(fn)](std::unique_ptr<pvxs::server::ProxySetupOp>&& op) {
+      fn(std::make_unique<AuthorizedProxySetup>(std::move(op), state));
+    });
+  }
   void onRPC(std::function<void(std::unique_ptr<pvxs::server::ExecOp>&&, pvxs::Value&&)>&& fn) override {
     auto state = state_;
     target_->onRPC([state, fn = std::move(fn)](std::unique_ptr<pvxs::server::ExecOp>&& op,
                                                pvxs::Value&& value) mutable {
-      const auto rights = state->loadRights();
+      const auto admitted = state->admission();
+      const auto rights = admitted.first;
       if ((rights & kWrite) == 0u) {
         state->owner.recordDenied(*state, true, nullptr, "rpc");
         op->error("access denied");
         return;
       }
-      auto secured = std::make_unique<AuthorizedExecOp>(std::move(op), state, "rpc", (rights & kTrapWrite) != 0u, value);
+      auto secured = std::make_unique<AuthorizedExecOp>(std::move(op), state, "rpc", (rights & kTrapWrite) != 0u, value, admitted.second);
       fn(std::move(secured), std::move(value));
     });
   }
@@ -916,6 +1028,7 @@ public:
 
   void onClose(std::function<void(const std::string&)>&& fn) override { target_->onClose(std::move(fn)); }
   void close() override { target_->close(); }
+  void closeAsync() override { target_->closeAsync(); }
 
 private:
   void _updateInfo(const std::shared_ptr<const pvxs::server::ReportInfo>& info) override {
@@ -936,6 +1049,12 @@ private:
 bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value) {
   auto* authorized = dynamic_cast<OperationAuthorization*>(&operation);
   return !authorized || authorized->authorized(value);
+}
+bool authorizeWriteCommit(pvxs::server::ExecOp& operation,
+                          const std::function<bool()>& action) noexcept {
+  auto* authorized = dynamic_cast<OperationAuthorization*>(&operation);
+  try { return authorized ? authorized->commit(action) : action(); }
+  catch (...) { return false; }
 }
 
 void AccessController::Impl::markDirty(const std::shared_ptr<ChannelState>& state) {
@@ -1450,6 +1569,14 @@ AccessStatus AccessController::status() const {
   result.policyFingerprint = impl_->policyFingerprint;
   result.watchStatus = impl_->watchStatus;
   return result;
+}
+
+void AccessController::validateActiveAsgs(const std::set<std::string>& requiredAsgs) const {
+  std::string policy;
+  { std::lock_guard<std::mutex> guard(impl_->mutex); policy = impl_->activePolicy; }
+  const auto groups = inspectAcf(policy);
+  for (const auto& asg : requiredAsgs)
+    if (!groups.count(asg)) throw std::runtime_error("active ACF does not define required ASG '" + asg + "'");
 }
 
 bool validateAccessPolicy(const AccessConfig& config,

@@ -230,8 +230,30 @@ if(NOT REDIS_PVXS_IOC_HAS_HAG_REFRESH)
   message(FATAL_ERROR "EPICS Base must provide asRefreshHag(). Build the pinned Base extension; see docs/access-control.md.")
 endif()
 
+# The proxy uses repository-owned extensions to the existing pinned PVXS.
+# Check the installed header and library together, rejecting mixed/unpatched
+# externally supplied PVXS_ROOT trees before compiling the runtime.
+set(CMAKE_REQUIRED_INCLUDES "${PVXS_ROOT}/include" "${EPICS_BASE}/include"
+  "${EPICS_BASE}/include/${EPICS_COMPILER_DIR}" "${EPICS_BASE}/include/${EPICS_OS_DIR}")
+set(CMAKE_REQUIRED_LIBRARIES "${PVXS_LIB}/libpvxs${SHARED_LIB_EXT}" "${EPICS_BASE_LIB}/libCom${SHARED_LIB_EXT}")
+# Recheck if a configured build is pointed at another dependency tree.
+unset(REDIS_PVXS_IOC_HAS_PROXY_API CACHE)
+check_cxx_source_compiles("#include <pvxs/version.h>\n#if !defined(PVXS_XRM_PROXY_API) || PVXS_XRM_PROXY_API != 1\n#error Missing project proxy API\n#endif\nint main() { return pvxs::xrmProxyApiVersion() != 1; }" REDIS_PVXS_IOC_HAS_PROXY_API)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if(NOT REDIS_PVXS_IOC_HAS_PROXY_API)
+  message(FATAL_ERROR "PVXS_ROOT must contain the project-owned proxy extensions. Apply patches/pvxs with scripts/apply-pvxs-patches.py and rebuild PVXS; see docs/building-from-source.md.")
+endif()
+
 add_executable(redis-pvxs-ioc src/main.cpp)
 target_link_libraries(redis-pvxs-ioc PRIVATE redis-pvxs-ioc-core)
+
+add_library(xrm-demux STATIC tools/xrm_demux.cpp)
+target_include_directories(xrm-demux PUBLIC ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(xrm-demux PUBLIC redis-pvxs-ioc-core)
+add_executable(xrm-proxy tools/xrm_proxy.cpp)
+target_link_libraries(xrm-proxy PRIVATE xrm-demux)
+install(TARGETS xrm-proxy RUNTIME DESTINATION bin)
 
 if(REDIS_PVXS_IOC_ENABLE_CHANNELFINDER)
   add_library(redis-pvxs-channelfinder STATIC src/channelfinder.cpp)
@@ -270,13 +292,53 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   add_test(NAME endpoint_tests COMMAND endpoint_tests)
   set_tests_properties(endpoint_tests PROPERTIES TIMEOUT 15)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
+  add_test(NAME pvxs_patch_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/pvxs_patch_tests.py --source ${PVXS_ROOT})
+  set_tests_properties(pvxs_patch_tests PROPERTIES TIMEOUT 30)
+  add_executable(xrm_demux_tests tests/xrm_demux_tests.cpp)
+  target_link_libraries(xrm_demux_tests PRIVATE xrm-demux)
+  target_compile_options(xrm_demux_tests PRIVATE -UNDEBUG)
+  add_test(NAME xrm_demux_tests COMMAND xrm_demux_tests)
+  set_tests_properties(xrm_demux_tests PROPERTIES TIMEOUT 15)
+  add_executable(xrm_demux_redis_tests tests/xrm_demux_redis_tests.cpp)
+  target_link_libraries(xrm_demux_redis_tests PRIVATE xrm-demux)
+  target_compile_options(xrm_demux_redis_tests PRIVATE -UNDEBUG)
+  add_test(NAME xrm_demux_redis_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    -- $<TARGET_FILE:xrm_demux_redis_tests>)
+  set_tests_properties(xrm_demux_redis_tests PROPERTIES TIMEOUT 45)
+  add_test(NAME xrm_proxy_cli_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/tests/xrm_proxy_cli_tests.py $<TARGET_FILE:xrm-proxy>)
+  set_tests_properties(xrm_proxy_cli_tests PROPERTIES TIMEOUT 40)
+  add_executable(xrm_proxy_integration_fixture tests/xrm_proxy_integration_fixture.cpp)
+  target_link_libraries(xrm_proxy_integration_fixture PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(xrm_proxy_integration_fixture PRIVATE -UNDEBUG)
+  add_test(NAME xrm_proxy_integration COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+    --timeout 220
+    -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/xrm_proxy_integration.py
+    --fixture $<TARGET_FILE:xrm_proxy_integration_fixture>
+    --ioc $<TARGET_FILE:redis-pvxs-ioc> --sidecar $<TARGET_FILE:xrm-proxy>)
+  set_tests_properties(xrm_proxy_integration PROPERTIES TIMEOUT 240)
+  set(PVA_NATIVE_REFERENCE_EXECUTABLE "" CACHE FILEPATH
+    "Optional independent stock PVA qualification peer (test-only)")
+  if(PVA_NATIVE_REFERENCE_EXECUTABLE)
+    if(NOT EXISTS "${PVA_NATIVE_REFERENCE_EXECUTABLE}")
+      message(FATAL_ERROR "PVA_NATIVE_REFERENCE_EXECUTABLE does not exist")
+    endif()
+    add_test(NAME pva_native_reference_e2e COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/tests/pva_native_reference_e2e.py
+      --native ${PVA_NATIVE_REFERENCE_EXECUTABLE}
+      --fixture $<TARGET_FILE:xrm_proxy_integration_fixture>)
+    set_tests_properties(pva_native_reference_e2e PROPERTIES TIMEOUT 180)
+  endif()
   add_executable(qualification_probe_fixture tests/qualification_probe_fixture.cpp)
   target_link_libraries(qualification_probe_fixture PRIVATE redis-pvxs-ioc-core)
   add_test(NAME qualification_probe_e2e COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_SOURCE_DIR}/tests/qualification_probe_e2e.py
     --fixture $<TARGET_FILE:qualification_probe_fixture> --probe $<TARGET_FILE:qualification_probe>)
   set_tests_properties(qualification_probe_e2e PROPERTIES TIMEOUT 25)
-  find_program(REDIS_SERVER_EXECUTABLE redis-server REQUIRED)
   add_executable(gateway_pva_tests tests/gateway_pva_tests.cpp)
   target_link_libraries(gateway_pva_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(gateway_pva_tests PRIVATE -UNDEBUG)

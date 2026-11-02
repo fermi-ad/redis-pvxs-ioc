@@ -81,6 +81,7 @@ RUN python3 tests/build_pva_native_reference.py \
     --source-base third_party/epics-base --built-base third_party/epics-base \
     --build-dir /tmp/pva-native-reference --jobs 4
 RUN cmake -S . -B build \
+    -D CMAKE_BUILD_TYPE=RelWithDebInfo \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
     -D PVA_NATIVE_REFERENCE_EXECUTABLE=/tmp/pva-native-reference/pva_native_reference \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"

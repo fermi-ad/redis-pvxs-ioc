@@ -36,7 +36,7 @@ struct InputError : std::runtime_error { using std::runtime_error::runtime_error
 void require(bool yes, const std::string& message) {
   if (!yes) throw std::runtime_error(message);
 }
-void inputRequire(bool yes, const std::string& message) {
+void inputRequire(bool yes, const char* message) {
   if (!yes) throw InputError(message);
 }
 void keys(const YAML::Node& node, std::initializer_list<const char*> allowed, const std::string& path) {

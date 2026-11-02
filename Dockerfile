@@ -12,7 +12,7 @@ RUN dpkg-deb --extract /tmp/ca-certificates.deb /tmp/apt-trust && \
     rm -rf /tmp/apt-trust /tmp/ca-certificates.deb
 COPY packaging/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
 
-FROM pinned-base AS builder
+FROM pinned-base AS dependencies
 
 ARG REDIS_PVXS_IOC_VERSION=dev
 ARG REDIS_PVXS_IOC_REVISION=unknown
@@ -53,25 +53,43 @@ RUN VERSION_FROM_FILE="$(tr -d '\n' < VERSION)" && \
 RUN test -d third_party/epics-base/modules/pvData
 RUN test -d third_party/pvxs/bundle/libevent
 RUN test -d third_party/redis-adapter/redis-plus-plus
-
 RUN make -C third_party/epics-base configure.install src.install -j"$(nproc)" && \
     make -C third_party/epics-base/modules libcom.install -j"$(nproc)"
+COPY patches/pvxs/ patches/pvxs/
+COPY scripts/apply-pvxs-patches.py scripts/apply-pvxs-patches.py
+RUN python3 scripts/apply-pvxs-patches.py third_party/pvxs
 RUN printf 'EPICS_BASE=%s/third_party/epics-base\n' "$(pwd)" > third_party/pvxs/configure/RELEASE.local
 RUN make -C third_party/pvxs/bundle libevent
 RUN make -C third_party/pvxs configure.install setup.install src.install tools.install -j"$(nproc)"
 
+FROM dependencies AS builder
+
 # Now the IOC sources (this COPY merges over third_party without disturbing the
 # built artifacts created by the RUN layers above).
 COPY . .
+# The source overlay includes the pristine pinned submodule files. Restore the
+# exact project extension while preserving the compiled dependency artifacts.
+RUN python3 scripts/apply-pvxs-patches.py third_party/pvxs
 
+# These extension tests require only Base libCom, matching the production
+# dependency build. They exercise cancellation, status and native wire state.
+RUN make -C third_party/pvxs/test/proxy -j4 && \
+    make -C third_party/pvxs/test/proxy runtests
+# Qualify the wire extensions against the stock implementations already pinned
+# in Base. The reference peer remains in the builder and is not a runtime dep.
+RUN python3 tests/build_pva_native_reference.py \
+    --source-base third_party/epics-base --built-base third_party/epics-base \
+    --build-dir /tmp/pva-native-reference --jobs 4
 RUN cmake -S . -B build \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
+    -D PVA_NATIVE_REFERENCE_EXECUTABLE=/tmp/pva-native-reference/pva_native_reference \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
 RUN cmake --build build -j"$(nproc)"
 RUN ctest --test-dir build --output-on-failure
 RUN EPICS_HOST_ARCH="$(perl third_party/epics-base/lib/perl/EpicsHostArch.pl)" && \
     mkdir -p /opt/runtime/bin /opt/runtime/lib/epics-base /opt/runtime/lib/pvxs /opt/runtime/lib/libevent && \
     cp build/redis-pvxs-ioc /opt/runtime/bin/redis-pvxs-ioc && \
+    cp build/xrm-proxy /opt/runtime/bin/xrm-proxy && \
     cp build/redis-pvxs-channelfinder-sync /opt/runtime/bin/redis-pvxs-channelfinder-sync && \
     cp -R "third_party/epics-base/lib/${EPICS_HOST_ARCH}/." /opt/runtime/lib/epics-base/ && \
     cp -R "third_party/pvxs/lib/${EPICS_HOST_ARCH}/." /opt/runtime/lib/pvxs/ && \
@@ -130,7 +148,8 @@ RUN dpkg-query -W -f '${binary:Package}\t${Version}\t${Architecture}\n' | \
 RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 
 RUN groupadd --gid 10001 ioc && \
-    useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ioc
+    useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ioc && \
+    install -d -o 10001 -g 10001 -m 0755 /var/lib/redis-pvxs-ioc /run/xrm-proxy
 
 ENV PATH=/opt/redis-pvxs-ioc/bin/pvxs:/opt/redis-pvxs-ioc/bin/epics-base:$PATH
 ENV LD_LIBRARY_PATH=/opt/redis-pvxs-ioc/lib/epics-base:/opt/redis-pvxs-ioc/lib/pvxs:/opt/redis-pvxs-ioc/lib/libevent

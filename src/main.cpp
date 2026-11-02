@@ -74,8 +74,8 @@ int main(int argc, char* argv[]) {
   }
   if (!oldConfig.empty()) {
     try {
-      const auto before = redis_pvxs_ioc::loadConfigFile(oldConfig);
-      const auto after = redis_pvxs_ioc::loadConfigFile(newConfig);
+      const auto before = redis_pvxs_ioc::loadConfigForDiff(oldConfig);
+      const auto after = redis_pvxs_ioc::loadConfigForDiff(newConfig);
       std::cout << redis_pvxs_ioc::formatConfigDiff(redis_pvxs_ioc::diffConfigs(before, after), json) << '\n';
       return 0;
     } catch (const std::exception& error) {

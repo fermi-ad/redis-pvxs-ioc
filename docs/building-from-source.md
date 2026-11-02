@@ -74,6 +74,7 @@ Choose a parallel job count appropriate for the machine:
 ```sh
 JOBS=${JOBS:-4}
 
+python3 scripts/apply-pvxs-patches.py third_party/pvxs
 make -C third_party/epics-base configure.install src.install -j"$JOBS"
 make -C third_party/epics-base/modules libcom.install -j"$JOBS"
 
@@ -82,10 +83,19 @@ printf 'EPICS_BASE=%s/third_party/epics-base\n' "$(pwd)" \
 make -C third_party/pvxs/bundle libevent
 make -C third_party/pvxs configure.install setup.install src.install \
   tools.install -j"$JOBS"
+make -C third_party/pvxs/test/proxy -j"$JOBS"
+make -C third_party/pvxs/test/proxy runtests
 ```
 
 The main service links EPICS `libCom` and standalone PVXS. It does not require
 an EPICS database, `pvxsIoc`, or `iocInit()`.
+
+The proxy extensions are maintained in this repository under `patches/pvxs`.
+They apply to the existing pinned PVXS source revision; there is no additional
+runtime dependency or upstream patch download. The preparation script verifies
+recorded source/output hashes and is safe to rerun after a source overlay.
+Rebuild PVXS after applying it. CMake checks both the installed extension
+header and library symbol before building the IOC.
 
 Let PVXS select its libevent libraries. Linking the monolithic `libevent` in
 addition to PVXS's `event_core` and `event_pthreads` dependencies creates
@@ -105,6 +115,22 @@ ctest --test-dir build --output-on-failure
 ./build/redis-pvxs-ioc --check-config demo/config.yaml
 ```
 
+For independent native-protocol qualification, build the stock reference peer
+from the modules already pinned in Base and enable its two-way CTest check:
+
+```sh
+python3 tests/build_pva_native_reference.py \
+  --source-base third_party/epics-base --built-base third_party/epics-base \
+  --build-dir /tmp/pva-native-reference --jobs 4
+cmake -S . -B build \
+  -DPVA_NATIVE_REFERENCE_EXECUTABLE=/tmp/pva-native-reference/pva_native_reference
+cmake --build build -j"$JOBS"
+ctest --test-dir build -R pva_native_reference_e2e --output-on-failure
+```
+
+The reference peer is test-only. The container builder runs these checks before
+assembling the runtime image and does not install the peer in that image.
+
 On Homebrew installations where CMake cannot locate gRPC or Protobuf, provide
 their package prefixes explicitly:
 
@@ -122,6 +148,8 @@ binaries are deliberately not wanted.
 The in-tree revisions are the reproducible default, but CMake can link an
 already-built EPICS Base and PVXS tree. The two installations must use a
 compatible compiler, target architecture, and shared-library ABI.
+The PVXS tree must include this repository's proxy extensions; an unpatched
+external `PVXS_ROOT` is rejected at configuration time.
 
 ```sh
 export EPICS_BASE=/opt/epics/base

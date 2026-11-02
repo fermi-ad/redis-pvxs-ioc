@@ -13,6 +13,9 @@ struct PVBinding {
   pvxs::server::SharedPV pv;
   std::shared_ptr<void> owner;
   AccessAssignment access;
+  // Native sources attach through the same retirement and identity wrappers as
+  // SharedPV endpoints.  A binding supplies exactly one of pv or attach.
+  std::function<void(std::unique_ptr<pvxs::server::ChannelControl>&&)> attach;
 };
 using PVBindings = std::map<std::string, PVBinding>;
 

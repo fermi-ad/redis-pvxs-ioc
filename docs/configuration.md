@@ -37,7 +37,7 @@ rpc_services: []          # optional with PVs or selected gateway PVs
 pva_gateway: {}           # optional; explicitly selected upstream PVA channels
 ```
 
-At least one `pvs`, `rpc_services`, or `pva_gateway.pvs` entry is required. The old `PVList`,
+At least one `pvs`, `rpc_services`, `pva_gateway.pvs` entry or `pva_gateway.file` is required. The old `PVList`,
 `PVBase`, and `RedisBase` prototype keys are rejected.
 
 ## Operation limits
@@ -97,10 +97,11 @@ schema, authorization behavior, and reload guarantees.
 
 ## `pva_gateway`
 
-The optional gateway exposes selected PVA channels read-only from explicitly
-configured device addresses. No Redis-backed PVs are required for a gateway-only
-IOC, but the usual Redis backend configuration remains required for the IOC's
-alarm publisher. For example:
+The optional gateway forwards selected PVA channels from explicit numeric IPv4
+TCP endpoints. It supports GET_FIELD, GET, PUT, PUT_GET, PROCESS, ARRAY, monitors and RPC, including the
+client's operation-specific field selection and `pvRequest`. No Redis-backed
+PVs are required for a gateway-only IOC, but the usual Redis backend settings
+remain required for the alarm publisher.
 
 ```yaml
 server:
@@ -111,69 +112,120 @@ redis:
   host: redis
   port: 6379
 access:
-  enabled: true
-  file: /etc/redis-pvxs-ioc/access.acf
+  enabled: true             # built-in DEFAULT READ policy when file is omitted
 pva_gateway:
   pvs:
     - name: image
       upstream: "CAMERA:IMAGE"
       server: "192.0.2.10:5075"
-      access: {asg: CAMERA, asl: 0}
+      aliases: ["LEGACY:IMAGE"]
+  file: /var/lib/xrm-proxy/gateway.yaml
+  cache_file: /var/lib/redis-pvxs-ioc/gateway.last-good.yaml
+  watch: {enabled: true, interval_ms: 1000, settle_ms: 250}
 ```
 
-This serves `VIEW:image` from the exact upstream name `CAMERA:IMAGE` using a
-direct PVA connection to the configured server's numeric IPv4 address and TCP
-port. Each PV requires its own `server`; no UDP search, environment-provided
-address list or name server is used. Unspecified, multicast, limited broadcast,
-`.255` addresses, and addresses identified as local-interface broadcasts are
-rejected. The same upstream PV may be selected from different servers, but a
-server/PV pair may appear only once. Direct addressing selects a network target;
-it does not provide cryptographic server authentication.
+This exports `VIEW:image` and the exact alias `LEGACY:IMAGE` through the same
+canonical source. Canonical names receive `server.namespace`; aliases are exact
+full names, matching Redis PV aliases. Omit the namespace when a producer emits
+fully qualified canonical names. Inline `pvs` and the optional manifest are
+combined, with collisions checked across both sets, Redis PVs, aliases,
+diagnostics and reflected RPCs.
 
-The configured TCP port must remain valid across device restarts. Some XRM
-application ports may change when the device or application restarts; verify
-the new endpoint and reload the configuration if that happens. Until then the
-gateway remains disconnected rather than searching for a replacement server.
+Each source requires an explicit unicast `server: IPv4:TCP-port`; UDP search,
+environment address lists and name servers are not used. Unspecified,
+multicast, limited broadcast, `.255` addresses and local-interface broadcast
+addresses are rejected. A server/upstream pair may appear once; use aliases for
+multiple exported names. Direct addressing does not authenticate the server.
+Upstream names cannot match this generation's local endpoints or any endpoint
+still served by the preceding generation. Forwarding cycles through independent
+gateways remain the operator's responsibility.
 
-Local names must be unique across the IOC namespace, aliases, diagnostics and
-reflected RPCs. An upstream name may not match any local endpoint, including a
-reflected RPC. During reload it also may not match an endpoint of the still-active
-generation; remove that endpoint in one reload before selecting that upstream in
-a subsequent reload. These checks prevent the IOC from resolving a gateway
-subscription back to its own published endpoint. They do not detect a forwarding
-cycle involving other independent gateways.
+The gateway preserves the upstream PVA structure and operation requests.
+Each monitor has its own upstream subscription. Upstream disconnects and errors
+are reported to downstream clients; commands are never replayed after an
+uncertain timeout or disconnect. Operations, channels, monitor queues and
+retained payloads share process limits across the entire catalog. These limits
+cover admitted forwarding work; PVXS transport buffers and decoding allocations
+are additional memory, so `max_payload_bytes` is not an inbound wire-frame cap.
+For ARRAY reads with count zero (all remaining elements), the gateway checks the
+current upstream length before forwarding the original request. Concurrent
+upstream growth can exceed that estimate; the returned payload is checked again
+after receipt. Timeout recovery closes the affected downstream channel so the
+client can reconnect with fresh operation setups; other subscriptions on that
+channel also disconnect.
+Device authorization sees the gateway client's
+identity; local ACF evaluates the downstream identity independently.
 
-The gateway preserves the upstream PVA structure, metadata and updates. A GET
-returns the latest monitor snapshot; GET and monitor `pvRequest` options are
-not forwarded upstream. Fields describing request behavior can therefore
-describe the gateway's upstream monitor rather than the downstream request.
-For example, an EPICS group may return `record._options.queueSize=0` for its own
-GET and `4` for the gateway's monitor, and `record[atomic=false]` on a gateway
-GET does not request a non-atomic upstream GET. Use a direct device connection
-when operation-specific GET or monitor options are required. Field selection on
-the cached result remains local. If the upstream disconnects, the local
-channel closes until a fresh snapshot arrives. The gateway rejects every PUT
-execution, including when ACF is disabled or grants write access; it never
-sends a PUT upstream. PVA may still allow PUT setup and expose the value type
-before execution is rejected. The gateway does not proxy PVA RPC operations,
-and its upstream monitor does not apply the Redis-source payload limit to
-incoming device values.
-Terminal upstream monitor rejections are retried at most once every five seconds;
-the exported channel stays disconnected until a fresh snapshot arrives.
+Access control is off by default, permitting forwarded writes and RPCs. Enabling
+`access` without a file installs a read-only `DEFAULT` policy, covering gateways,
+Redis PVs, RPCs and admin commands. A supplied ACF keeps its existing policy
+semantics. Main YAML can assign an inline source with `access` or select a
+particular exported name using `access_overrides`:
 
-Gateway channels use `access.defaults.pv` or their explicit `access` assignment.
-When enabled, ACF checks local clients on reads and monitors; gateway PUTs are
-always rejected. Upstream device authorization remains independent and sees the
-gateway client's identity, not the downstream user's identity. Changes to
-selected channels, targets, and assignments can be reloaded: unchanged channels
-retain their subscriptions; replaced and removed channels retire at namespace
-cutover, and failed candidates leave the active generation in place. The
-configured gateway names are included
-in RecCeiver and ChannelFinder catalogs even while a device is disconnected.
-The Redis source `ready` diagnostic does not report gateway connectivity; use
-the exported channel's connection state to detect an unavailable upstream.
-Writable forwarding and gateway health are future work tracked in
-[#149](https://github.com/fermi-ad/redis-pvxs-ioc/issues/149).
+```yaml
+access: {enabled: true, file: /etc/redis-pvxs-ioc/access.acf}
+pva_gateway:
+  file: /var/lib/xrm-proxy/gateway.yaml
+  access_overrides:
+    "LEGACY:COMMAND": {asg: OPERATORS, asl: 0}
+```
+
+The custom ACF must define every assigned ASG. Override keys match exact exported
+names; a namespace-relative canonical name is also accepted. Overrides can name
+exports not yet discovered. Each alias has its own local authorization while
+sharing the canonical upstream mapping. Manifests cannot select ASGs or change
+policy.
+
+The manifest is a bounded YAML or JSON document with exactly this schema:
+
+```yaml
+schema_version: 1
+revision: inventory-2026-10-29-001
+pvs:
+  - name: "BASE:DEVICE:STATUS"
+    upstream: "DEVICE:STATUS"
+    server: "192.0.2.10:5075"
+    aliases: ["LEGACY:STATUS"]
+```
+
+Only `schema_version`, `revision` and `pvs` are allowed at the root; entries permit
+only `name`, `upstream`, `server` and `aliases`. The nonempty revision is at most
+256 bytes, files at most 16 MiB, names at most 1024 bytes, and at most 100000 combined canonical and alias names are accepted.
+An empty `pvs` list intentionally withdraws manifest exports. Paths resolve
+relative to the main YAML. A producer should publish with atomic rename.
+
+The optional watcher polls by path, waits for stable bytes for `settle_ms`, and
+stages a complete internal configuration transaction. It requires no admin PVA
+WRITE permission and preserves the active ACF bytes; edited policies take effect
+through an explicit full reload, policy reload, or an enabled access watcher. Unchanged files do not increment the configuration generation.
+Invalid, missing or partially written candidates preserve the active generation;
+unchanged invalid content is not retried continuously. Changes to gateway
+mappings and aliases use the same all-or-nothing namespace publication as normal
+reloads. The `access.enabled` startup setting remains immutable.
+
+With no manifest at first startup, the IOC serves its inline/baseline endpoints
+and reports `waiting`. When `cache_file` is supplied, the IOC atomically persists
+the last accepted manifest there and revalidates it against the current main
+configuration on a later startup. If the producer file is unavailable or
+invalid, a valid cache starts in `stale` state. Use a separate writable state
+volume for the cache; the source manifest directory may remain read-only.
+Without `cache_file`, retention lasts for the current process. A cache write
+failure is reported without undoing an accepted generation.
+
+`--check-config` validates the current manifest, using a valid configured cache
+when the manifest is missing, unreadable or invalid. `--diff-config OLD NEW` resolves each configuration's
+current manifest and reports mapping changes plus `gateway_manifest_changed`
+for manifest reference, watcher, cache, revision or content changes. Comparing
+two YAML files that reference the same mutable manifest compares its current
+contents; keep versioned manifest files to compare historical inventories.
+
+`SYS:<instance>:gateway:status` exposes state, active and attempted manifest
+revision/fingerprint, errors, cache state, canonical/alias counts and generation.
+Its `sources` table reports canonical names, upstream endpoints, connectivity,
+channels, monitors and operation counters. Fingerprints are diagnostic content
+identities, not security tokens. Gateway catalog entries are published while
+upstreams are unavailable. The Redis `ready` diagnostic continues to describe
+Redis sources; gateway health is reported separately.
 
 ## Redis backends
 

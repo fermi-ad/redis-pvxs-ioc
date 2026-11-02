@@ -1,0 +1,112 @@
+{
+  "base_revision": "749a8933b7982cb4dd9c16660a53f93bcdd3d67e",
+  "api_version": 1,
+  "patch": "0001-xrm-proxy-api.patch",
+  "patch_sha256": "5448dcf59a1930e4a3ef2efc85dc6057e86c238499004d18b9328a11a84e9395",
+  "files": {
+    "src/Makefile": {
+      "before_sha256": "a7178dde5cbeba91bfeceff10b1911b168a3e44d0729333218cf2e3e976f681c",
+      "after_sha256": "3617e513e95bcb59d5a3edbe2097bde00cfbfe57e8a1a92fc07b9a93f91e600a"
+    },
+    "src/client.cpp": {
+      "before_sha256": "72f3c466b7162ae1ad237882b7612160e00408e1c322bc225cec0aa3a7c36e88",
+      "after_sha256": "c081b09741e4bbbe6432fac5f1ce10c02575dccffeca27c593cad63035c72272"
+    },
+    "src/clientget.cpp": {
+      "before_sha256": "4cf119456a9e8bd9cff798ca6f83858daeee548b15653ef2754d0525c3682203",
+      "after_sha256": "be621ce5c5b0ca84e92df21c14754e94585d47ea7c6b7a4f94937f787851e8c6"
+    },
+    "src/clientimpl.h": {
+      "before_sha256": "eb031d178ab4ab44d254cde0a1de6f234fb38ba487d37cd9f6b9efffe92f34eb",
+      "after_sha256": "3b9dbc496fcb4698f8776001a676e2d919a8384185abcc3d0e7c4795d1b67fe4"
+    },
+    "src/clientintrospect.cpp": {
+      "before_sha256": "cf33ff333fc3c31f41c8d39fc077ac36876e5d5c2ae924de0c125e237d9157a9",
+      "after_sha256": "853a9fb31eaf8a783b9ef3273e2fc61234ad45d8e6bd4bc3467bca8a78ff2c1e"
+    },
+    "src/clientmon.cpp": {
+      "before_sha256": "25c4f1b6162bbce7398e566eba53cf505559442663f58823f781a30a23be79d1",
+      "after_sha256": "cf144ca253a55d6c33fa762945c538bb98d6c187f7b692c03e831c6922350b12"
+    },
+    "src/clientproxy.cpp": {
+      "before_sha256": null,
+      "after_sha256": "497c635b83fd73ee0d06d9d3d6e4ea487afd36107a6b0239445618db6b9d6811"
+    },
+    "src/conn.cpp": {
+      "before_sha256": "988d1c0fc3afb5eabad2d2c635ed31a2452543f262be4d8fb2c99a8857ed0e88",
+      "after_sha256": "00a4acd67df6a9230c43042a07e0b933cb96211960acbf6588c409bc8c6707f5"
+    },
+    "src/conn.h": {
+      "before_sha256": "e0a8c0844bb2a9224a10dd2e9d87439f21aeb0ebc0c7d009f3feefd89a4482c3",
+      "after_sha256": "9544995119ab2bd1365a0ca52ecf763ce89bfe652fe5e0600ec80a6463fc68c5"
+    },
+    "src/pvxs/client.h": {
+      "before_sha256": "e60a8be24068965f8bea16ae6b5555270a3019b202542500f12e4e76c45ab723",
+      "after_sha256": "471d25704515d4728a200a50d94a368f0e13600b4c7a5669f0588e3fc1dc2e1d"
+    },
+    "src/pvxs/proxy.h": {
+      "before_sha256": null,
+      "after_sha256": "1ef0b8a88ea2c8e5b1eac3a7a7d5dc1acb915bdfe04d45bb0ba8a5bfd1c2c493"
+    },
+    "src/pvxs/source.h": {
+      "before_sha256": "8b75a8d78158a6b3e2c57f124875f9f7a100bca160cc881c2686c2c778a87138",
+      "after_sha256": "dfa7d668d05a76f58ed894d332e4d57bb94fd436837ab08f820f240712523bbb"
+    },
+    "src/pvxs/srvcommon.h": {
+      "before_sha256": "8c43423d23967b7ed3cdf1d62c8f3c910eaf4be8a2168a94420599e477667b38",
+      "after_sha256": "866d0c223de8b03d16e0903b8117cc698115c46341e0cab8390bb2f4576db23a"
+    },
+    "src/pvxs/version.h": {
+      "before_sha256": "b9e304ffb17300e661fed7414a12a34044179402558be5e82bfdc1828c6ed0e3",
+      "after_sha256": "d130cee99d2e30363ae42977e39019f8977a1b08aa530b3f030bf69475ffa198"
+    },
+    "src/server.cpp": {
+      "before_sha256": "1d9f8a5339b68bfbdcf8ac14600d190f4e2b8acaf45aff8a2a11f64c9801fa53",
+      "after_sha256": "f417989dd5c4e4d0d242fed215e9061137edd85b8bde0334ed0f848d5d538da3"
+    },
+    "src/serverchan.cpp": {
+      "before_sha256": "dfe4a2eed8d8159e6b03d0d391f03e67db0840a7382190cfcaa61992a759a2c2",
+      "after_sha256": "61b54f6ac155a01cea28210fd69e6da01a90cf1ce494a540067166306a152a49"
+    },
+    "src/serverconn.cpp": {
+      "before_sha256": "403ae91ead25df021cdb65862dcb3eb723260fcf010bc0cbd307d794c81f05cd",
+      "after_sha256": "e91487b8c087a4dc47cd8e83ea06ca2e7c7a7a1855870f10c33130d46b47ee9b"
+    },
+    "src/serverconn.h": {
+      "before_sha256": "9f0f0f3e1ab2879ac7059f342f36d8ccce73fd06f0b69ad9954cc3a66cc4e6db",
+      "after_sha256": "2234b8daeb80dadebc404fbb28be16ce485cba92d6109d60df53862d5dcda826"
+    },
+    "src/serverget.cpp": {
+      "before_sha256": "0ab2e6b2a934d8b455003bb18e45e0d58867c9675bd612c7dfef16544c76e61a",
+      "after_sha256": "fd5ba18de481b17b6b9757d8500891a22c79aa65d2768f8695b5e925e4bf6442"
+    },
+    "src/serverintrospect.cpp": {
+      "before_sha256": "39d49f405f3b36b6f9b9cede71f5b18c53b90f4dc335668b546a3cd67145419b",
+      "after_sha256": "70d097908098a824eff3e24b2015c68f9c09fc69a245adf49931744f6f11a571"
+    },
+    "src/servermon.cpp": {
+      "before_sha256": "cffbd1a2a5e53b2ee5e1b7e4fa9c4a40e8d11dabb4e58c29f252af5ad789059c",
+      "after_sha256": "c34027e106d2cea49b6b23aa0a540795bed27f60bc7befacab158b9a0845efb0"
+    },
+    "src/serverproxy.cpp": {
+      "before_sha256": null,
+      "after_sha256": "c17ff05217ba240870aa48581a2fa0c72542706452d7703c7f32d66b0996931b"
+    },
+    "test/Makefile": {
+      "before_sha256": "4d579ad5dccc8097da73d2a7b2b7b3409cc3029e15ce6ebd79360c352319c7ea",
+      "after_sha256": "8a94b14902603d745036d6b21fe66ba7b9f98ec1b9f0e90e9780141dbf85cbc8"
+    },
+    "test/proxy/Makefile": {
+      "before_sha256": null,
+      "after_sha256": "c88f004778e31e9a4dfe69cd3684266de8865556fec3d05d9502e9a2163a974e"
+    },
+    "test/testproxyclient.cpp": {
+      "before_sha256": null,
+      "after_sha256": "a415892d749a33e2254f5f67b1f44e7a89a9e9fa539d0895e84121029606054e"
+    },
+    "test/testproxyserver.cpp": {
+      "before_sha256": null,
+      "after_sha256": "4615f8f528b3ddfc12afdf41b94b9273f3b750ac3c3b0e80fe13091e1eead67a"
+    }
+  }
+}

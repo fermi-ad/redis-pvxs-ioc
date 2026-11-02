@@ -690,7 +690,7 @@ pvs:
   assert(throwsConfig(kDisabledWatchSettings));
   assert(throwsConfig(kUnknownAccessKey));
   assert(throwsConfig(kUnknownAssignmentKey));
-  assert(throwsConfig(kEnabledMissingFile));
+  assert(!throwsConfig(kEnabledMissingFile));
   assert(throwsConfig(kInvalidAsl));
 
   const auto access = loadConfigString(kAccessConfig);
@@ -819,6 +819,45 @@ pvs:
       "pva_gateway: {pvs: [{name: a, upstream: 'DEVICE:a', server: '127.0.0.1:5075'}, "
       "{name: b, upstream: 'DEVICE:a', server: '127.0.0.1:5076'}]}\n";
   assert(loadConfigString(sameNameDifferentServers).pvaGateway.pvs.size() == 2);
+  const auto aliasGateway = loadConfigString(gatewayBase +
+      "pva_gateway: {file: inventory.yaml, cache_file: state/last-good.yaml, watch: {enabled: true, interval_ms: 100, settle_ms: 0}, pvs: [{name: table, upstream: 'DEVICE:table', server: '127.0.0.1:15075', aliases: ['LEGACY:table'] }]}\n");
+  assert(fullGatewayNames(aliasGateway.server, aliasGateway.pvaGateway.pvs[0]) ==
+         (std::vector<std::string>{"EXPORT:table", "LEGACY:table"}));
+  assert(aliasGateway.pvaGateway.watch.enabled && aliasGateway.pvaGateway.watch.intervalMs == 100);
+  assert(aliasGateway.pvaGateway.cacheFile.find("state/last-good.yaml") != std::string::npos);
+  const auto manifestBase = loadConfigString(gatewayBase + "pva_gateway: {file: inventory.yaml}\n");
+  const auto manifest = loadGatewayManifestString(
+      "schema_version: 1\nrevision: r1\npvs: [{name: remote, upstream: 'DEVICE:remote', server: '127.0.0.1:15075', aliases: ['LEGACY:remote']}]\n", manifestBase);
+  assert(manifest.revision == "r1" && manifest.pvs.size() == 1);
+  assert(withGatewayManifest(manifestBase, manifest).pvaGateway.pvs.size() == 1);
+  for (const auto* text : {
+      "schema_version: 2\nrevision: bad\npvs: []",
+      "schema_version: 1\npvs: []",
+      "schema_version: 1\nrevision: bad\naccess: {enabled: false}\npvs: []",
+      "schema_version: 1\nrevision: bad\npvs: [{name: a, upstream: A, server: '127.0.0.1:5075', access: {asg: DEFAULT}}]",
+      "schema_version: 1\nrevision: bad\npvs: [{name: a, upstream: A, server: '127.0.0.1:5075', aliases: ['SYS:gateway:gateway:status']}]",
+      "schema_version: 1\nrevision: bad\npvs: [{name: a, upstream: 'LEGACY:a', server: '127.0.0.1:5075', aliases: ['LEGACY:a']}]",
+      "schema_version: 1\nrevision: bad\npvs: [{name: a, upstream: A, server: '127.0.0.1:5075', aliases: ['EXPORT:a']}]",
+      "schema_version: 1\nrevision: bad\nrevision: duplicate\npvs: []",
+      "schema_version: 1\nrevision: bad\npvs: []\n---\naccess: {enabled: false}"}) {
+    bool rejected = false;
+    try { loadGatewayManifestString(text, manifestBase); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+  }
+  const auto emptyManifest = loadGatewayManifestString("schema_version: 1\nrevision: empty\npvs: []", manifestBase);
+  assert(emptyManifest.pvs.empty());
+  auto aliased = gateway;
+  aliased.pvaGateway.pvs[0].aliases.push_back("LEGACY:table");
+  assert(diffConfigs(gateway, aliased).aliasesChanged == std::vector<std::string>{"EXPORT:table"});
+  for (const auto* declaration : {
+      "{file: x, watch: {enabled: true, interval_ms: 0}}",
+      "{file: x, cache_file: x}",
+      "{watch: {enabled: true}, pvs: []}",
+      "{file: x, access_overrides: {A: {asg: DEFAULT}}}",
+      "{pvs: [{name: a, upstream: A, server: '127.0.0.1:5075', aliases: ['EXPORT:a']}]}",
+      "{pvs: [{name: a, upstream: A, server: '127.0.0.1:5075', aliases: ['B']}, {name: b, upstream: B, server: '127.0.0.1:5075'}]}"}) {
+    assert(throwsConfig((gatewayBase + "pva_gateway: " + declaration + "\n").c_str()));
+  }
   auto changedGateway = gateway;
   changedGateway.pvaGateway.pvs[0].upstream = "DEVICE:other";
   auto gatewayDiff = diffConfigs(gateway, changedGateway);

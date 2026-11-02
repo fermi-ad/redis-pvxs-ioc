@@ -35,6 +35,12 @@ std::set<std::string> aliasSet(const PVConfig& pv) { return {pv.aliases.begin(),
 
 ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
   ConfigDiff diff;
+  const auto& oldGateway = before.pvaGateway;
+  const auto& newGateway = after.pvaGateway;
+  diff.gatewayManifestChanged = std::tie(oldGateway.file, oldGateway.cacheFile, oldGateway.watch.enabled,
+      oldGateway.watch.intervalMs, oldGateway.watch.settleMs, oldGateway.manifestRevision, oldGateway.manifestFingerprint) !=
+      std::tie(newGateway.file, newGateway.cacheFile, newGateway.watch.enabled,
+      newGateway.watch.intervalMs, newGateway.watch.settleMs, newGateway.manifestRevision, newGateway.manifestFingerprint);
   if (!sameOperationLimits(before.limits, after.limits)) diff.restartRequired.push_back("limits");
   if (before.server.instance != after.server.instance) diff.restartRequired.push_back("server.instance");
   if (before.server.nameSpace != after.server.nameSpace) diff.restartRequired.push_back("server.namespace");
@@ -80,10 +86,19 @@ ConfigDiff diffConfigs(const AppConfig& before, const AppConfig& after) {
       } else diff.removed.push_back(item.first);
       continue;
     }
-    const bool accessChanged = !sameAccessAssignment(
-        item.second->access.value_or(before.access.defaults.pv),
-        next->second->access.value_or(after.access.defaults.pv));
-    if (item.second->upstream != next->second->upstream || item.second->server != next->second->server || accessChanged)
+    if (std::set<std::string>(item.second->aliases.begin(), item.second->aliases.end()) !=
+        std::set<std::string>(next->second->aliases.begin(), next->second->aliases.end()))
+      diff.aliasesChanged.push_back(item.first);
+    const bool canonicalAccessChanged = !sameAccessAssignment(gatewayAccess(before, *item.second, item.first),
+                                                              gatewayAccess(after, *next->second, item.first));
+    bool accessChanged = canonicalAccessChanged;
+    for (const auto& name : fullGatewayNames(before.server, *item.second)) {
+      const auto names = fullGatewayNames(after.server, *next->second);
+      if (std::find(names.begin(), names.end(), name) != names.end() &&
+          !sameAccessAssignment(gatewayAccess(before, *item.second, name), gatewayAccess(after, *next->second, name)))
+        accessChanged = true;
+    }
+    if (item.second->upstream != next->second->upstream || item.second->server != next->second->server || canonicalAccessChanged)
       diff.replaced.push_back(item.first);
     if (accessChanged) diff.accessChanged.push_back(item.first);
   }
@@ -173,9 +188,11 @@ std::string formatConfigDiff(const ConfigDiff& diff, bool json) {
   list("alias_changes", diff.aliasesChanged);
   list("backend_changes", diff.backendsChanged); list("rpc_service_changes", diff.rpcServicesChanged);
   list("restart_required", diff.restartRequired);
-  if (json) out << ",\"alarm_stream_changed\":" << (diff.alarmStreamChanged ? "true" : "false")
+  if (json) out << ",\"gateway_manifest_changed\":" << (diff.gatewayManifestChanged ? "true" : "false")
+                << ",\"alarm_stream_changed\":" << (diff.alarmStreamChanged ? "true" : "false")
                 << ",\"catalog_metadata_changed\":" << (diff.catalogMetadataChanged ? "true" : "false") << '}';
-  else out << "alarm_stream_changed: " << (diff.alarmStreamChanged ? "yes" : "no")
+  else out << "gateway_manifest_changed: " << (diff.gatewayManifestChanged ? "yes" : "no")
+           << "\nalarm_stream_changed: " << (diff.alarmStreamChanged ? "yes" : "no")
            << "\ncatalog_metadata_changed: " << (diff.catalogMetadataChanged ? "yes" : "no") << '\n';
   return out.str();
 }

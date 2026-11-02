@@ -234,6 +234,69 @@ void exerciseSourceTime(const ServerConfig& serverConfig, const RedisBackendRegi
   server.removePV(runtime->fullName()); runtime->deactivate("done");
 }
 
+void exerciseConfirmationTime(const ServerConfig& serverConfig, const RedisBackendRegistry& backends,
+                              uint16_t redisPort) {
+  sw::redis::ConnectionOptions connection;
+  connection.host = "127.0.0.1"; connection.port = redisPort;
+  sw::redis::Redis control(connection);
+  const double readback = 8.0;
+  std::string bytes(sizeof(readback), '\0');
+  std::memcpy(bytes.data(), &readback, sizeof(readback));
+  const RedisAdapter::Attrs fields{{"_", bytes}};
+  const std::string ackKey = "{runtime-tests}:confirmation-time-ack";
+  assert(control.xadd("{runtime-tests}:confirmation-time-read", "10-37", fields.begin(), fields.end()) == "10-37");
+  assert(control.xadd(ackKey, "1-0", fields.begin(), fields.end()) == "1-0");
+  PVConfig config;
+  config.name = "confirmation-time"; config.read = {"default", "confirmation-time-read"};
+  config.write = RouteConfig{"default", "confirmation-time-command"};
+  config.confirm = ConfirmConfig{"default", "confirmation-time-ack", 250};
+  RedisBackendConfigs policies{{"default", RedisConfig{}}};
+  policies.at("default").readerProbeMs = 100;
+  auto runtime = makeRuntime(serverConfig, config, backends, {}, 1, {}, {}, {}, policies);
+  runtime->activate();
+  eventually([&] { const auto status = runtime->sourceHealth(); return status[0].ready && status[1].ready; });
+  auto confirm = runtime->sourceHealth()[1];
+  assert(confirm.sourceTimePresent && confirm.sourceTimeValid && confirm.sourceTimeError.empty());
+  const auto epoch = confirm.reader.epoch;
+  const auto assertReadback = [&] {
+    assert(runtime->sharedPV().fetch()["value"].as<double>() == readback);
+    assertTimestamp(runtime->sharedPV().fetch(), 0, 10000037);
+    const auto read = runtime->sourceHealth()[0];
+    assert(read.ready && read.sourceTimePresent && read.sourceTimeValid && read.sourceTimeError.empty());
+  };
+
+  // Payload failure retains the accepted confirmation time quality. A valid
+  // Redis ID outside legacy int64 time range must report a time failure.
+  const RedisAdapter::Attrs malformed{{"_", "x"}};
+  assert(control.xadd(ackKey, "2-0", malformed.begin(), malformed.end()) == "2-0");
+  eventually([&] { return runtime->sourceHealth()[1].invalidSamples == 1; });
+  confirm = runtime->sourceHealth()[1];
+  assert(!confirm.ready && confirm.sourceTimePresent && confirm.sourceTimeValid && confirm.sourceTimeError.empty());
+  assertReadback();
+  assert(control.xadd(ackKey, "9223372036855-0", fields.begin(), fields.end()) == "9223372036855-0");
+  eventually([&] { return runtime->sourceHealth()[1].invalidSamples == 2; });
+  confirm = runtime->sourceHealth()[1];
+  assert(!confirm.ready && confirm.lastValidCursor == "1-0" && confirm.sourceTimePresent && !confirm.sourceTimeValid);
+  assert(confirm.sourceTimeError.find("legacy Redis source timestamp") != std::string::npos);
+  assertReadback();
+
+  auto snapshotConfig = config; snapshotConfig.name = "confirmation-time-snapshot";
+  auto snapshot = makeRuntime(serverConfig, snapshotConfig, backends, {}, 1, {}, {}, {}, policies);
+  const auto invalidSnapshot = snapshot->sourceHealth()[1];
+  assert(!invalidSnapshot.sourceTimePresent && !invalidSnapshot.sourceTimeValid);
+  assert(invalidSnapshot.sourceTimeError.find("legacy Redis source timestamp") != std::string::npos);
+  snapshot->deactivate("snapshot checked");
+
+  // Recreate this isolated fixture key to recover below the oversized cursor.
+  assert(control.del(ackKey) == 1);
+  eventually([&] { return runtime->sourceHealth()[1].state == "missing"; });
+  assert(control.xadd(ackKey, "1-0", fields.begin(), fields.end()) == "1-0");
+  eventually([&] { const auto status = runtime->sourceHealth()[1]; return status.ready && status.lastValidEpoch > epoch; });
+  confirm = runtime->sourceHealth()[1];
+  assert(confirm.sourceTimePresent && confirm.sourceTimeValid && confirm.sourceTimeError.empty());
+  assertReadback(); runtime->deactivate("done");
+}
+
 int main() {
   auto server = pvxs::server::Config::isolated(AF_INET).build();
   RA_Options options;
@@ -400,6 +463,7 @@ int main() {
   assert(missing->sharedPV().fetch()["timeStamp.secondsPastEpoch"].as<int64_t>() == 0);
 
   exerciseSourceTime(serverConfig, backends, options.cxn.port, server, client);
+  exerciseConfirmationTime(serverConfig, backends, options.cxn.port);
 
   missing->deactivate("done"); empty->deactivate("done"); gap->deactivate("done");
   client.close(); server.stop(); replacement->deactivate("done");

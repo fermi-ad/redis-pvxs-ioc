@@ -342,9 +342,17 @@ public:
     if (config_.confirm && !readConfirms) {
       const auto confirmation = confirmRedis_->getStreamSnapshot(config_.confirm->key);
       ValueType raw{};
-      if (confirmation.present() && decode(confirmation.fields, raw) && RA_Time(confirmation.id).ok())
-        confirmSample_.accept(confirmation.id, 1);
-      else if (confirmation.present()) confirmSample_.reject("Invalid confirmation snapshot");
+      if (confirmation.present() && decode(confirmation.fields, raw)) {
+        try {
+          const auto timestamp = decodeSourceTime(SourceTimeConfig{}, confirmation.fields, confirmation.id);
+          confirmSample_.accept(confirmation.id, 1);
+          confirmTimeValid_ = timestamp.valid;
+          confirmTimeError_.clear();
+        } catch (const std::exception& error) {
+          confirmTimeError_ = std::string(error.what()).substr(0, 512);
+          confirmSample_.reject(confirmTimeError_);
+        }
+      } else if (confirmation.present()) confirmSample_.reject("Invalid confirmation snapshot");
       selection.afterId = confirmation.id; selection.probeMs = confirmProbeMs_;
       confirmReader_ = confirmRedis_->subscribeStreamWithMetadata(config_.confirm->key,
           [weak](const auto&, const auto&, const RedisAdapter::StreamBatch& data, const auto& metadata) {
@@ -487,8 +495,9 @@ public:
       // Writable routes retain the existing legacy Redis-ID contract. A
       // confirmation timestamp is not the readback's acquisition timestamp.
       confirm.sourceTimeMode = sourceTimeModeName(SourceTimeMode::LegacyRedisId);
-      confirm.sourceTimePresent = confirm.sourceTimeValid = !confirmSample_.cursor.empty();
-      if (!confirm.sourceTimePresent) confirm.sourceTimeError = "No accepted confirmation timestamp";
+      confirm.sourceTimePresent = !confirmSample_.cursor.empty();
+      confirm.sourceTimeValid = confirmTimeValid_;
+      confirm.sourceTimeError = confirmTimeError_;
       result.push_back(std::move(confirm));
     }
     return result;
@@ -601,7 +610,13 @@ private:
       std::lock_guard<std::mutex> lock(mutex_);
       if (!acceptEpochLocked(updateValue, epoch)) return false;
       (updateValue ? readSample_ : confirmSample_).reject(error, epoch);
-      if (!updateValue) return true;
+      if (!updateValue) {
+        if (invalidTime) {
+          confirmTimeValid_ = false;
+          confirmTimeError_ = error;
+        }
+        return true;
+      }
       sourceValid_ = false;
       sourceError_ = error;
       if (invalidTime) {
@@ -646,7 +661,11 @@ private:
           }
         }
       }
-      if (!updateValue) return true;
+      if (!updateValue) {
+        confirmTimeValid_ = timestamp.valid;
+        confirmTimeError_.clear();
+        return true;
+      }
       lastRaw_ = raw;
       acceptSourceTime(timestamp);
       sourceValid_ = true;
@@ -827,6 +846,8 @@ private:
   std::optional<int64_t> lastTimestampNs_;
   bool sourceTimeValid_ = false;
   std::string sourceTimeError_ = "No accepted source timestamp";
+  bool confirmTimeValid_ = false;
+  std::string confirmTimeError_ = "No accepted confirmation timestamp";
   bool sourceValid_ = false;
   std::string sourceError_;
   uint64_t nextPendingId_ = 0;

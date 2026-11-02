@@ -144,6 +144,8 @@ int main(int argc, char** argv) {
   eventually([&] { return count("cancelled") == 4; });
   assert(count("started") == 7);
   allowedOp->cancel(); revokedOp->cancel(); retiringOp->cancel(); neverOp->cancel();
+  eventually([&] { return access->status().operationsInFlight == 0; });
+  const auto deniedBeforeDispatch = access->status().operationsDenied;
 
   // A TRAPWRITE call admitted before a rights change and refused at dispatch
   // keeps its audit id. Revoking in Base clears cached rights without running
@@ -166,7 +168,7 @@ int main(int argc, char** argv) {
     for (const auto& record : records)
       if (record.phase == "authorization" && record.result == "allowed") admitted = record.id;
     assert(deniedAtDispatch(records, admitted, "rpc"));
-    assert(access->status().operationsDenied == 1);
+    assert(access->status().operationsDenied == deniedBeforeDispatch + 1);
   }
 
   Completion shuttingDown;

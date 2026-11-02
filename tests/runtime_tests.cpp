@@ -8,9 +8,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <vector>
 #include <sys/socket.h>
 
 using namespace redis_pvxs_ioc;
@@ -38,6 +41,198 @@ struct Completion {
     return changed.wait_for(lock, duration, [&] { return done; });
   }
 };
+
+void assertTimestamp(const pvxs::Value& value, int64_t seconds, int32_t nanoseconds) {
+  assert(value["timeStamp.secondsPastEpoch"].as<int64_t>() == seconds);
+  assert(value["timeStamp.nanoseconds"].as<int32_t>() == nanoseconds);
+  assert(value["timeStamp.userTag"].as<int32_t>() == 0);
+}
+
+void assertWaveform(const pvxs::Value& value, const std::vector<float>& expected) {
+  assert(value["value"].type().code == pvxs::TypeCode::Float32A);
+  const auto actual = value["value"].as<pvxs::shared_array<const float>>();
+  assert(actual.size() == expected.size());
+  assert(expected.empty() || std::memcmp(actual.data(), expected.data(), expected.size() * sizeof(float)) == 0);
+}
+
+RedisAdapter::Attrs waveformFields(const std::vector<float>& waveform,
+                                  const std::optional<std::string>& timestamp = {},
+                                  const std::optional<std::string>& valid = {}) {
+  std::string bytes(waveform.size() * sizeof(float), '\0');
+  if (!bytes.empty()) std::memcpy(bytes.data(), waveform.data(), bytes.size());
+  RedisAdapter::Attrs fields{{"_", std::move(bytes)}};
+  if (timestamp) fields["sample_time_ns"] = *timestamp;
+  if (valid) fields["sample_time_valid"] = *valid;
+  return fields;
+}
+
+void exerciseSourceTime(const ServerConfig& serverConfig, const RedisBackendRegistry& backends,
+                        uint16_t redisPort, pvxs::server::Server& server, pvxs::client::Context& client) {
+  sw::redis::ConnectionOptions connection;
+  connection.host = "127.0.0.1"; connection.port = redisPort;
+  sw::redis::Redis control(connection);
+  const auto send = [&](const std::string& key, const std::string& id, const RedisAdapter::Attrs& fields) {
+    assert(control.xadd("{runtime-tests}:" + key, id, fields.begin(), fields.end()) == id);
+  };
+  const std::vector<float> first{0.125f, -0.0f, 65536.5f, -12.25f};
+  const std::vector<float> second{-9.5f, 0.0f, 1.25f};
+  PVConfig config;
+  config.name = "source-time"; config.type = PrimitiveType::Float32; config.shape = Shape::Array;
+  config.read = {"default", "source-time"}; config.metadata.units = "mm";
+  config.sourceTime = {SourceTimeMode::UnixNanosecondsV1, "sample_time_ns", "sample_time_valid"};
+
+  // The transport cursor is deliberately unrelated to acquisition time and
+  // carries a sequence beyond exact double precision.
+  send(config.read.key, "10-9007199254740993", waveformFields(first, "1700000000123456789", "1"));
+  auto runtime = makeRuntime(serverConfig, config, backends, {}, 1);
+  runtime->activate(); server.addPV(runtime->fullName(), runtime->sharedPV());
+  eventually([&] { return runtime->sourceHealth()[0].ready; });
+  auto initial = client.get(runtime->fullName()).exec()->wait(3.);
+  assertWaveform(initial, first); assertTimestamp(initial, 1700000000, 123456789);
+  assert(initial["display.units"].as<std::string>() == "mm");
+  assert(initial["alarm.severity"].as<int>() == epicsSevNone);
+  auto health = runtime->sourceHealth()[0];
+  assert(health.sourceTimeMode == "unix-nanoseconds-v1" && health.sourceTimePresent && health.sourceTimeValid);
+  assert(health.sourceTimeError.empty() && health.lastValidCursor == "10-9007199254740993");
+  const auto epoch = health.reader.epoch;
+
+  pvxs::shared_array<float> attempted(second.begin(), second.end());
+  bool denied = false;
+  try { client.put(runtime->fullName()).set("value", attempted.freeze()).exec()->wait(3.); }
+  catch (const std::exception& error) { denied = std::string(error.what()).find("Read-only PV") != std::string::npos; }
+  assert(denied);
+  assertWaveform(runtime->sharedPV().fetch(), first);
+  assert(runtime->sourceHealth()[0].lastValidCursor == "10-9007199254740993");
+  assert(backends.at("default")->getStreamSnapshot(config.read.key).id == "10-9007199254740993");
+
+  const auto accepted = [&](const std::string& id, const RedisAdapter::Attrs& fields) {
+    send(config.read.key, id, fields);
+    eventually([&] { return runtime->sourceHealth()[0].lastValidCursor == id; });
+  };
+  // Epoch zero is supplied source time, not a request to stamp wall time.
+  accepted("11-9007199254740994", waveformFields(second, "0", "1"));
+  assertTimestamp(runtime->sharedPV().fetch(), 0, 0);
+  assert(runtime->sourceHealth()[0].sourceTimePresent && runtime->sourceHealth()[0].sourceTimeValid);
+  assert(runtime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevNone);
+  auto metadata = config; metadata.metadata.description = "epoch-zero metadata refresh";
+  runtime->reconfigure(metadata, 2);
+  assertTimestamp(runtime->sharedPV().fetch(), 0, 0);
+  assertWaveform(runtime->sharedPV().fetch(), second);
+
+  // Acquisition time may move backward, including before the Unix epoch,
+  // without rewinding the exact Redis cursor or changing the source epoch.
+  accepted("12-9007199254740995", waveformFields(first, "-1", "1"));
+  assertTimestamp(runtime->sharedPV().fetch(), -1, 999999999);
+  health = runtime->sourceHealth()[0];
+  assert(health.ready && health.sourceTimeValid && health.reader.epoch == epoch);
+  assert(health.lastValidCursor == "12-9007199254740995");
+
+  // Invalid or absent time still carries useful newly acquired waveform data.
+  accepted("13-0", waveformFields(second, "1700000000987654321", "0"));
+  auto value = runtime->sharedPV().fetch();
+  assertWaveform(value, second); assertTimestamp(value, 1700000000, 987654321);
+  assert(value["alarm.severity"].as<int>() == epicsSevInvalid && value["alarm.status"].as<int>() == epicsAlarmUDF);
+  health = runtime->sourceHealth()[0];
+  assert(health.ready && health.valid && health.fresh && health.sourceTimePresent && !health.sourceTimeValid);
+  assert(health.invalidSamples == 0 && !health.sourceTimeError.empty());
+  // Snapshot initialization applies the same timestamp-validity contract.
+  auto snapshotConfig = config; snapshotConfig.name = "flagged-time-snapshot";
+  auto flaggedSnapshot = makeRuntime(serverConfig, snapshotConfig, backends, {}, 1);
+  assertWaveform(flaggedSnapshot->sharedPV().fetch(), second);
+  assertTimestamp(flaggedSnapshot->sharedPV().fetch(), 1700000000, 987654321);
+  assert(flaggedSnapshot->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid);
+  flaggedSnapshot->deactivate("snapshot checked");
+
+  accepted("14-0", waveformFields(first, {}, "0"));
+  assertWaveform(runtime->sharedPV().fetch(), first); assertTimestamp(runtime->sharedPV().fetch(), 0, 0);
+  health = runtime->sourceHealth(SourceClock::now() + 24h)[0];
+  assert(health.ready && health.valid && !health.sourceTimePresent && !health.sourceTimeValid);
+  assert(health.invalidSamples == 0 && !health.sourceTimeError.empty());
+  snapshotConfig.name = "unknown-time-snapshot";
+  auto unknownSnapshot = makeRuntime(serverConfig, snapshotConfig, backends, {}, 1);
+  assertWaveform(unknownSnapshot->sharedPV().fetch(), first);
+  assertTimestamp(unknownSnapshot->sharedPV().fetch(), 0, 0);
+  assert(!unknownSnapshot->sourceHealth()[0].sourceTimePresent);
+  unknownSnapshot->deactivate("snapshot checked");
+
+  accepted("15-0", waveformFields(second, "1700000000000000007"));
+  assertTimestamp(runtime->sharedPV().fetch(), 1700000000, 7);
+  health = runtime->sourceHealth()[0];
+  assert(health.ready && health.sourceTimePresent && !health.sourceTimeValid && health.invalidSamples == 0);
+
+  // Malformed time rejects the whole entry and retains both the previous
+  // accepted data and exact timestamp until a later acceptable sample.
+  send(config.read.key, "16-0", waveformFields(first, "1e9", "1"));
+  eventually([&] { return runtime->sourceHealth()[0].invalidSamples == 1; });
+  health = runtime->sourceHealth()[0];
+  assert(!health.ready && !health.valid && health.lastValidCursor == "15-0");
+  assert(health.sourceTimePresent && !health.sourceTimeValid && !health.sourceTimeError.empty());
+  assertWaveform(runtime->sharedPV().fetch(), second); assertTimestamp(runtime->sharedPV().fetch(), 1700000000, 7);
+  accepted("17-0", waveformFields(first, "1700000000123456791", "1"));
+  assertTimestamp(runtime->sharedPV().fetch(), 1700000000, 123456791);
+  assert(runtime->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevNone);
+
+  auto badPayload = waveformFields(second, "1800000000000000000", "1"); badPayload["_"] = "x";
+  send(config.read.key, "18-0", badPayload);
+  eventually([&] { return runtime->sourceHealth()[0].invalidSamples == 2; });
+  assertWaveform(runtime->sharedPV().fetch(), first); assertTimestamp(runtime->sharedPV().fetch(), 1700000000, 123456791);
+  health = runtime->sourceHealth()[0];
+  assert(!health.ready && health.sourceTimePresent && health.sourceTimeValid); // Retained time quality is independent of payload rejection.
+  accepted("19-0", waveformFields(second));
+  assertTimestamp(runtime->sharedPV().fetch(), 0, 0);
+  assert(runtime->sourceHealth()[0].ready && !runtime->sourceHealth()[0].sourceTimePresent);
+
+  send(config.read.key, "20-0", waveformFields(first, "123", "true"));
+  eventually([&] { return runtime->sourceHealth()[0].invalidSamples == 3; });
+  assertWaveform(runtime->sharedPV().fetch(), second); assertTimestamp(runtime->sharedPV().fetch(), 0, 0);
+  assert(runtime->sourceHealth()[0].sourceTimeError.find("validity") != std::string::npos);
+  send(config.read.key, "21-0", waveformFields(first, {}, "1"));
+  eventually([&] { return runtime->sourceHealth()[0].invalidSamples == 4; });
+  assertWaveform(runtime->sharedPV().fetch(), second); assertTimestamp(runtime->sharedPV().fetch(), 0, 0);
+  accepted("22-0", waveformFields(first, "1700000000000000009", "1"));
+
+  // Staged metadata must refresh the newest accepted sample. Time-policy
+  // changes require runtime replacement and cannot mutate the active owner.
+  metadata.metadata.description = "staged before newest acquisition";
+  auto stagedMetadata = runtime->prepareReconfigure(metadata, 3);
+  accepted("23-0", waveformFields(second, "1700000000000000011", "1"));
+  stagedMetadata->commit(); stagedMetadata->refresh();
+  assertWaveform(runtime->sharedPV().fetch(), second); assertTimestamp(runtime->sharedPV().fetch(), 1700000000, 11);
+  auto unavailable = metadata; unavailable.sourceTime = {SourceTimeMode::Unavailable, {}, {}};
+  assert(!runtime->structurallyCompatible(unavailable));
+  bool reconfigureRejected = false;
+  try { runtime->prepareReconfigure(unavailable, 4); }
+  catch (const std::exception&) { reconfigureRejected = true; }
+  assert(reconfigureRejected);
+  auto stagedReplacement = makeRuntime(serverConfig, unavailable, backends, {}, 4);
+  assertWaveform(stagedReplacement->sharedPV().fetch(), second);
+  assertTimestamp(stagedReplacement->sharedPV().fetch(), 0, 0);
+  stagedReplacement->activate();
+  eventually([&] { return stagedReplacement->sourceHealth()[0].ready; });
+  const auto unavailableHealth = stagedReplacement->sourceHealth()[0];
+  assert(unavailableHealth.sourceTimeMode == "unavailable" && !unavailableHealth.sourceTimePresent && !unavailableHealth.sourceTimeValid);
+  assert(stagedReplacement->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid);
+  assertTimestamp(runtime->sharedPV().fetch(), 1700000000, 11);
+  stagedReplacement->deactivate("staging rejected");
+  accepted("24-0", waveformFields(first, "1700000000000000013", "1"));
+  assert(runtime->sourceHealth()[0].reader.epoch == epoch && runtime->sourceHealth()[0].sourceTimeValid);
+
+  // A malformed initial timestamp exposes invalid fallback with no fabricated
+  // source time. Later valid input recovers that same owned subscription.
+  auto malformedConfig = config; malformedConfig.name = "malformed-time-snapshot";
+  malformedConfig.read.key = malformedConfig.name; malformedConfig.initialValue = second;
+  send(malformedConfig.read.key, "1-0", waveformFields(first, "9223372036854775808", "1"));
+  auto malformed = makeRuntime(serverConfig, malformedConfig, backends, {}, 1);
+  assertWaveform(malformed->sharedPV().fetch(), second); assertTimestamp(malformed->sharedPV().fetch(), 0, 0);
+  assert(malformed->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid);
+  assert(!malformed->sourceHealth()[0].sourceTimePresent && !malformed->sourceHealth()[0].sourceTimeError.empty());
+  malformed->activate();
+  send(malformedConfig.read.key, "2-0", waveformFields(first, "1700000000000000015", "1"));
+  eventually([&] { return malformed->sourceHealth()[0].ready; });
+  assertWaveform(malformed->sharedPV().fetch(), first); assertTimestamp(malformed->sharedPV().fetch(), 1700000000, 15);
+  malformed->deactivate("done");
+  server.removePV(runtime->fullName()); runtime->deactivate("done");
+}
 
 int main() {
   auto server = pvxs::server::Config::isolated(AF_INET).build();
@@ -77,11 +272,14 @@ int main() {
   });
   // A pending confirmation must not block unrelated PVA operations.
   assert(client.get("TEST:value").exec()->wait(.5)["value"].as<double>() == 0.);
-  assert(producer.addSingleDouble("readback", 123.).ok());
+  const auto readbackTime = producer.addSingleDouble("readback", 123.); assert(readbackTime.ok());
   eventually([&] { return runtime->sharedPV().fetch()["value"].as<double>() == 123.; });
   assert(!completion.waitFor(100ms));
   assert(producer.addSingleDouble("ack", 123.).ok());
   assert(completion.waitFor(3s) && completion.error.empty());
+  assertTimestamp(runtime->sharedPV().fetch(), readbackTime.value / 1000000000, readbackTime.value % 1000000000);
+  assert(runtime->sourceHealth()[0].sourceTimeMode == "legacy-redis-id");
+  assert(runtime->sourceHealth()[0].sourceTimeValid && runtime->sourceHealth()[1].sourceTimeValid);
 
   // The second subscriber runs after the runtime's confirmation subscriber.
   std::mutex ackMutex;
@@ -201,7 +399,9 @@ int main() {
   assert(missing->sharedPV().fetch()["alarm.severity"].as<int>() == epicsSevInvalid);
   assert(missing->sharedPV().fetch()["timeStamp.secondsPastEpoch"].as<int64_t>() == 0);
 
+  exerciseSourceTime(serverConfig, backends, options.cxn.port, server, client);
+
   missing->deactivate("done"); empty->deactivate("done"); gap->deactivate("done");
   client.close(); server.stop(); replacement->deactivate("done");
-  std::cout << "runtime read/confirm isolation, replacement, invalid input and snapshot tests passed\n";
+  std::cout << "runtime read/confirm isolation, source-time policy, exact waveform/time and snapshot tests passed\n";
 }

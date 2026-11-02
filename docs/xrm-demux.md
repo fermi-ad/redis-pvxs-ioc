@@ -9,13 +9,18 @@ output and checkpoint keys are written. Without this option, no Redis worker
 or Redis connection is created.
 
 The supported input is one complete pulse per Redis entry, containing aligned
-sample-major signed little-endian int16 ADC words. It is not a TCP framing or
-SPAD decoder. Configure the actual producer's channel order, pulse length,
+sample-major signed little-endian int16 ADC words. TCP framing and ES/SPAD
+layouts are unsupported. Configure the actual producer's channel order, pulse length,
 calibration and timestamp fields before enabling it. Source declarations are
 an operator contract: same-sized SPAD bytes falsely declared as ADC cannot be
 identified from their binary values. Unknown fields, mixed layouts, int32 data,
 missing or incorrectly sized pulses are rejected. Do not infer a format from
 an apparent 32-channel payload.
+
+PM STOP freezes history; it does not stop capture. A provisioned 4 MHz setting
+does not guarantee Ethernet throughput for the selected channel count and
+format. Verify the producer's actual output rate and sustained transport
+capacity before sizing this pipeline.
 
 ## Configuration
 
@@ -122,6 +127,27 @@ per output. Retention limits are not deletions of the stream key. No receipt
 timestamp is placed in the acquisition fields. A downstream IOC must honor
 `acquisition_time_valid` and the timestamp's presence rather than treating a
 Redis-generated ID as acquisition time.
+
+`redis-pvxs-ioc` provides that adapter for ordinary read-only numeric arrays via
+the opt-in policy below. Configure each raw output as int16 and each volts
+output as float32, on a little-endian IOC host, and resolve its read route to
+the exact output key:
+
+```yaml
+source_time:
+  mode: unix-nanoseconds-v1
+  field: acquisition_time_ns
+  valid_field: acquisition_time_valid
+```
+
+See [source time policy](configuration.md#source-time-policy) for a complete PV
+example. The IOC preserves exact signed acquisition nanoseconds, including zero
+and backward time. A payload with unknown or invalid acquisition time updates
+with an INVALID alarm; absent time publishes zero rather than a fabricated
+timestamp. Malformed timing retains the last accepted waveform and time. The
+default legacy Redis-ID timestamp mode is unchanged and must be explicitly
+replaced for these outputs. Native PVA forwarding and NTNDArray use their own
+timestamp contracts.
 
 The checkpoint is a per-source Redis hash. It binds the input interpretation
 and output keys to a deterministic configuration fingerprint, then stores

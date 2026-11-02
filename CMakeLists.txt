@@ -173,6 +173,7 @@ endif()
 
 add_library(redis-pvxs-ioc-core STATIC
   src/source_health.cpp
+  src/source_time.cpp
   src/access_control.cpp
   src/config.cpp
   src/secrets.cpp
@@ -499,6 +500,12 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_link_libraries(config_tests PRIVATE redis-pvxs-ioc-core)
   target_compile_options(config_tests PRIVATE -UNDEBUG)
   add_test(NAME config_tests COMMAND config_tests)
+
+  add_executable(source_time_tests tests/source_time_tests.cpp)
+  target_link_libraries(source_time_tests PRIVATE redis-pvxs-ioc-core)
+  target_compile_options(source_time_tests PRIVATE -UNDEBUG)
+  add_test(NAME source_time_tests COMMAND source_time_tests)
+  set_tests_properties(source_time_tests PROPERTIES TIMEOUT 15)
 
   add_executable(access_control_tests tests/access_control_tests.cpp)
   target_link_libraries(access_control_tests PRIVATE redis-pvxs-ioc-core)

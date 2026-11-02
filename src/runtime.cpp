@@ -23,6 +23,7 @@
 #include "redis_pvxs_ioc/access_control.h"
 #include "redis_pvxs_ioc/queued_exec.h"
 #include "redis_pvxs_ioc/ntndarray.h"
+#include "redis_pvxs_ioc/source_time.h"
 #include "redis_pvxs_ioc/util.h"
 
 namespace redis_pvxs_ioc {
@@ -164,6 +165,11 @@ public:
     std::lock_guard<std::mutex> guard(mutex_);
     auto status = assessSource(sample_, reader_.status(), config_, fullName_, config_.read,
                                "read", alive_ && committed_, probeMs_, now);
+    // NTNDArray keeps its existing envelope contract: dataTimeStamp is encoded
+    // in the stream ID, independently of the ordinary value source_time policy.
+    status.sourceTimeMode = "ntndarray-v1";
+    status.sourceTimePresent = status.sourceTimeValid = haveGoodFrame_;
+    if (!haveGoodFrame_) status.sourceTimeError = "No accepted frame timestamp";
     if (alive_ && committed_ && status.error != healthError_) {
       healthError_ = status.error;
       currentAlarm_ = status.ready ? AlarmState{epicsSevNone, epicsAlarmNone, ""}
@@ -278,7 +284,7 @@ public:
                std::shared_ptr<AlarmPublisher> alarmPublisher, uint64_t generation,
                std::shared_ptr<OperationQueue> operations, OperationLimitsConfig limits,
                uint32_t readProbeMs, uint32_t confirmProbeMs)
-      : config_(std::move(config)), readRedis_(std::move(readRedis)),
+      : config_(std::move(config)), sourceTimePolicy_(config_.sourceTime), readRedis_(std::move(readRedis)),
         writeRedis_(std::move(writeRedis)), confirmRedis_(std::move(confirmRedis)),
         alarmPublisher_(std::move(alarmPublisher)), fullName_(fullPVName(serverConfig, config_)),
         generation_(generation), operations_(std::move(operations)), limits_(limits),
@@ -294,14 +300,24 @@ public:
     const auto snapshot = readRedis_->getStreamSnapshot(config_.read.key);
     readCursor_ = snapshot.id;
     ValueType decoded{};
-    if (snapshot.present() && decode(snapshot.fields, decoded) && RA_Time(snapshot.id).ok()) {
-      lastRaw_ = std::move(decoded);
-      lastTimestampNs_ = static_cast<uint64_t>(RA_Time(snapshot.id).value);
-      sourceValid_ = true;
-      readSample_.accept(snapshot.id, 1);
+    if (snapshot.present()) {
+      bool payloadDecoded = false;
+      try {
+        if (!decode(snapshot.fields, decoded)) throw std::invalid_argument("Invalid Redis snapshot payload");
+        payloadDecoded = true;
+        const auto sourceTime = decodeSourceTime(sourceTimePolicy_, snapshot.fields, snapshot.id);
+        lastRaw_ = std::move(decoded);
+        acceptSourceTime(sourceTime);
+        sourceValid_ = true;
+        readSample_.accept(snapshot.id, 1);
+      } catch (const std::exception& error) {
+        sourceError_ = std::string(error.what()).substr(0, 512);
+        readSample_.reject(sourceError_);
+        // A rejected snapshot never supplies a value or timestamp fallback.
+        if (payloadDecoded) sourceTimeError_ = sourceError_;
+      }
     } else {
-      sourceError_ = snapshot.present() ? "Invalid Redis snapshot" : "No source data; using initial fallback";
-      if (snapshot.present()) readSample_.reject(sourceError_);
+      sourceError_ = "No source data; using initial fallback";
     }
     auto initial = createInitialValue(config_);
     const auto initialAlarm = populateValue(initial);
@@ -441,6 +457,10 @@ public:
     const bool sameConfirmation = config_.confirm && sameRouteTarget(config_.read, *config_.confirm);
     auto read = assessSource(readSample_, readReader_.status(), config_, fullName_, config_.read,
         sameConfirmation ? "read-confirm" : "read", alive_ && committed_, readProbeMs_, now);
+    read.sourceTimeMode = sourceTimeModeName(config_.sourceTime.mode);
+    read.sourceTimePresent = lastTimestampNs_.has_value();
+    read.sourceTimeValid = sourceTimeValid_;
+    read.sourceTimeError = sourceTimeError_;
     std::vector<SourceStatus> result;
     const auto confirmationEpoch = sameConfirmation ? read.reader.epoch : confirmReader_.status().epoch;
     if (alive_ && committed_) {
@@ -462,8 +482,14 @@ public:
     result.push_back(std::move(read));
     if (config_.confirm && !sameConfirmation) {
       const RouteConfig route{config_.confirm->backend, config_.confirm->key};
-      result.push_back(assessSource(confirmSample_, confirmReader_.status(), config_, fullName_, route,
-          "confirm", alive_ && committed_, confirmProbeMs_, now));
+      auto confirm = assessSource(confirmSample_, confirmReader_.status(), config_, fullName_, route,
+          "confirm", alive_ && committed_, confirmProbeMs_, now);
+      // Writable routes retain the existing legacy Redis-ID contract. A
+      // confirmation timestamp is not the readback's acquisition timestamp.
+      confirm.sourceTimeMode = sourceTimeModeName(SourceTimeMode::LegacyRedisId);
+      confirm.sourceTimePresent = confirm.sourceTimeValid = !confirmSample_.cursor.empty();
+      if (!confirm.sourceTimePresent) confirm.sourceTimeError = "No accepted confirmation timestamp";
+      result.push_back(std::move(confirm));
     }
     return result;
   }
@@ -499,20 +525,26 @@ private:
     else return RedisAdapter::decodeScalar(fields, raw, limits_.maxPayloadBytes);
   }
 
+  void acceptSourceTime(const DecodedSourceTime& timestamp) {
+    lastTimestampNs_ = timestamp.nanoseconds;
+    sourceTimeValid_ = timestamp.valid;
+    if (timestamp.valid) sourceTimeError_.clear();
+    else if (sourceTimePolicy_.mode == SourceTimeMode::Unavailable)
+      sourceTimeError_ = "Source time unavailable by policy";
+    else if (timestamp.nanoseconds) sourceTimeError_ = "Source acquisition time is not marked valid";
+    else sourceTimeError_ = "Source acquisition time is unavailable";
+  }
+
   AlarmState populateValue(pvxs::Value& value, const PVConfig& config) {
     const auto present = applyForwardTransform(config, lastRaw_);
     if constexpr (Array) assignArrayValue(value, present);
     else assignScalarValue(value, present);
     applyStandardMetadata(value, config);
-    if (lastTimestampNs_) applyTimestamp(value, lastTimestampNs_);
-    else {
-      value["timeStamp.secondsPastEpoch"] = static_cast<int64_t>(0);
-      value["timeStamp.nanoseconds"] = static_cast<int32_t>(0);
-      value["timeStamp.userTag"] = static_cast<int32_t>(0);
-    }
+    applySourceTimestamp(value, lastTimestampNs_);
     AlarmState state{epicsSevNone, epicsAlarmNone, ""};
     if (!healthError_.empty()) state = {epicsSevInvalid, epicsAlarmUDF, healthError_};
     else if (!sourceValid_) state = {epicsSevInvalid, epicsAlarmUDF, sourceError_};
+    else if (!sourceTimeValid_) state = {epicsSevInvalid, epicsAlarmUDF, sourceTimeError_};
     else if constexpr (!Array && std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
       const int prior = value["alarm.status"].as<int>();
       state = evaluateNumericAlarm(config, static_cast<double>(present), prior);
@@ -537,12 +569,20 @@ private:
     for (const auto& entry : data) {
       if (!alive_) return;
       ValueType raw{};
-      const auto timestamp = RA_Time(entry.first);
-      if (!decode(entry.second, raw) || !timestamp.ok()) {
-        if (!markInvalid("Invalid Redis payload or source timestamp", updateValue, metadata.epoch)) return;
+      if (!decode(entry.second, raw)) {
+        if (!markInvalid("Invalid Redis payload", updateValue, metadata.epoch)) return;
         continue;
       }
-      if (!handleRawUpdate(raw, static_cast<uint64_t>(timestamp.value), updateValue, canConfirm, entry.first, &metadata)) return;
+      DecodedSourceTime timestamp;
+      try {
+        // Distinct confirmation routes remain legacy-only, and never mutate
+        // the readback value or its independently decoded acquisition time.
+        timestamp = decodeSourceTime(updateValue ? sourceTimePolicy_ : SourceTimeConfig{}, entry.second, entry.first);
+      } catch (const std::exception& error) {
+        if (!markInvalid(std::string(error.what()).substr(0, 512), updateValue, metadata.epoch, true)) return;
+        continue;
+      }
+      if (!handleRawUpdate(raw, timestamp, updateValue, canConfirm, entry.first, &metadata)) return;
     }
   }
 
@@ -555,7 +595,7 @@ private:
     ++(read ? readSample_ : confirmSample_).staleCallbacks; return false;
   }
 
-  bool markInvalid(const std::string& error, bool updateValue, uint64_t epoch) {
+  bool markInvalid(const std::string& error, bool updateValue, uint64_t epoch, bool invalidTime = false) {
     AlarmState state;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -564,6 +604,10 @@ private:
       if (!updateValue) return true;
       sourceValid_ = false;
       sourceError_ = error;
+      if (invalidTime) {
+        sourceTimeValid_ = false;
+        sourceTimeError_ = error;
+      }
       healthError_.clear();
       auto value = pv_.fetch();
       state = populateValue(value);
@@ -573,7 +617,7 @@ private:
     return true;
   }
 
-  bool handleRawUpdate(const ValueType& raw, uint64_t timestamp, bool updateValue,
+  bool handleRawUpdate(const ValueType& raw, const DecodedSourceTime& timestamp, bool updateValue,
                        bool canConfirm = false, const std::string& streamId = {},
                        const RedisAdapter::StreamBatchMetadata* metadata = nullptr) {
     AlarmState state;
@@ -604,7 +648,7 @@ private:
       }
       if (!updateValue) return true;
       lastRaw_ = raw;
-      lastTimestampNs_ = timestamp;
+      acceptSourceTime(timestamp);
       sourceValid_ = true;
       sourceError_.clear();
       if (epoch) healthError_ = batchHealthError(current, *metadata);
@@ -721,7 +765,7 @@ private:
     if (!pending) {
       if (request->stopped()) return;
       if (sameRouteTarget(current.read, *current.write))
-        handleRawUpdate(raw, static_cast<uint64_t>(writeTime.value), true);
+        handleRawUpdate(raw, DecodedSourceTime{writeTime.value, true}, true);
       if (OperationQueue::Clock::now() >= deadline)
         request->error("total operation deadline exceeded after dispatch; not retried");
       else request->reply();
@@ -761,6 +805,7 @@ private:
 
   mutable std::mutex mutex_;
   PVConfig config_;
+  const SourceTimeConfig sourceTimePolicy_;
   std::shared_ptr<RedisAdapter> readRedis_, writeRedis_, confirmRedis_;
   std::shared_ptr<AlarmPublisher> alarmPublisher_;
   std::shared_ptr<AlarmPublisher::Registration> alarmRegistration_;
@@ -779,7 +824,9 @@ private:
   std::string healthError_;
   std::string readCursor_;
   ValueType lastRaw_{};
-  uint64_t lastTimestampNs_ = 0;
+  std::optional<int64_t> lastTimestampNs_;
+  bool sourceTimeValid_ = false;
+  std::string sourceTimeError_ = "No accepted source timestamp";
   bool sourceValid_ = false;
   std::string sourceError_;
   uint64_t nextPendingId_ = 0;

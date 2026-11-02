@@ -13,6 +13,8 @@ using SourceClock = std::chrono::steady_clock;
 
 struct SourceStatus {
   std::string pv, backend, key, role, state, error, inspection;
+  std::string sourceTimeMode, sourceTimeError;
+  bool sourceTimePresent = false, sourceTimeValid = false;
   bool required = true, valid = false, fresh = false, stale = false, ready = false;
   uint32_t staleAfterMs = 0, readerProbeMs = 0;
   int64_t lastValidAgeMs = -1;

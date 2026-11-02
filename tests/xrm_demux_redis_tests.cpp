@@ -607,6 +607,71 @@ sources:
     eventually([&] { return redis.field(leased.checkpoint,"last_id") == "6-0"; });
     assert(redis.field(leased.checkpoint,"processed") == "1"); second.stop();
   }
+  // A current lane blocked in long gain-lease retry must not hold raw input
+  // behind it. Existing bounded VOLTS streams carry the handoff; degraded
+  // status remains visible while the independent raw lane makes progress.
+  const auto lanesConfig = parseConfig("schema_version: 1\nredis: {host: 127.0.0.1, port: " + std::to_string(port) + R"YAML(, command_timeout_ms: 100, poll_interval_ms: 5, retry_ms: 30000}
+sources:
+ - stream: xrm-lanes-test:input
+   checkpoint: xrm-lanes-test:raw-checkpoint
+   format: int16-le
+   layout: sample-major
+   samples_per_channel: 2
+   start_id: '0-0'
+   retention: 10
+   timestamp: {mode: absent}
+   channels:
+    - {channel: 1, raw: xrm-lanes-test:counts, volts: xrm-lanes-test:volts, eslo: 0.5, eoff: 1}
+current_conversions:
+ - stream: xrm-lanes-test:volts
+   output: xrm-lanes-test:mamps
+   checkpoint: xrm-lanes-test:current-checkpoint
+   samples_per_pulse: 2
+   start_id: '0-0'
+   retention: 10
+   timestamp: {mode: absent}
+   gain: {setting: xrm-lanes-test:S, applied: xrm-lanes-test:R, bootstrap: 2.5}
+)YAML");
+  const auto laneRaw = lanesConfig.sources.front();
+  const auto laneCurrent = lanesConfig.currentConversions.front();
+  const auto laneTime = redis.command({"TIME"});
+  const auto laneServerMs = std::stoull(std::string(laneTime->element[0]->str,laneTime->element[0]->len))*1000 +
+    std::stoull(std::string(laneTime->element[1]->str,laneTime->element[1]->len))/1000;
+  redis.command({"HSET",laneCurrent.checkpoint,"config",laneCurrent.fingerprint,"source_stream",laneCurrent.stream,
+    "last_id","0-0","processed","0","rejected","0","gaps","0","gain_setting",laneCurrent.setting,"gain_applied",laneCurrent.applied,
+    "writer_token","fixture-held","writer_until_ms",std::to_string(laneServerMs+60000)});
+  const std::string lanePulse("\x01\x00\xff\xff",4);
+  {
+    Worker worker(lanesConfig); worker.start();
+    eventually([&] { return worker.status().failures > 0; });
+    for (unsigned id=1;id<=5;++id) redis.command({"XADD",laneRaw.stream,std::to_string(id)+"-0","_",lanePulse});
+    eventually([&] { return redis.field(laneRaw.checkpoint,"last_id") == "5-0"; });
+    assert(redis.field(laneCurrent.checkpoint,"last_id") == "0-0");
+    auto status = worker.status();
+    assert(status.running && status.processed == 5 && status.state == "retrying");
+    assert(status.error.find("writer lease") != std::string::npos);
+    bool duplicateStart = false;
+    try { worker.start(); } catch (const std::exception&) { duplicateStart = true; }
+    assert(duplicateStart);
+    redis.command({"XADD",laneRaw.stream,"6-0","_",lanePulse});
+    eventually([&] { return redis.field(laneRaw.checkpoint,"last_id") == "6-0"; });
+    const auto stopped = std::chrono::steady_clock::now(); worker.stop();
+    assert(std::chrono::steady_clock::now()-stopped < 1s);
+    assert(!worker.status().running && worker.status().state == "stopped");
+    assert(redis.field(laneCurrent.checkpoint,"writer_token") == "fixture-held");
+  }
+  redis.command({"HSET",laneCurrent.checkpoint,"writer_until_ms","0"});
+  {
+    Worker worker(lanesConfig); worker.start();
+    redis.command({"XADD",laneRaw.stream,"7-0","_",lanePulse});
+    eventually([&] { return redis.field(laneCurrent.checkpoint,"last_id") == "7-0"; });
+    assert(redis.row(laneCurrent.output,"7-0").at("_") == f32(3.75f)+f32(1.25f));
+    assert(redis.field(laneRaw.checkpoint,"processed") == "7");
+    assert(redis.field(laneCurrent.checkpoint,"processed") == "7");
+    worker.stop();
+    assert(!worker.status().running);
+    assert(redis.field(laneCurrent.checkpoint,"writer_until_ms") == "0");
+  }
   // Sixteen selected channels share one canonical command/ack coordinator.
   // One MiB of source data exercises the observed 16,384-sample profile at
   // low fixture cost and verifies all worker states before readback appears.

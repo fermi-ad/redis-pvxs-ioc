@@ -16,6 +16,14 @@ the existing sidecar binary and image; it introduces no Python service or
 hardware connection. Conversion-only operation can consume existing VOLTS
 streams while a separately managed raw capture and ADC processor continue.
 
+When a profile contains both raw sources and current conversions, raw ingestion
+and current conversion run in separate execution lanes and Redis connections.
+The configured VOLTS streams provide their existing bounded buffer; no in-memory
+queue is added. All current channels stay together for shared-gain ordering and
+lease fencing. A conversion retry does not stop raw ingestion, and aggregate
+status retains the degraded lane's error. Source-only and conversion-only
+profiles each use one lane.
+
 The default `int16-le` input is one complete pulse per Redis entry, containing
 aligned sample-major signed little-endian int16 ADC words and no event header.
 The separately selected `acq4xx-es-int16-le` profile validates and removes one
@@ -350,7 +358,7 @@ Configuration is limited to 1 MiB, 32 raw sources, 32 current conversions,
 profile requires exactly sixteen channels and includes its header in that
 byte bound. Each source is polled once per round with
 `XRANGE COUNT 1`; server-side validation limits the returned payload and
-metadata. The worker holds only one pulse and its fanout at a time; each source
+metadata. Each execution lane holds one pulse and its fanout at a time; each source
 checkpoint additionally retains at most one pending pulse in Redis. A producer
 can still impose server-side cost by writing enormous Redis records; size
 limits prevent returning those records to this client, not their original

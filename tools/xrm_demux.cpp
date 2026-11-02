@@ -778,7 +778,8 @@ Record convertCurrent(const CurrentConversion& source, const std::string& source
   return record;
 }
 
-struct Worker::Impl {
+namespace {
+struct WorkerLane {
   Config config;
   mutable std::mutex mutex;
   std::condition_variable wake;
@@ -787,7 +788,7 @@ struct Worker::Impl {
   Status status;
   std::string writerToken;
   unsigned leaseMs = 0;
-  explicit Impl(Config value) : config(std::move(value)) {
+  explicit WorkerLane(Config value) : config(std::move(value)) {
     // Conversion channels are independent. A shared acquisition order avoids
     // opposite YAML order retaining incompatible prefixes of writer leases.
     // Never sort raw source channels: their order is the ADC wire contract.
@@ -805,6 +806,15 @@ struct Worker::Impl {
     std::lock_guard<std::mutex> lock(mutex);
     status.state = state; status.error = error.substr(0, 512);
   }
+  void start() {
+    std::lock_guard<std::mutex> lock(mutex);
+    stopping = false; status.running = true; status.state = "starting";
+    try { thread = std::thread([this] { run(); }); }
+    catch (...) { status.running = false; status.state = "stopped"; throw; }
+  }
+  void requestStop() noexcept { stopping = true; wake.notify_all(); }
+  void join() { if (thread.joinable()) thread.join(); }
+  Status snapshot() const { std::lock_guard<std::mutex> lock(mutex); return status; }
   Context connect(bool releasing = false) {
     const auto timeoutMs = releasing ? std::min(config.connectTimeoutMs,100u) : config.connectTimeoutMs;
     const timeval connection{static_cast<time_t>(timeoutMs / 1000), static_cast<suseconds_t>((timeoutMs % 1000) * 1000)};
@@ -1044,22 +1054,72 @@ struct Worker::Impl {
     status.running = false; status.state = "stopped";
   }
 };
+} // namespace
 
-Worker::Worker(Config config) : impl_(new Impl(std::move(config))) {
-  require(!impl_->config.sources.empty() || !impl_->config.currentConversions.empty(), "demux worker requires validated sources or current conversions");
-}
+struct Worker::Impl {
+  std::vector<std::unique_ptr<WorkerLane>> lanes;
+  std::mutex lifecycle;
+  explicit Impl(Config config) {
+    require(!config.sources.empty() || !config.currentConversions.empty(), "demux worker requires validated sources or current conversions");
+    if (!config.sources.empty() && !config.currentConversions.empty()) {
+      // Redis VOLTS streams are the existing bounded handoff. Raw ingestion
+      // must not wait for downstream conversions or their gain-lease retries.
+      auto raw = config;
+      raw.currentConversions.clear();
+      config.sources.clear();
+      lanes.push_back(std::make_unique<WorkerLane>(std::move(raw)));
+    }
+    lanes.push_back(std::make_unique<WorkerLane>(std::move(config)));
+  }
+  void start() {
+    std::lock_guard<std::mutex> lock(lifecycle);
+    // Reject a duplicate start before affecting any already-running lane.
+    for (const auto& lane : lanes) require(!lane->thread.joinable(), "demux worker already started");
+    try { for (const auto& lane : lanes) lane->start(); }
+    catch (...) {
+      for (const auto& lane : lanes) lane->requestStop();
+      for (const auto& lane : lanes) lane->join();
+      throw;
+    }
+  }
+  void stop() noexcept {
+    std::lock_guard<std::mutex> lock(lifecycle);
+    // Wake every lane before joining one, including downstream retry backoff.
+    for (const auto& lane : lanes) lane->requestStop();
+    for (const auto& lane : lanes) lane->join();
+  }
+  Status snapshot() const {
+    if (lanes.size() == 1) return lanes.front()->snapshot();
+    const auto priority = [](const Status& value) {
+      if (!value.running) return 0;
+      if (value.state == "retrying") return 90;
+      if (value.state == "rejected-gain") return 80;
+      if (value.state == "rejected-input") return 70;
+      if (value.state == "continuity-unknown") return 60;
+      if (value.state == "connecting") return 50;
+      if (value.state == "starting") return 40;
+      return value.error.empty() ? 10 : 85;
+    };
+    Status result;
+    int worst = -1;
+    for (const auto& lane : lanes) {
+      const auto value = lane->snapshot();
+      result.running |= value.running;
+      result.processed += value.processed; result.rejected += value.rejected;
+      result.failures += value.failures; result.gaps += value.gaps;
+      const auto rank = priority(value);
+      if (rank > worst || (rank == worst && result.error.empty() && !value.error.empty())) {
+        worst = rank; result.state = value.state; result.error = value.error;
+      }
+    }
+    return result;
+  }
+};
+
+Worker::Worker(Config config) : impl_(new Impl(std::move(config))) {}
 Worker::~Worker() { stop(); }
-void Worker::start() {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  require(!impl_->thread.joinable(), "demux worker already started");
-  impl_->stopping = false; impl_->status.running = true; impl_->status.state = "starting";
-  try { impl_->thread = std::thread([this] { impl_->run(); }); }
-  catch (...) { impl_->status.running = false; impl_->status.state = "stopped"; throw; }
-}
-void Worker::stop() noexcept {
-  impl_->stopping = true; impl_->wake.notify_all();
-  if (impl_->thread.joinable()) impl_->thread.join();
-}
-Status Worker::status() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->status; }
+void Worker::start() { impl_->start(); }
+void Worker::stop() noexcept { impl_->stop(); }
+Status Worker::status() const { return impl_->snapshot(); }
 
 } // namespace xrm_demux

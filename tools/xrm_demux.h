@@ -20,6 +20,12 @@ struct Source {
   size_t samplesPerChannel = 0, retention = 0;
   std::vector<Channel> channels;
   std::string fingerprint;
+  std::string format = "int16-le";
+  size_t inputRetention = 0;
+};
+struct CurrentConversion : Source {
+  std::string output, setting, applied;
+  float bootstrap = 2.5f;
 };
 struct Config {
   std::string host = "127.0.0.1";
@@ -27,6 +33,7 @@ struct Config {
   unsigned connectTimeoutMs = 200, commandTimeoutMs = 500;
   unsigned pollIntervalMs = 100, retryMs = 1000;
   std::vector<Source> sources;
+  std::vector<CurrentConversion> currentConversions;
 };
 struct Status {
   bool running = false;
@@ -44,6 +51,11 @@ Config loadConfig(const std::string& path);
 std::vector<Record> decode(const Source&, const std::string& sourceId,
                            const std::string& payload, const std::string& timestamp,
                            const std::string& timestampValid, bool continuityUnknown = false);
+Record convertCurrent(const CurrentConversion&, const std::string& sourceId,
+                      const std::string& payload, const std::string& timestamp,
+                      const std::string& timestampValid, float gain,
+                      const std::string& gainCommandId, bool continuityUnknown = false,
+                      const std::map<std::string,std::string>& provenance = {});
 
 class Worker {
  public:

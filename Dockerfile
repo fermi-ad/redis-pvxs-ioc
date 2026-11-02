@@ -15,8 +15,6 @@ COPY packaging/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
 FROM pinned-base AS dependencies
 
 ARG REDIS_PVXS_IOC_VERSION=dev
-ARG REDIS_PVXS_IOC_REVISION=unknown
-ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
 
 RUN apt-get update --error-on=any && apt-get install -y --no-install-recommends \
     build-essential \
@@ -63,6 +61,8 @@ RUN make -C third_party/pvxs/bundle libevent
 RUN make -C third_party/pvxs configure.install setup.install src.install tools.install -j"$(nproc)"
 
 FROM dependencies AS builder
+
+ARG REDIS_PVXS_IOC_REVISION=unknown
 
 # Now the IOC sources (this COPY merges over third_party without disturbing the
 # built artifacts created by the RUN layers above).

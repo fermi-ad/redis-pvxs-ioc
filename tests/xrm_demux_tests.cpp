@@ -26,6 +26,19 @@ sources:
       - {channel: 5, raw: 'test:ch5:raw', volts: 'test:ch5:volts', eslo: 0.5, eoff: 1}
       - {channel: 8, raw: 'test:ch8:raw', volts: 'test:ch8:volts', eslo: 2, eoff: -1}
 )YAML";
+static const std::string currentConfiguration = R"YAML(
+schema_version: 1
+redis: {host: 127.0.0.1}
+current_conversions:
+  - stream: '{XRM}:test-CH1-VOLTS'
+    output: '{XRM}:test-CH1-MAMPS'
+    checkpoint: '{XRM}:test-current-checkpoint'
+    samples_per_pulse: 4
+    start_id: '123-4'
+    retention: 1000
+    timestamp: {mode: absent}
+    gain: {setting: '{XRM}:test-BCM_M_S', applied: '{XRM}:test-BCM_M_R', bootstrap: 2.5}
+)YAML";
 
 void rejects(const std::function<void()>& operation) {
   bool rejected = false;
@@ -115,5 +128,45 @@ int main() {
   bindingB = replace(bindingB, "test:ch5:raw", "abc");
   bindingB = replace(bindingB, "test:ch5:volts", std::string(17,'q') + "6:zzzzzz");
   assert(parseConfig(bindingA).sources[0].fingerprint != parseConfig(bindingB).sources[0].fingerprint);
+  const auto currentConfig = parseConfig(currentConfiguration);
+  assert(currentConfig.sources.empty() && currentConfig.currentConversions.size() == 1);
+  const auto& current = currentConfig.currentConversions.front();
+  assert(current.samplesPerChannel == 4 && current.startId == "123-4");
+  // Literal little-endian IEEE754 fixtures: 1, -2, 0.1f, -0.0f.
+  const std::string volts("\x00\x00\x80\x3f\x00\x00\x00\xc0\xcd\xcc\xcc\x3d\x00\x00\x00\x80",16);
+  const auto amps = convertCurrent(current,"124-0",volts,"","",2.5f,"100-0");
+  assert(amps.fields.at("_") == std::string("\x00\x00\x20\x40\x00\x00\xa0\xc0\x00\x00\x80\x3e\x00\x00\x00\x80",16));
+  assert(amps.fields.at("gain") == std::string("\x00\x00\x20\x40",4));
+  assert(amps.fields.at("source_id") == "124-0" && amps.fields.at("gain_command_id") == "100-0");
+  assert(amps.fields.at("acquisition_time_valid") == "0" && !amps.fields.count("acquisition_time_ns"));
+  auto timedCurrent = current; timedCurrent.timestampMode = "unix-nanoseconds";
+  const auto exactCurrent = convertCurrent(timedCurrent,"125-0",volts,"-9223372036854775808","0",-2.0f,"101-0",true);
+  assert(exactCurrent.fields.at("acquisition_time_ns") == "-9223372036854775808");
+  assert(exactCurrent.fields.at("acquisition_time_valid") == "0" && exactCurrent.fields.at("source_continuity") == "unknown");
+  assert(convertCurrent(timedCurrent,"126-0",volts,"9223372036854775807","1",0.0f,"102-0").fields.at("acquisition_time_valid") == "1");
+  const auto provenanceCurrent = convertCurrent(current,"124-0",volts,"","",2.5f,"100-0",false,
+    {{"source_stream","original:raw"},{"source_id","124-0"},{"channel","16"},{"event_counter_0","4294967295"},{"event_counter_1","0"}});
+  assert(provenanceCurrent.fields.at("upstream_source_stream") == "original:raw");
+  assert(provenanceCurrent.fields.at("event_counter_0") == "4294967295");
+  rejects([&] { convertCurrent(current,"124-0",volts,"","",2.5f,"100-0",false,{{"event_counter_0","4294967296"}}); });
+  rejects([&] { convertCurrent(current,"124-0",volts,"","",2.5f,"100-0",false,{{"event_counter_0","-1"}}); });
+  rejects([&] { convertCurrent(current,"124-0",volts.substr(1),"","",2.5f,"100-0"); });
+  rejects([&] { convertCurrent(current,"124-0",volts+volts,"","",2.5f,"100-0"); });
+  rejects([&] { convertCurrent(current,"124-0",volts,"","",std::numeric_limits<float>::infinity(),"100-0"); });
+  rejects([&] { convertCurrent(current,"124-0",std::string("\x00\x00\xc0\x7f",4)+volts.substr(4),"","",2.5f,"100-0"); });
+  rejects([&] { convertCurrent(timedCurrent,"124-0",volts,"","1",2.5f,"100-0"); });
+  rejects([&] { convertCurrent(timedCurrent,"124-0",volts,"9223372036854775808","1",2.5f,"100-0"); });
+  for (const auto& change : std::vector<std::pair<std::string,std::string>>{
+      {"samples_per_pulse: 4","samples_per_pulse: 16385"},
+      {"samples_per_pulse: 4","samples_per_pulse: 0"},
+      {"bootstrap: 2.5","bootstrap: .nan"},
+      {"bootstrap: 2.5","bootstrap: 1e99"},
+      {"test-CH1-MAMPS","test-CH1-VOLTS"},
+      {"test-BCM_M_R","test-BCM_M_S"},
+      {"start_id: '123-4'","start_id: '$'"},
+      {"timestamp: {mode: absent}","timestamp: {mode: absent, field: guessed_time}"},
+      {"samples_per_pulse: 4","samples_per_pulse: 4\n    format: auto"}})
+    rejects([&] { parseConfig(replace(currentConfiguration,change.first,change.second)); });
+  rejects([&] { parseConfig("schema_version: 1\nredis: {host: 127.0.0.1}\nsources: []\ncurrent_conversions: []\n"); });
   std::cout << "xrm demux unit tests passed\n";
 }

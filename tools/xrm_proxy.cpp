@@ -83,7 +83,7 @@ void usage(std::ostream& out) {
       << "  [--compat-aliases FILE] [--once] [--refresh-ms 60000] [--retry-ms 5000]\n"
       << "  [--discovery-timeout-ms 3000] [--request-timeout-ms 3000]\n"
       << "  [--discovery-port 5076]  Override only for a known PVA discovery listener.\n"
-      << "  [--demux-config FILE]  Optional independent Redis raw-stream demultiplexer.\n"
+      << "  [--demux-config FILE]  Optional Redis ADC demux/current conversion worker.\n"
       << "  [--inventory FILE]  Offline PVA inventory; optional Redis worker is independent.\n"
       << "  xrm-proxy --check-demux-config FILE  Validate static config without network I/O.\n";
 }

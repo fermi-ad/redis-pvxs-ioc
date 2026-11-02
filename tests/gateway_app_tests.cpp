@@ -288,7 +288,14 @@ int main() {
   watchedConfig.insert(gatewayAt + std::string("pva_gateway:\n").size(),
       "  access_overrides: {'LEGACY:dynamic': {asg: COMMAND}}\n");
   { std::ofstream output(configFile); output << watchedConfig; assert(output.good()); }
+  const auto priorPolicyGeneration = watchGet("SYS:gateway-watch:access:generation")["value"].as<int64_t>();
   watchApp.requestReload(); watchApp.pump();
+  // Access diagnostics publish on the health tick. Establish the completed
+  // reload's generation before checking that manifest-only updates preserve it.
+  eventually([&] {
+    watchApp.pump();
+    return watchGet("SYS:gateway-watch:access:generation")["value"].as<int64_t>() > priorPolicyGeneration;
+  });
   watchClient.put("LEGACY:dynamic").set("value", int32_t(30)).exec()->wait(2.0);
   assert(writes.load() == 5);
   const auto policyGeneration = watchGet("SYS:gateway-watch:access:generation")["value"].as<int64_t>();

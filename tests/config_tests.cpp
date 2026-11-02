@@ -766,6 +766,80 @@ pvs:
   const auto defaults = loadConfigString(kLegacyConfig);
   assert(defaults.redisBackends.at("default").readerProbeMs == 1000);
   assert(defaults.pvs[0].sourceHealth.required && defaults.pvs[0].sourceHealth.staleAfterMs == 0);
+  assert(defaults.pvs[0].sourceTime.mode == SourceTimeMode::LegacyRedisId);
+  assert(defaults.pvs[1].sourceTime.mode == SourceTimeMode::LegacyRedisId);
+  assert(defaults.pvs[1].sourceTime.field.empty() && defaults.pvs[1].sourceTime.validField.empty());
+
+  const std::string timeBase = "server: {instance: timing}\nredis: {base_key: test, host: localhost, port: 6379}\npvs:\n  - name: wave\n    type: float64\n    shape: array\n    read: {key: wave}\n";
+  const auto timingConfig = [&](const std::string& timing, const std::string& extra = "") {
+    return timeBase + extra + "    source_time: " + timing + "\n";
+  };
+  const std::string unixTiming = "{mode: unix-nanoseconds-v1, field: acquisition_time_ns, valid_field: acquisition_time_valid}";
+  const auto explicitLegacy = loadConfigString(timingConfig("{mode: legacy-redis-id}"));
+  const auto implicitLegacy = loadConfigString(timeBase);
+  const auto legacyTimeDiff = diffConfigs(implicitLegacy, explicitLegacy);
+  assert(legacyTimeDiff.replaced.empty() && legacyTimeDiff.metadataChanged.empty() && legacyTimeDiff.restartRequired.empty());
+  assert(sameReaderTopology(implicitLegacy.pvs[0], explicitLegacy.pvs[0]));
+  const auto unixConfig = loadConfigString(timingConfig(unixTiming));
+  assert(unixConfig.pvs[0].sourceTime.mode == SourceTimeMode::UnixNanosecondsV1);
+  assert(unixConfig.pvs[0].sourceTime.field == "acquisition_time_ns");
+  assert(unixConfig.pvs[0].sourceTime.validField == "acquisition_time_valid");
+  const auto noTime = loadConfigString(timingConfig("{mode: unavailable}"));
+  assert(noTime.pvs[0].sourceTime.mode == SourceTimeMode::Unavailable);
+  for (const auto& changed : {unixConfig, noTime}) {
+    assert(!sameReaderTopology(implicitLegacy.pvs[0], changed.pvs[0]));
+    const auto diff = diffConfigs(implicitLegacy, changed);
+    assert(diff.replaced == std::vector<std::string>{"wave"});
+    assert(diff.metadataChanged.empty() && diff.restartRequired.empty());
+  }
+  for (const bool changeValidity : {false, true}) {
+    auto changed = unixConfig;
+    (changeValidity ? changed.pvs[0].sourceTime.validField : changed.pvs[0].sourceTime.field) = "new_field";
+    assert(!sameReaderTopology(unixConfig.pvs[0], changed.pvs[0]));
+    const auto diff = diffConfigs(unixConfig, changed);
+    assert(diff.replaced == std::vector<std::string>{"wave"} && diff.metadataChanged.empty());
+  }
+  for (const auto* timing : {"{}", "null", "[]", "unix-nanoseconds-v1", "{mode: unknown}",
+      "{mode: unix-nanoseconds}", "{mode: unavailable, field: ''}", "{mode: legacy-redis-id, valid_field: flag}",
+      "{mode: unix-nanoseconds-v1}", "{mode: unix-nanoseconds-v1, field: time}",
+      "{mode: unix-nanoseconds-v1, valid_field: valid}",
+      "{mode: unix-nanoseconds-v1, field: '', valid_field: valid}",
+      "{mode: unix-nanoseconds-v1, field: time, valid_field: ''}",
+      "{mode: unix-nanoseconds-v1, field: _, valid_field: valid}",
+      "{mode: unix-nanoseconds-v1, field: time, valid_field: _}",
+      "{mode: unix-nanoseconds-v1, field: time, valid_field: time}",
+      "{mode: unavailable, unknown: true}", "{mode: unavailable, mode: unavailable}",
+      "{mode: unix-nanoseconds-v1, field: a, field: b, valid_field: c}",
+      "{mode: unix-nanoseconds-v1, field: a, valid_field: b, valid_field: c}"})
+    assert(throwsConfig(timingConfig(timing).c_str()));
+  for (const auto& timing : {unixTiming, std::string("{mode: unavailable}")}) {
+    assert(throwsConfig(timingConfig(timing, "    write: {key: command}\n").c_str()));
+    assert(throwsConfig(timingConfig(timing, "    write: {key: command}\n    confirm: {key: ack}\n").c_str()));
+    assert(throwsConfig(timingConfig(timing, "    confirm: {key: ack}\n").c_str()));
+    auto scalarTime = timingConfig(timing);
+    scalarTime.replace(scalarTime.find("shape: array"), std::string("shape: array").size(), "shape: scalar");
+    assert(throwsConfig(scalarTime.c_str()));
+    for (const auto* type : {"bool", "string"}) {
+      auto unsupported = timingConfig(timing);
+      unsupported.replace(unsupported.find("type: float64"), std::string("type: float64").size(), std::string("type: ") + type);
+      assert(throwsConfig(unsupported.c_str()));
+    }
+  }
+  for (const auto* type : {"int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"}) {
+    auto numeric = timingConfig(unixTiming);
+    numeric.replace(numeric.find("type: float64"), std::string("type: float64").size(), std::string("type: ") + type);
+    assert(!throwsConfig(numeric.c_str()));
+  }
+  for (const auto* timing : {"{mode: legacy-redis-id}", "{mode: unavailable}",
+      "{mode: unix-nanoseconds-v1, field: time, valid_field: valid}"}) {
+    const auto image = "server: {instance: image}\nredis: {base_key: test, host: localhost, port: 6379}\npvs:\n  - name: image\n    kind: ntndarray\n    read: {key: image}\n    source_time: " + std::string(timing);
+    assert(throwsConfig(image.c_str()));
+  }
+  // Explicit legacy mode does not narrow pre-existing scalar/write support.
+  assert(!throwsConfig(timingConfig("{mode: legacy-redis-id}", "    write: {key: command}\n    confirm: {key: ack}\n").c_str()));
+  auto legacyScalar = timingConfig("{mode: legacy-redis-id}");
+  legacyScalar.replace(legacyScalar.find("shape: array"), std::string("shape: array").size(), "shape: scalar");
+  assert(!throwsConfig(legacyScalar.c_str()));
   for (const auto* setting : {"reader_probe_ms: -1", "reader_probe_ms: 99", "reader_probe_ms: 60001", "reader_probe_ms: 1.5", "reader_probe_mz: 1000"}) {
     const auto text = healthBase + ", " + setting + "}" + healthPV + "}}]";
     assert(throwsConfig(text.c_str()));

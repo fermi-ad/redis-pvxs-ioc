@@ -236,6 +236,8 @@ public:
         Member(TypeCode::StringA, "pv"), Member(TypeCode::StringA, "backend"),
         Member(TypeCode::StringA, "key"), Member(TypeCode::StringA, "role"),
         Member(TypeCode::StringA, "state"), Member(TypeCode::StringA, "error"),
+        Member(TypeCode::StringA, "sourceTimeMode"), Member(TypeCode::StringA, "sourceTimeError"),
+        Member(TypeCode::BoolA, "sourceTimePresent"), Member(TypeCode::BoolA, "sourceTimeValid"),
         Member(TypeCode::StringA, "inspection"), Member(TypeCode::StringA, "streamKind"),
         Member(TypeCode::StringA, "cursor"), Member(TypeCode::StringA, "observedCursor"),
         Member(TypeCode::StringA, "lastValidCursor"),
@@ -568,6 +570,8 @@ public:
 #define READER_COLUMN(TYPE, FIELD) value["sources." #FIELD] = sourceColumn<TYPE>(sources, [](const auto& s) { return s.reader.FIELD; })
     SOURCE_COLUMN(std::string, pv); SOURCE_COLUMN(std::string, backend); SOURCE_COLUMN(std::string, key);
     SOURCE_COLUMN(std::string, role); SOURCE_COLUMN(std::string, state); SOURCE_COLUMN(std::string, error);
+    SOURCE_COLUMN(std::string, sourceTimeMode); SOURCE_COLUMN(std::string, sourceTimeError);
+    SOURCE_COLUMN(bool, sourceTimePresent); SOURCE_COLUMN(bool, sourceTimeValid);
     SOURCE_COLUMN(std::string, inspection); SOURCE_COLUMN(std::string, lastValidCursor);
     SOURCE_COLUMN(bool, required); SOURCE_COLUMN(bool, valid); SOURCE_COLUMN(bool, fresh);
     SOURCE_COLUMN(bool, stale); SOURCE_COLUMN(bool, ready);

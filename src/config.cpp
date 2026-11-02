@@ -609,8 +609,32 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
   return svc;
 }
 
+SourceTimeConfig parseSourceTime(const YAML::Node& node, const std::string& path) {
+  rejectUnknownKeys(node, path, {"mode", "field", "valid_field"});
+  SourceTimeConfig config;
+  const auto mode = parseString(requireNode(node, "mode", path), path + ".mode");
+  if (mode == "legacy-redis-id") config.mode = SourceTimeMode::LegacyRedisId;
+  else if (mode == "unix-nanoseconds-v1") config.mode = SourceTimeMode::UnixNanosecondsV1;
+  else if (mode == "unavailable") config.mode = SourceTimeMode::Unavailable;
+  else fail(path + ".mode", "unsupported source time mode '" + mode + "'");
+
+  if (config.mode == SourceTimeMode::UnixNanosecondsV1) {
+    config.field = parseString(requireNode(node, "field", path), path + ".field");
+    config.validField = parseString(requireNode(node, "valid_field", path), path + ".valid_field");
+    if (config.field.empty() || config.field == "_")
+      fail(path + ".field", "must be nonempty and distinct from payload field '_'");
+    if (config.validField.empty() || config.validField == "_")
+      fail(path + ".valid_field", "must be nonempty and distinct from payload field '_'");
+    if (config.field == config.validField)
+      fail(path, "field and valid_field must be distinct");
+  } else if (node["field"] || node["valid_field"]) {
+    fail(path, "field and valid_field require mode: unix-nanoseconds-v1");
+  }
+  return config;
+}
+
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health"});
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health", "source_time"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -685,6 +709,12 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
       pv.sourceHealth.staleAfterMs = parseNumeric<uint32_t>(health["stale_after_ms"], path + ".source_health.stale_after_ms");
     if (pv.sourceHealth.staleAfterMs > 86400000)
       fail(path + ".source_health.stale_after_ms", "must be 0..86400000");
+  }
+  if (const auto sourceTime = node["source_time"]) {
+    pv.sourceTime = parseSourceTime(sourceTime, path + ".source_time");
+    if (pv.sourceTime.mode != SourceTimeMode::LegacyRedisId &&
+        (pv.kind != PVKind::Value || pv.shape != Shape::Array || !isNumericType(pv.type) || pv.write || pv.confirm))
+      fail(path + ".source_time", "nonlegacy modes require a read-only numeric array");
   }
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
@@ -1263,6 +1293,8 @@ bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs) {
          lhs.maxFrameBytes == rhs.maxFrameBytes &&
          lhs.read.backend == rhs.read.backend &&
          lhs.read.key == rhs.read.key &&
+         std::tie(lhs.sourceTime.mode, lhs.sourceTime.field, lhs.sourceTime.validField) ==
+             std::tie(rhs.sourceTime.mode, rhs.sourceTime.field, rhs.sourceTime.validField) &&
          sameOptionalRoute(lhs.write, rhs.write) &&
          sameConfirm;
 }

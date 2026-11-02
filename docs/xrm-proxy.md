@@ -174,10 +174,21 @@ the sidecar's clock.
 See [Redis demultiplexing](xrm-demux.md) for the exact configuration and stream
 contracts.
 
-These demux outputs do not automatically create PVA waveform mappings. Only an
-adapter that honors the acquisition timestamp and validity fields may serve
-them as timestamped waveforms. A generic array adapter that derives timestamps
-from Redis stream IDs is unsuitable for this contract.
+These demux outputs do not automatically create PVA waveform mappings. Configure
+ordinary read-only numeric arrays in `redis-pvxs-ioc` with the opt-in
+`source_time: {mode: unix-nanoseconds-v1, field: acquisition_time_ns, valid_field: acquisition_time_valid}`
+adapter to honor their acquisition time and independent validity. Use int16
+for raw outputs and float32 for volts outputs on a little-endian IOC host.
+See [source time policy](configuration.md#source-time-policy) for an example and
+validation rules. An omitted policy preserves the existing legacy Redis-ID
+interpretation and cannot convey this demux timing contract. The stock native
+PVA mirror continues to forward upstream timestamps unchanged.
+
+For operation planning, PM STOP freezes history; it does not stop capture.
+A 4 MHz provisioning setting is not a guarantee that the full selected channel
+payload can be carried over Ethernet. Qualify the actual channel count, sample
+format and sustained transport rate independently. ES/SPAD layouts are
+unsupported by this raw-stream demultiplexer.
 
 ```sh
 xrm-proxy --ip 10.200.8.253 --prefix SL:INST:ICM:XRM \

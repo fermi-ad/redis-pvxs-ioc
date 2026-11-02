@@ -426,6 +426,65 @@ alarm and zero source timestamp until valid data arrives. Empty numeric arrays
 are valid. Legacy payload byte order and source timestamp interpretation are
 unchanged; the exact Redis stream cursor is tracked separately for ordering.
 
+### Source time policy
+
+Ordinary numeric arrays may opt into an acquisition timestamp stored alongside
+the binary `_` payload. For example, the raw int16 output from
+[XRM demultiplexing](xrm-demux.md) can be served with:
+
+```yaml
+- name: XRM:CH5:raw
+  type: int16
+  shape: array
+  read: {key: verified-uut-CH5-raw}
+  source_time:
+    mode: unix-nanoseconds-v1
+    field: acquisition_time_ns
+    valid_field: acquisition_time_valid
+```
+
+The route key is relative to the configured Redis `base_key`; configure it to
+resolve to the demux output's exact stream key. Use `type: float32` for its
+calibrated volts output. This policy does not change the existing native binary
+array payload contract; demux outputs are little-endian and require a
+little-endian IOC host.
+
+| Mode | Timestamp source |
+| --- | --- |
+| `legacy-redis-id` | Existing Redis-ID timestamp interpretation; default when `source_time` is absent |
+| `unix-nanoseconds-v1` | Exact signed int64 Unix nanoseconds in `field`, with independent validity in `valid_field` |
+| `unavailable` | No acquisition time; publish a zero timestamp with an INVALID alarm |
+
+If `source_time` is present, `mode` is required. Unix mode requires both field
+names to be nonempty and distinct from each other and `_`. The other modes
+forbid `field` and `valid_field`. Unknown or duplicate fields reject the
+configuration. Both nonlegacy modes require an ordinary read-only numeric
+array: scalars, boolean/string arrays, and write/confirmation routes are
+rejected. NTNDArray rejects every `source_time` declaration because it has a
+separate [frame timestamp contract](ntndarray.md).
+
+Unix timestamp text accepts an optional `+` or `-` followed by decimal digits,
+within the signed int64 range. Whitespace, floating point, trailing characters
+and overflow reject the sample. A supplied validity field must be exactly `0`
+or `1`; an absent field defaults to false. Time may be absent when validity is
+absent or `0`. Validity `1` requires a supplied timestamp. Malformed supplied
+time rejects the sample even when validity is false.
+
+Accepted payloads with invalid or absent acquisition time still update the
+waveform, with an INVALID alarm. Any supplied timestamp is preserved exactly,
+including invalid, negative, zero and backward times; absent time publishes
+zero. No mode substitutes the IOC's receipt time or host clock for unavailable
+acquisition time. Malformed timing retains the previous accepted value and
+timestamp with an INVALID alarm, as malformed payloads do. Redis stream IDs
+remain the ordering and resume cursors independently of acquisition time.
+
+The source-status table exposes `sourceTimeMode`, `sourceTimePresent`,
+`sourceTimeValid` and `sourceTimeError` separately from payload validity and
+monotonic freshness. Changing the mode or either field name replaces the
+runtime during transactional reload; a failed candidate preserves the active
+generation. Omitting the policy preserves existing legacy/Pi timing. Native
+PVA gateway timestamps are forwarded unchanged and do not use this policy.
+
 ### Source health policy
 
 Scalar, array and NTNDArray PVs accept an optional `source_health` mapping:
@@ -441,7 +500,7 @@ readiness. It applies to both read and distinct confirmation sources. Setting it
 false retains source diagnostics and health alarms. `stale_after_ms` defaults to
 zero (cadence unspecified); otherwise it is 1–86400000 ms. Freshness measures
 time since the last valid snapshot/update was received on the IOC's monotonic
-clock. It does not estimate acquisition age from the legacy source timestamp.
+clock. It does not estimate acquisition age from the source timestamp.
 An idle source with valid data and no cadence stays fresh; a source that has
 never supplied valid data remains unready. A freshness failure retains the
 last-good value and source timestamp with an INVALID alarm. Health diagnostics
@@ -516,9 +575,9 @@ inverse mapping.
 
 `initial` is optional and must match the declared type and shape. At startup the
 runtime first attempts to load the latest Redis value; `initial` is the fallback
-when no snapshot is available. Live subscription updates then take over, and
-their Redis timestamps are carried into the PVA `timeStamp`. Boolean/string
-arrays are unsupported.
+when no snapshot is available. Live subscription updates then take over. Their
+PVA `timeStamp` follows the configured source time policy, which defaults to
+the existing Redis-ID interpretation. Boolean/string arrays are unsupported.
 
 ## `rpc_services`
 
@@ -587,8 +646,8 @@ settings requiring a restart. Credential values are never included. An omitted
 schema version and explicit version 1 compare equally. Alias ordering alone is
 not a change.
 
-A replacement includes type/route/confirmation changes and affected PVs when a
-backend definition changes. Alias-set changes are reported as `alias_changes`;
+A replacement includes type/route/confirmation and source-time policy changes,
+and affected PVs when a backend definition changes. Alias-set changes are reported as `alias_changes`;
 they retain the canonical runtime and disconnect only removed alias channels.
 Metadata changes include metadata, alarm thresholds, transforms, source-health policy and initial
 fallback definitions. They retain the runtime's subscription topology; changing

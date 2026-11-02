@@ -94,6 +94,18 @@ struct SourceHealthConfig {
   uint32_t staleAfterMs = 0;
 };
 
+enum class SourceTimeMode {
+  LegacyRedisId,
+  UnixNanosecondsV1,
+  Unavailable,
+};
+
+struct SourceTimeConfig {
+  SourceTimeMode mode = SourceTimeMode::LegacyRedisId;
+  std::string field;
+  std::string validField;
+};
+
 struct AccessAssignment {
   std::string asg = "DEFAULT";
   int asl = 0;
@@ -207,6 +219,7 @@ struct PVConfig {
   uint64_t maxFrameBytes = 32u * 1024u * 1024u;
   uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap;
   SourceHealthConfig sourceHealth;
+  SourceTimeConfig sourceTime;
 };
 
 struct ServerConfig {

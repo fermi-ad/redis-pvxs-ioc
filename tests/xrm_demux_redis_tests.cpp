@@ -2,6 +2,7 @@
 #include "hiredis.h"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -421,6 +422,140 @@ sources:
     assert(redis.command({"XLEN",sharedCurrent.applied})->integer == 1);
     worker.stop();
   }
+  // A fresh channel inherits the persisted accepted global gain even when no
+  // new S command arrives. Hydration neither re-acks history nor changes an
+  // older pending waveform's immutable gain snapshot on another new member.
+  const auto hydratePrefix = "schema_version: 1\nredis: {host: 127.0.0.1, port: " + std::to_string(port) +
+    ", command_timeout_ms: 100, poll_interval_ms: 5, retry_ms: 20}\ncurrent_conversions:\n";
+  const auto hydrateBaseYaml = hydratePrefix+currentBlock("hydrate-a","hydrate-group");
+  const auto hydrateBaseConfig = parseConfig(hydrateBaseYaml); const auto hydrateA = hydrateBaseConfig.currentConversions.front();
+  redis.command({"XADD",hydrateA.setting,"1-0","_",f32(2.0f)});
+  redis.command({"XADD",hydrateA.setting,"2-0","_",f32(4.0f)});
+  redis.command({"XADD",hydrateA.stream,"6-0","_",volts});
+  {
+    Worker worker(hydrateBaseConfig); worker.start();
+    eventually([&] { return redis.field(hydrateA.checkpoint,"last_id") == "6-0"; }); worker.stop();
+  }
+  const auto hydrateAck = redis.latestId(hydrateA.applied);
+  const auto hydrateOriginal = redis.row(hydrateA.output,"6-0");
+  const auto hydrateExpanded = parseConfig(hydrateBaseYaml+currentBlock("hydrate-b","hydrate-group")+currentBlock("hydrate-c","hydrate-group"));
+  const auto hydrateB = hydrateExpanded.currentConversions[1], hydrateC = hydrateExpanded.currentConversions[2];
+  redis.command({"HSET",hydrateC.checkpoint,"config",hydrateC.fingerprint,"source_stream",hydrateC.stream,
+    "last_id","5-0","processed","0","rejected","0","gaps","0","gain_setting",hydrateC.setting,"gain_applied",hydrateC.applied,
+    "pending_id","6-0","pending_kind","entry","pending_payload",volts,"pending_timestamp","","pending_valid","","pending_gap","0","pending_reason","",
+    "pending_gain",f32(2.0f),"pending_gain_command_id","1-0","pending_metadata","{}"});
+  redis.command({"XADD",hydrateA.stream,"7-0","_",volts});
+  redis.command({"XADD",hydrateB.stream,"6-0","_",volts});
+  redis.command({"XADD",hydrateC.stream,"7-0","_",volts});
+  {
+    Worker worker(hydrateExpanded); worker.start();
+    eventually([&] { return redis.field(hydrateB.checkpoint,"last_id") == "6-0" && redis.field(hydrateC.checkpoint,"last_id") == "7-0"; });
+    eventually([&] { return redis.field(hydrateA.checkpoint,"last_id") == "7-0"; });
+    assert(redis.row(hydrateB.output,"6-0").at("_") == f32(4.0f)+f32(-8.0f));
+    assert(redis.row(hydrateC.output,"6-0").at("_") == f32(2.0f)+f32(-4.0f));
+    assert(redis.row(hydrateC.output,"6-0").at("gain_command_id") == "1-0");
+    assert(redis.row(hydrateC.output,"7-0").at("_") == f32(4.0f)+f32(-8.0f));
+    assert(redis.row(hydrateA.output,"6-0") == hydrateOriginal);
+    assert(redis.field(hydrateB.checkpoint,"gain_value") == f32(4.0f));
+    assert(redis.field(hydrateC.checkpoint,"gain_command_id") == "2-0");
+    assert(redis.latestId(hydrateA.applied) == hydrateAck);
+    assert(redis.command({"XLEN",hydrateA.applied})->integer == 1);
+    assert(redis.command({"XLEN",hydrateA.setting})->integer == 2); worker.stop();
+  }
+  // Coordinator migration can replay the latest persisted S, but an exact
+  // matching latest R is already its acknowledgement. Reuse that ID while
+  // initializing a new lexicographically earlier member. An older in-flight
+  // waveform on C must retain its gain through both the command and migration.
+  redis.command({"HSET",hydrateC.checkpoint,"pending_id","8-0","pending_kind","entry","pending_payload",volts,
+    "pending_timestamp","","pending_valid","","pending_gap","0","pending_reason","",
+    "pending_gain",f32(4.0f),"pending_gain_command_id","2-0","pending_metadata","{}"});
+  const auto migrationHistory6 = redis.row(hydrateC.output,"6-0"), migrationHistory7 = redis.row(hydrateC.output,"7-0");
+  redis.command({"XADD",hydrateC.output,"8-0","_","fixture blocks pending commit"});
+  redis.command({"XADD",hydrateA.setting,"*","_",f32(-3.0f)});
+  {
+    Worker worker(hydrateExpanded); worker.start();
+    eventually([&] { return redis.field(hydrateA.checkpoint,"gain_value") == f32(-3.0f) && worker.status().failures > 0; });
+    assert(redis.field(hydrateC.checkpoint,"pending_gain") == f32(4.0f)); worker.stop();
+  }
+  const auto migrationAck = redis.latestId(hydrateA.applied);
+  const auto migrationCommand = redis.latestId(hydrateA.setting);
+  assert(redis.row(hydrateA.applied,migrationAck).at("_") == f32(-3.0f));
+  // XDEL retains last-generated-id, so restore this fixture's saved history
+  // into a fresh stream to remove the deliberate collision and its high-water ID.
+  redis.command({"DEL",hydrateC.output});
+  redis.append({hydrateC.output,migrationHistory6},"6-0");
+  redis.append({hydrateC.output,migrationHistory7},"7-0");
+  const auto migrationConfig = parseConfig(hydrateBaseYaml+currentBlock("hydrate-b","hydrate-group")+
+    currentBlock("hydrate-c","hydrate-group")+currentBlock("hydrate-0","hydrate-group"));
+  const auto migrationFresh = migrationConfig.currentConversions.back();
+  redis.command({"XADD",migrationFresh.stream,"6-0","_",volts});
+  redis.command({"XADD",hydrateC.stream,"9-0","_",volts});
+  {
+    Worker worker(migrationConfig); worker.start();
+    eventually([&] { return redis.field(migrationFresh.checkpoint,"last_id") == "6-0" && redis.field(hydrateC.checkpoint,"last_id") == "9-0"; });
+    for (const auto& conversion : migrationConfig.currentConversions) {
+      assert(redis.field(conversion.checkpoint,"gain_value") == f32(-3.0f));
+      assert(redis.field(conversion.checkpoint,"gain_command_id") == migrationCommand);
+    }
+    assert(redis.row(migrationFresh.output,"6-0").at("_") == f32(-3.0f)+f32(6.0f));
+    assert(redis.row(hydrateC.output,"8-0").at("_") == f32(4.0f)+f32(-8.0f));
+    assert(redis.row(hydrateC.output,"8-0").at("gain_command_id") == "2-0");
+    assert(redis.row(hydrateC.output,"9-0").at("_") == f32(-3.0f)+f32(6.0f));
+    assert(redis.row(hydrateA.output,"6-0") == hydrateOriginal);
+    assert(redis.row(hydrateA.stream,"6-0").at("_") == volts);
+    assert(redis.command({"XLEN",hydrateA.stream})->integer == 2);
+    assert(redis.latestId(hydrateA.applied) == migrationAck);
+    assert(redis.command({"XLEN",hydrateA.applied})->integer == 2);
+    assert(redis.command({"XLEN",hydrateA.setting})->integer == 3); worker.stop();
+  }
+  // A rejected latest S must not erase the last accepted gain when a fresh
+  // earlier coordinator joins. Its donor includes the rejected command cursor,
+  // so the rejected setting is neither replayed nor acknowledged again.
+  redis.command({"XADD",hydrateA.setting,"*","_","malformed"});
+  const auto rejectedMigrationCommand = redis.latestId(hydrateA.setting);
+  {
+    Worker worker(migrationConfig); worker.start();
+    eventually([&] { return redis.field(migrationFresh.checkpoint,"gain_last_rejected_id") == rejectedMigrationCommand; }); worker.stop();
+  }
+  const auto rejectedMigrationConfig = parseConfig(hydrateBaseYaml+currentBlock("hydrate-b","hydrate-group")+
+    currentBlock("hydrate-c","hydrate-group")+currentBlock("hydrate-0","hydrate-group")+currentBlock("hydrate-00","hydrate-group"));
+  const auto rejectedFresh = rejectedMigrationConfig.currentConversions.back();
+  redis.command({"XADD",rejectedFresh.stream,"6-0","_",volts});
+  {
+    Worker worker(rejectedMigrationConfig); worker.start();
+    eventually([&] { return redis.field(rejectedFresh.checkpoint,"last_id") == "6-0"; });
+    assert(redis.row(rejectedFresh.output,"6-0").at("_") == f32(-3.0f)+f32(6.0f));
+    assert(redis.field(rejectedFresh.checkpoint,"gain_command_id") == migrationCommand);
+    assert(redis.field(rejectedFresh.checkpoint,"gain_command_cursor") == rejectedMigrationCommand);
+    assert(redis.field(rejectedFresh.checkpoint,"gain_last_rejected_id") == rejectedMigrationCommand);
+    assert(!redis.field(rejectedFresh.checkpoint,"gain_last_error").empty());
+    assert(redis.latestId(hydrateA.applied) == migrationAck);
+    assert(redis.command({"XLEN",hydrateA.applied})->integer == 2);
+    assert(redis.command({"XLEN",hydrateA.setting})->integer == 4); worker.stop();
+  }
+  // Persisted S/R can outlive all checkpoints. Reuse an exact matching R only
+  // with a canonical legacy-time ID; a Redis-valid sequence of 1,000,000 is
+  // outside the legacy nanosecond-remainder bound and must fail closed.
+  for (const bool validTime : {true,false}) {
+    const auto reuseConfig = currentFixture(port,validTime ? "ack-reuse-valid" : "ack-reuse-invalid");
+    const auto reuse = reuseConfig.currentConversions.front();
+    const std::string reuseId = validTime ? "100-9" : "100-1000000";
+    redis.command({"XADD",reuse.setting,"1-0","_",f32(4.0f)});
+    redis.command({"XADD",reuse.applied,reuseId,"_",f32(4.0f),"gain_command_id","1-0"});
+    redis.command({"XADD",reuse.stream,"6-0","_",volts});
+    Worker worker(reuseConfig); worker.start();
+    if (validTime) {
+      eventually([&] { return redis.field(reuse.checkpoint,"last_id") == "6-0"; });
+      assert(redis.row(reuse.output,"6-0").at("_") == f32(4.0f)+f32(-8.0f));
+    } else {
+      eventually([&] { return worker.status().failures > 0; });
+      assert(worker.status().error.find("invalid legacy time") != std::string::npos);
+      assert(redis.field(reuse.checkpoint,"last_id") == "5-0");
+      assert(redis.command({"EXISTS",reuse.output})->integer == 0);
+    }
+    assert(redis.latestId(reuse.applied) == reuseId);
+    assert(redis.command({"XLEN",reuse.applied})->integer == 1); worker.stop();
+  }
   // A saved pending waveform captures the old gain, even if an idle setting
   // change is applied before replay and the original source was trimmed.
   auto pendingConfig = currentFixture(port,"pending"); const auto pendingCurrent = pendingConfig.currentConversions.front();
@@ -503,6 +638,43 @@ sources:
     for (const auto& conversion : allConfig.currentConversions)
       assert(redis.field(conversion.checkpoint,"gain_value") == f32(-1.5f));
     assert(redis.command({"XLEN",allCurrent.applied})->integer == 2); worker.stop();
+  }
+  // Opposite YAML orders must acquire the same canonical first checkpoint.
+  // Reserve that checkpoint to expose partial acquisition deterministically:
+  // the blocked reverse-order worker must not retain leases on a prefix of
+  // the other channels. After release, one worker progresses, then hands over.
+  auto reversedConfig = allConfig;
+  std::reverse(reversedConfig.currentConversions.begin(),reversedConfig.currentConversions.end());
+  const auto canonical = std::min_element(allConfig.currentConversions.begin(),allConfig.currentConversions.end(),
+    [](const CurrentConversion& a, const CurrentConversion& b) { return a.checkpoint < b.checkpoint; })->checkpoint;
+  for (const auto& conversion : allConfig.currentConversions)
+    redis.command({"HSET",conversion.checkpoint,"writer_token","","writer_until_ms","0"});
+  const auto serverTime = redis.command({"TIME"});
+  const auto serverMs = std::stoull(std::string(serverTime->element[0]->str,serverTime->element[0]->len))*1000 +
+    std::stoull(std::string(serverTime->element[1]->str,serverTime->element[1]->len))/1000;
+  redis.command({"HSET",canonical,"writer_token","fixture-reserved","writer_until_ms",std::to_string(serverMs+30000)});
+  const auto contentionAck = redis.latestId(allCurrent.applied);
+  for (const auto& conversion : allConfig.currentConversions) redis.command({"XADD",conversion.stream,"7-0","_",fullVolts});
+  {
+    Worker reverse(reversedConfig), forward(allConfig); reverse.start();
+    eventually([&] { return reverse.status().failures > 0; });
+    for (const auto& conversion : allConfig.currentConversions)
+      if (conversion.checkpoint != canonical) assert(redis.field(conversion.checkpoint,"writer_until_ms") == "0");
+    forward.start(); eventually([&] { return forward.status().failures > 0; });
+    redis.command({"HSET",canonical,"writer_token","","writer_until_ms","0"});
+    for (const auto& conversion : allConfig.currentConversions)
+      eventually([&] { return redis.field(conversion.checkpoint,"last_id") == "7-0"; });
+    const bool reverseWon = reverse.status().processed > 0;
+    if (reverseWon) reverse.stop(); else forward.stop();
+    for (const auto& conversion : allConfig.currentConversions) redis.command({"XADD",conversion.stream,"8-0","_",fullVolts});
+    for (const auto& conversion : allConfig.currentConversions) {
+      eventually([&] { return redis.field(conversion.checkpoint,"last_id") == "8-0"; });
+      assert(redis.field(conversion.checkpoint,"processed") == "3");
+    }
+    if (reverseWon) { assert(forward.status().processed > 0); forward.stop(); }
+    else { assert(reverse.status().processed > 0); reverse.stop(); }
+    assert(redis.latestId(allCurrent.applied) == contentionAck);
+    assert(redis.command({"XLEN",allCurrent.applied})->integer == 2);
   }
   // A raw output is the one intentional key-role overlap. Current accepts
   // only bounded known demux metadata and retains original source provenance.

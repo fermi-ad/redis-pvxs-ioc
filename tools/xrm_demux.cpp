@@ -385,7 +385,7 @@ end
 if redis.call('HGET',KEYS[1],'source_stream') ~= ARGV[2] or redis.call('HGET',KEYS[1],'gain_setting') ~= KEYS[2] or redis.call('HGET',KEYS[1],'gain_applied') ~= KEYS[3] then return redis.error_reply('checkpoint gain/source binding mismatch') end
 fence(KEYS[1],ARGV[4],ARGV[5],true)
 if st == 'none' and ARGV[9] == '1' then redis.call('XADD',KEYS[2],'MAXLEN','=',ARGV[7],ARGV[8],'_',ARGV[6]) end
-if ARGV[9] ~= '1' then return {'idle',redis.call('HGET',KEYS[1],'gain_value') or '',redis.call('HGET',KEYS[1],'gain_command_id') or ''} end
+if ARGV[9] ~= '1' then return {'idle',redis.call('HGET',KEYS[1],'gain_value') or '',redis.call('HGET',KEYS[1],'gain_command_id') or '',redis.call('HGET',KEYS[1],'gain_command_cursor') or ''} end
 local pending = redis.call('HGET',KEYS[1],'gain_pending_id')
 if pending and pending ~= '' then
   local p = redis.call('HMGET',KEYS[1],'gain_pending_value','gain_pending_error')
@@ -396,7 +396,7 @@ local cursor = redis.call('HGET',KEYS[1],'gain_command_cursor')
 local rows
 if cursor then rows = redis.call('XRANGE',KEYS[2],'(' .. cursor,'+','COUNT',1)
 else rows = redis.call('XREVRANGE',KEYS[2],'+','-','COUNT',1) end
-if #rows == 0 then return {'idle',redis.call('HGET',KEYS[1],'gain_value') or '',redis.call('HGET',KEYS[1],'gain_command_id') or ''} end
+if #rows == 0 then return {'idle',redis.call('HGET',KEYS[1],'gain_value') or '',redis.call('HGET',KEYS[1],'gain_command_id') or '',redis.call('HGET',KEYS[1],'gain_command_cursor') or ''} end
 local id,fields,value,reason = rows[1][1],rows[1][2],'',''
 if #fields ~= 2 or fields[1] ~= '_' then reason = 'gain command requires exactly the binary float32 _ field'
 elseif string.len(fields[2]) ~= 4 then reason = 'gain command must contain exactly four float32 bytes'
@@ -405,11 +405,51 @@ redis.call('HSET',KEYS[1],'gain_pending_id',id,'gain_pending_value',value,'gain_
 return {'command',id,value,reason}
 )LUA";
 
+// A new channel joins the already accepted global gain without replaying a
+// setting or acknowledging it again. Validate every group fence before copying
+// state; a pending waveform's saved gain and cursor are deliberately untouched.
+const std::string gainHydrateScript = leaseScript + R"LUA(
+local setting = redis.call('HGET',KEYS[1],'gain_setting')
+local applied = redis.call('HGET',KEYS[1],'gain_applied')
+if not setting or not applied or redis.call('HGET',KEYS[1],'gain_value') ~= ARGV[3] or redis.call('HGET',KEYS[1],'gain_command_id') ~= ARGV[4] or (redis.call('HGET',KEYS[1],'gain_command_cursor') or '') ~= ARGV[5] then return redis.error_reply('coordinated gain changed during hydration') end
+for _,k in ipairs(KEYS) do
+  if redis.call('TYPE',k).ok ~= 'hash' or redis.call('HGET',k,'gain_setting') ~= setting or redis.call('HGET',k,'gain_applied') ~= applied then return redis.error_reply('shared gain checkpoint is not initialized') end
+  fence(k,ARGV[1],ARGV[2],false)
+end
+local cursor = ARGV[5]
+for i=2,#KEYS do
+  local gain = redis.call('HGET',KEYS[i],'gain_value')
+  if not gain or gain == '' then
+    redis.call('HSET',KEYS[i],'gain_value',ARGV[3],'gain_command_id',ARGV[4])
+    if cursor ~= '' then
+      redis.call('HSET',KEYS[i],'gain_command_cursor',cursor)
+      -- A fresh coordinator may already have queued the latest S before the
+      -- donor establishes that it was processed (possibly rejected) earlier.
+      if redis.call('HGET',KEYS[i],'gain_pending_id') == cursor then
+        redis.call('HSET',KEYS[i],'gain_pending_id','','gain_pending_value','','gain_pending_error','','gain_pending_ack_id','')
+      end
+    end
+    for _,field in ipairs({'gain_last_rejected_id','gain_last_error'}) do
+      local value = redis.call('HGET',KEYS[1],field)
+      if value then redis.call('HSET',KEYS[i],field,value) end
+    end
+  end
+end
+return 'hydrated'
+)LUA";
+
 // KEYS[4..] are the other conversions sharing this global gain. All worker
 // states are validated and updated before the one readback acknowledgement.
 // An immutable pending ack ID makes retries idempotent after partial Lua work.
 const std::string gainApplyScript = leaseScript + R"LUA(
 local function typ(k) return redis.call('TYPE',k).ok end
+local function legacyTime(id,message)
+  local m,n = string.match(id,'^(%d+)%-(%d+)$')
+  if not m or #id > 41 or (#m > 1 and string.sub(m,1,1) == '0') or (#n > 1 and string.sub(n,1,1) == '0') then error(message) end
+  local ms,ns = tonumber(m),tonumber(n)
+  if not ms or not ns or ns > 999999 or ms > 9223372036853 or (ms == 0 and ns == 0) then error(message) end
+  return ms,ns
+end
 if typ(KEYS[1]) ~= 'hash' or redis.call('HGET',KEYS[1],'config') ~= ARGV[1] then return redis.error_reply('checkpoint configuration mismatch') end
 if typ(KEYS[3]) ~= 'none' and typ(KEYS[3]) ~= 'stream' then return redis.error_reply('applied gain must be a stream') end
 local checkpoints = {KEYS[1]}
@@ -427,25 +467,32 @@ end
 if string.len(ARGV[5]) ~= 4 then return redis.error_reply('validated gain has invalid size') end
 local ackid = redis.call('HGET',KEYS[1],'gain_pending_ack_id')
 if not ackid or ackid == '' then
-  local ms,ns = string.match(ARGV[7],'^(%d+)%-(%d+)$')
-  ms,ns = tonumber(ms),tonumber(ns)
-  if not ms or not ns or ns > 999999 then return redis.error_reply('invalid legacy gain acknowledgement time') end
   local last = redis.call('XREVRANGE',KEYS[3],'+','-','COUNT',1)
+  -- A replacement coordinator may have no checkpoint state while S/R retain
+  -- this exact accepted command. Reuse its acknowledgement identity instead
+  -- of appending history for a command that is already confirmed.
+  if #last ~= 0 and #last[1][2] == 4 then
+    local f,values = last[1][2],{}
+    for i=1,#f,2 do values[f[i]]=f[i+1] end
+    if values['_'] == ARGV[5] and values['gain_command_id'] == ARGV[4] then
+      ackid = last[1][1]
+    end
+  end
+  if not ackid or ackid == '' then
+  local ms,ns = legacyTime(ARGV[7],'invalid legacy gain acknowledgement time')
   if #last ~= 0 then
-    local pm,pn = string.match(last[1][1],'^(%d+)%-(%d+)$')
-    pm,pn = tonumber(pm),tonumber(pn)
-    if not pm or not pn or pn > 999999 or pm > 9223372036853 then return redis.error_reply('applied gain has invalid legacy time') end
+    local pm,pn = legacyTime(last[1][1],'applied gain has invalid legacy time')
     if pm > ms or (pm == ms and pn >= ns) then ms,ns = pm,pn+1 end
     if ns == 1000000 then ms,ns = ms+1,0 end
   end
-  local cm,cn = string.match(ARGV[4],'^(%d+)%-(%d+)$')
-  cm,cn = tonumber(cm),tonumber(cn)
-  if not cm or not cn or cn > 999999 or cm > 9223372036853 then return redis.error_reply('gain command has invalid legacy time') end
+  local cm,cn = legacyTime(ARGV[4],'gain command has invalid legacy time')
   if cm > ms or (cm == ms and cn >= ns) then ms,ns = cm,cn+1 end
   if ns == 1000000 then ms,ns = ms+1,0 end
   ackid = string.format('%.0f-%.0f',ms,ns)
-  redis.call('HSET',KEYS[1],'gain_pending_ack_id',ackid)
+  end
 end
+legacyTime(ackid,'gain acknowledgement has invalid legacy time')
+redis.call('HSET',KEYS[1],'gain_pending_ack_id',ackid)
 local existing = redis.call('XRANGE',KEYS[3],ackid,ackid,'COUNT',1)
 if #existing ~= 0 then
   local f = existing[1][2]
@@ -741,6 +788,11 @@ struct Worker::Impl {
   std::string writerToken;
   unsigned leaseMs = 0;
   explicit Impl(Config value) : config(std::move(value)) {
+    // Conversion channels are independent. A shared acquisition order avoids
+    // opposite YAML order retaining incompatible prefixes of writer leases.
+    // Never sort raw source channels: their order is the ADC wire contract.
+    std::sort(config.currentConversions.begin(),config.currentConversions.end(),
+      [](const CurrentConversion& a, const CurrentConversion& b) { return a.checkpoint < b.checkpoint; });
     static std::atomic<uint64_t> serial{0};
     writerToken = std::to_string(::getpid()) + ":" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ":" + std::to_string(++serial);
     leaseMs = std::max(5000u,config.pollIntervalMs + config.retryMs + 4*config.commandTimeoutMs + 1000);
@@ -766,6 +818,15 @@ struct Worker::Impl {
       command(context.get(), {"SELECT", std::to_string(config.db)},releasing ? 50 : config.commandTimeoutMs,releasing ? releaseStopping : stopping);
     }
     return context;
+  }
+  void releaseLeases(Context& context) {
+    if (config.currentConversions.empty()) return;
+    if (!context || context->err) context = connect(true);
+    std::vector<std::string> args{"EVAL",releaseScript,std::to_string(config.currentConversions.size())};
+    for (const auto& source : config.currentConversions) args.push_back(source.checkpoint);
+    args.push_back(writerToken);
+    const std::atomic<bool> releaseStopping{false};
+    command(context.get(),args,50,releaseStopping);
   }
   bool commit(redisContext* context, const Source& source, const std::string& previous, const std::string& id,
               const std::vector<Record>& records, const std::string& error, bool gap, bool current = false) {
@@ -826,6 +887,18 @@ struct Worker::Impl {
       source.fingerprint,source.stream,source.startId,writerToken,std::to_string(leaseMs),bootstrap,
       std::to_string(source.retention),legacyNowId(),coordinator ? "1" : "0"},config.commandTimeoutMs,stopping);
   }
+  void hydrateGain(redisContext* context, const CurrentConversion& source, const std::string& gain,
+                   const std::string& id, const std::string& cursor) {
+    require(gain.size() == 4 && std::isfinite(readFloat(gain)),"persisted gain is not finite float32");
+    streamId(id); require(id != "0-0","persisted gain command ID cannot be zero");
+    if (!cursor.empty()) { streamId(cursor); require(cursor != "0-0","persisted gain command cursor cannot be zero"); }
+    std::vector<std::string> args{"EVAL",gainHydrateScript,"",source.checkpoint};
+    for (const auto& other : config.currentConversions)
+      if (other.checkpoint != source.checkpoint && other.setting == source.setting) args.push_back(other.checkpoint);
+    args[2] = std::to_string(args.size()-3);
+    args.insert(args.end(),{writerToken,std::to_string(leaseMs),gain,id,cursor});
+    command(context,args,config.commandTimeoutMs,stopping);
+  }
   bool refreshGain(redisContext* context, const CurrentConversion& source) {
     const auto reply = readGain(context,source);
     require(reply->type == REDIS_REPLY_ARRAY && reply->elements >= 3,"invalid current gain reply");
@@ -833,7 +906,10 @@ struct Worker::Impl {
     if (kind == "idle") {
       const auto gain = str(reply->element[1]);
       require(gain.empty() || (gain.size() == 4 && std::isfinite(readFloat(gain))),"persisted gain is not finite float32");
-      return !gain.empty();
+      if (gain.empty()) return false;
+      require(reply->elements == 4,"invalid persisted gain reply");
+      hydrateGain(context,source,gain,str(reply->element[2]),str(reply->element[3]));
+      return true;
     }
     require(kind == "command" && reply->elements == 4,"invalid gain command reply");
     const auto id = str(reply->element[1]), payload = str(reply->element[2]);
@@ -891,7 +967,27 @@ struct Worker::Impl {
           update("connecting"); context = connect(); update("ready");
           // Establish every lease before applying a setting shared by several
           // channels. The following loop applies their worker states together.
-          for (const auto& source : config.currentConversions) readGain(context.get(),source);
+          try {
+            struct Donor { const CurrentConversion* source; std::string gain,id,cursor; };
+            std::map<std::string,Donor> donors;
+            for (const auto& source : config.currentConversions) {
+              const auto reply = readGain(context.get(),source);
+              if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 4 && str(reply->element[0]) == "idle" && !str(reply->element[1]).empty())
+                donors.emplace(source.setting,Donor{&source,str(reply->element[1]),str(reply->element[2]),str(reply->element[3])});
+            }
+            // Any persisted accepted member can initialize a fresh coordinator,
+            // including when the latest command has already been rejected.
+            for (const auto& item : donors) {
+              const auto& donor = item.second;
+              hydrateGain(context.get(),*donor.source,donor.gain,donor.id,donor.cursor);
+            }
+          }
+          catch (...) {
+            // A failed group acquisition must not renew an owned prefix forever
+            // while another worker holds the rest. Release only our own token.
+            try { releaseLeases(context); } catch (...) { /* finite expiry remains */ }
+            throw;
+          }
         }
         for (const auto& source : config.sources) {
           if (stopping) break;
@@ -941,12 +1037,7 @@ struct Worker::Impl {
         // A stop may interrupt an unanswered command and discard its socket.
         // Use a fresh, separately bounded connection to release our own lease;
         // otherwise an ordinary restart unnecessarily waits for crash expiry.
-        if (!context || context->err) context = connect(true);
-        std::vector<std::string> args{"EVAL",releaseScript,std::to_string(config.currentConversions.size())};
-        for (const auto& source : config.currentConversions) args.push_back(source.checkpoint);
-        args.push_back(writerToken);
-        const std::atomic<bool> releaseStopping{false};
-        command(context.get(),args,50,releaseStopping);
+        releaseLeases(context);
       } catch (...) { /* The finite server-time lease also recovers a crash. */ }
     }
     std::lock_guard<std::mutex> lock(mutex);

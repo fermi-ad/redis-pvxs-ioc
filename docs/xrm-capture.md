@@ -113,7 +113,9 @@ A complete dispatched `XADD` with a lost or invalid reply has an uncertain
 outcome: Redis may have committed it. Capture drops that in-flight pulse,
 increments `uncertainWrites`, and never internally replays it. A failure before
 the complete command was dispatched, or a known fenced rejection, can retain
-the pulse for a later attempt. The `published` counter counts confirmed replies;
+the pulse for a later attempt. Unexpected Redis errors after a fully dispatched
+publication are also uncertain: a Lua error does not prove rollback. The
+`published` counter counts confirmed replies;
 it cannot resolve an uncertain delivery. This is not an exactly-once claim.
 
 ## Diagnostics and isolated checks

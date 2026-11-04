@@ -123,7 +123,7 @@ struct CommandFailure : std::runtime_error {
 };
 
 Reply command(redisContext* context, const std::vector<std::string>& args,
-              unsigned timeoutMs, const std::atomic<bool>& stopping) {
+              unsigned timeoutMs, const std::atomic<bool>& stopping, bool publication = false) {
   std::vector<const char*> argv;
   std::vector<size_t> sizes;
   for (const auto& arg : args) { argv.push_back(arg.data()); sizes.push_back(arg.size()); }
@@ -175,10 +175,10 @@ Reply command(redisContext* context, const std::vector<std::string>& args,
     if (redisBufferRead(context) != REDIS_OK) fail("Redis read failed: " + std::string(context->errstr));
   }
   Reply reply(static_cast<redisReply*>(object), &freeReplyObject);
-  // The script preflights types and fencing before its sole mutation. An
-  // explicit Redis error is a known rejection, not an uncertain dispatch.
+  // Lua errors do not prove rollback after a dispatched publication. Only the
+  // script's structured lease_lost result establishes a nonmutating rejection.
   if (reply->type == REDIS_REPLY_ERROR)
-    throw CommandFailure("Redis rejected capture operation: " + std::string(reply->str, reply->len), false);
+    throw CommandFailure("Redis rejected capture operation: " + std::string(reply->str, reply->len), publication);
   return reply;
 }
 bool replyEquals(const redisReply* value, const char* expected) {
@@ -629,7 +629,7 @@ struct Worker::Impl {
           publishing = true;
           auto result = command(context.get(), {"EVAL", publishScript, "2", leaseKey, config.source.stream,
                                 token, std::to_string(config.source.inputRetention), *inflight},
-                                config.redis.commandTimeoutMs, stopping);
+                                config.redis.commandTimeoutMs, stopping, true);
           if (result->type == REDIS_REPLY_ARRAY && result->elements == 1 && replyEquals(result->element[0], "lease_lost")) {
             lease("expired");
             nextRenew = Clock::now();

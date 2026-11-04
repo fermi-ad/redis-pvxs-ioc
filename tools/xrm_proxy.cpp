@@ -1,6 +1,7 @@
 #include <pvxs/client.h>
 #include <yaml-cpp/yaml.h>
 #include "xrm_demux.h"
+#include "xrm_capture.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -17,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -37,6 +39,7 @@ void pause(unsigned ms);
 
 struct Options {
   std::string ip, prefix, manifest, compatibility, inventory, demuxConfig, checkDemuxConfig;
+  std::string captureConfig, checkCaptureConfig;
   unsigned discoveryPort = 5076, discoveryMs = 3000, requestMs = 3000, refreshMs = 60000, retryMs = 5000;
   bool once = false;
 };
@@ -84,8 +87,10 @@ void usage(std::ostream& out) {
       << "  [--discovery-timeout-ms 3000] [--request-timeout-ms 3000]\n"
       << "  [--discovery-port 5076]  Override only for a known PVA discovery listener.\n"
       << "  [--demux-config FILE]  Optional Redis ADC demux/current conversion worker.\n"
+      << "  [--capture-config FILE]  Optional TCP capture; requires --demux-config.\n"
       << "  [--inventory FILE]  Offline PVA inventory; optional Redis worker is independent.\n"
-      << "  xrm-proxy --check-demux-config FILE  Validate static config without network I/O.\n";
+      << "  xrm-proxy --check-demux-config FILE  Validate static config without network I/O.\n"
+      << "  xrm-proxy --check-capture-config FILE --demux-config FILE  Validate capture offline.\n";
 }
 Options options(int argc, char** argv) {
   Options result;
@@ -102,6 +107,8 @@ Options options(int argc, char** argv) {
     else if (option == "--inventory") result.inventory = value;
     else if (option == "--demux-config") result.demuxConfig = value;
     else if (option == "--check-demux-config") result.checkDemuxConfig = value;
+    else if (option == "--capture-config") result.captureConfig = value;
+    else if (option == "--check-capture-config") result.checkCaptureConfig = value;
     else if (option == "--discovery-port") result.discoveryPort = number(value, 1, 65535, option);
     else if (option == "--refresh-ms") result.refreshMs = number(value, 100, 3600000, option);
     else if (option == "--retry-ms") result.retryMs = number(value, 100, 300000, option);
@@ -112,6 +119,15 @@ Options options(int argc, char** argv) {
   if (!result.checkDemuxConfig.empty()) {
     require(argc == 3, "--check-demux-config must be used alone");
     return result;
+  }
+  if (!result.checkCaptureConfig.empty()) {
+    require(argc == 5 && !result.demuxConfig.empty(),
+            "--check-capture-config requires --demux-config and must be used without other options");
+    return result;
+  }
+  if (!result.captureConfig.empty()) {
+    require(!result.demuxConfig.empty(), "--capture-config requires --demux-config");
+    require(!result.once && result.inventory.empty(), "--capture-config cannot be combined with --once or --inventory");
   }
   require(!result.ip.empty() && !result.manifest.empty(), "--ip and --manifest are required");
   require(result.discoveryPort != 4210, "acquisition port 4210 is forbidden");
@@ -369,18 +385,39 @@ int main(int argc, char** argv) {
       std::cout << "xrm-proxy: demux configuration is valid\n";
       return 0;
     }
+    if (!opt.checkCaptureConfig.empty()) {
+      xrm_capture::loadConfig(opt.checkCaptureConfig, xrm_demux::loadConfig(opt.demuxConfig));
+      std::cout << "xrm-proxy: capture configuration is valid\n";
+      return 0;
+    }
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
     File lock(::open((opt.manifest + ".lock").c_str(), O_CREAT | O_RDWR | O_NOFOLLOW, 0644));
     require(lock.fd >= 0 && ::flock(lock.fd, LOCK_EX | LOCK_NB) == 0, "manifest already owned or lock unavailable");
     std::unique_ptr<xrm_demux::Worker> demux;
+    std::optional<xrm_demux::Config> demuxConfig;
     if (!opt.demuxConfig.empty()) {
       try {
-        demux = std::make_unique<xrm_demux::Worker>(xrm_demux::loadConfig(opt.demuxConfig));
+        demuxConfig = xrm_demux::loadConfig(opt.demuxConfig);
+        demux = std::make_unique<xrm_demux::Worker>(*demuxConfig);
         demux->start();
       } catch (const std::exception& error) {
         demux.reset();
         std::cerr << "xrm-proxy: demux startup failed; PVA inventory continues: " << error.what() << '\n';
+      }
+    }
+    std::unique_ptr<xrm_capture::Worker> capture;
+    if (!opt.captureConfig.empty()) {
+      try {
+        require(demuxConfig.has_value(), "capture requires a valid demux configuration");
+        auto config = xrm_capture::loadConfig(opt.captureConfig, *demuxConfig);
+        require(config.host == opt.ip, "capture device.host must match --ip");
+        capture = std::make_unique<xrm_capture::Worker>(std::move(config));
+        capture->start();
+      } catch (const std::exception& error) {
+        capture.reset();
+        std::cerr << "xrm-proxy: capture severity=ERROR event=startup_failed; PVA inventory and demux continue: "
+                  << error.what() << '\n';
       }
     }
     std::string previousDemuxStatus;

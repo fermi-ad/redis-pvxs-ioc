@@ -23,6 +23,7 @@
 #include <set>
 #include <sstream>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -200,12 +201,22 @@ std::string writerToken() {
   return token.str();
 }
 int openLogSink() {
+  // Regular files must share stderr's open-file description and offset.
+  // Reopening one would let ordinary inventory output overwrite capture logs.
+  struct stat destination{};
+  if (::fstat(STDERR_FILENO, &destination) == 0 && S_ISREG(destination.st_mode)) {
+#ifdef F_DUPFD_CLOEXEC
+    return ::fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+#else
+    return ::dup(STDERR_FILENO);
+#endif
+  }
   // Reopening the descriptor creates a private open-file description on Linux,
   // so O_NONBLOCK does not change stderr for the inventory/demux threads.
 #ifdef O_CLOEXEC
-  constexpr int flags = O_WRONLY | O_NONBLOCK | O_APPEND | O_CLOEXEC;
+  constexpr int flags = O_WRONLY | O_NONBLOCK | O_CLOEXEC;
 #else
-  constexpr int flags = O_WRONLY | O_NONBLOCK | O_APPEND;
+  constexpr int flags = O_WRONLY | O_NONBLOCK;
 #endif
   int fd = ::open("/proc/self/fd/2", flags);
   if (fd < 0) fd = ::open("/dev/fd/2", flags);
@@ -213,7 +224,7 @@ int openLogSink() {
     const auto original = ::fcntl(STDERR_FILENO, F_GETFL, 0);
     if (original >= 0 && (original & O_NONBLOCK)) fd = ::dup(STDERR_FILENO);
   }
-  return fd;  // Logging is best effort; never fall back to a blocking sink.
+  return fd;  // Pipes never fall back to a blocking sink.
 }
 }  // namespace
 

@@ -6,12 +6,14 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <fcntl.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -194,27 +196,86 @@ void blockedLoggingChild() {
   assert(::dup2(original, STDERR_FILENO) == STDERR_FILENO);
   ::close(original); ::close(pipefd[0]); ::close(pipefd[1]);
 }
-void blockedLoggingTest() {
+void regularLoggingChild() {
+  char path[] = "/tmp/xrm-capture-log.XXXXXX";
+  const auto file = ::mkstemp(path);
+  assert(file >= 0);
+  ::unlink(path);
+  assert(::dup2(file, STDERR_FILENO) == STDERR_FILENO);
+  std::signal(SIGABRT, [](int) {
+    ::lseek(STDERR_FILENO, 0, SEEK_SET);
+    char bytes[4096];
+    for (;;) {
+      const auto count = ::read(STDERR_FILENO, bytes, sizeof(bytes));
+      if (count <= 0) break;
+      (void)::write(STDOUT_FILENO, bytes, static_cast<size_t>(count));
+    }
+    ::_exit(134);
+  });
+  std::cerr << "inventory-marker-before\n" << std::flush;
+  auto config = xrm_capture::parseConfig(yaml, demux());
+  config.redis.port = 1;
+  config.redis.connectTimeoutMs = config.redis.commandTimeoutMs = 20;
+  config.redis.retryMs = 10;
+  {
+    const auto before = ::fcntl(STDERR_FILENO, F_GETFL, 0);
+    xrm_capture::Worker worker(config);
+    assert(::fcntl(STDERR_FILENO, F_GETFL, 0) == before);
+    worker.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cerr << "inventory-marker-during\n" << std::flush;
+    worker.stop();
+    assert(worker.status().logDrops == 0);
+  }
+  struct stat destination{};
+  assert(::fstat(STDERR_FILENO, &destination) == 0);
+  // Ordinary stderr must have advanced past every capture write as well.
+  assert(::lseek(STDERR_FILENO, 0, SEEK_CUR) == destination.st_size);
+  std::cerr << "inventory-marker-after\n" << std::flush;
+  assert(::lseek(file, 0, SEEK_SET) == 0);
+  std::string contents;
+  char bytes[4096];
+  for (;;) {
+    const auto count = ::read(file, bytes, sizeof(bytes));
+    assert(count >= 0);
+    if (!count) break;
+    contents.append(bytes, static_cast<size_t>(count));
+  }
+  assert(contents.find("inventory-marker-before\n") == 0);
+  assert(contents.find("inventory-marker-during\n") != std::string::npos);
+  assert(contents.find("capture severity=") != std::string::npos);
+  assert(contents.find("state=stopped") != std::string::npos);
+  const std::string last = "inventory-marker-after\n";
+  assert(contents.size() >= last.size() && contents.compare(contents.size() - last.size(), last.size(), last) == 0);
+  ::close(file);
+}
+void loggingChildTest(void (*action)(), const char* error) {
   const auto child = ::fork();
   assert(child >= 0);
-  if (child == 0) { blockedLoggingChild(); ::_exit(0); }
+  if (child == 0) { action(); ::_exit(0); }
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   int status = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     const auto result = ::waitpid(child, &status, WNOHANG);
-    if (result == child) { assert(WIFEXITED(status) && WEXITSTATUS(status) == 0); return; }
+    if (result == child) {
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) std::cerr << error << ": child status=" << status << '\n';
+      assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+      return;
+    }
     assert(result == 0 || (result < 0 && errno == EINTR));
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   ::kill(child, SIGKILL);
   ::waitpid(child, &status, 0);
-  assert(false && "capture stop stalled behind a full stderr pipe");
+  std::cerr << error << '\n';
+  assert(false && "capture logging regression child timed out");
 }
 }  // namespace
 
 int main() {
   parseTests();
   framingTests();
-  blockedLoggingTest();
+  loggingChildTest(blockedLoggingChild, "capture stop stalled behind a full stderr pipe");
+  loggingChildTest(regularLoggingChild, "capture regular-file logging stalled");
   std::cout << "capture configuration and framing tests passed\n";
 }

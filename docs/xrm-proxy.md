@@ -3,8 +3,9 @@
 `xrm-proxy` discovers the stock XRM PVA servers from a numeric IPv4 address and
 publishes the channel map consumed by `pva_gateway.file`. The sidecar handles
 inventory and naming; `redis-pvxs-ioc` handles downstream PVA operations and ACF.
-An optional independent worker also demultiplexes configured Redis raw streams;
-stock PVA mirroring does not copy values through Redis.
+Optional independent workers capture the qualified TCP event profile and
+demultiplex configured Redis raw streams; stock PVA mirroring does not copy
+values through Redis. See [TCP capture](xrm-capture.md) for the explicit opt-in.
 
 ```sh
 xrm-proxy --ip 10.200.8.253 --prefix SL:INST:ICM:XRM \
@@ -34,8 +35,10 @@ are off, TCP name servers are empty, and active discovery targets only the named
 IP on UDP 5076. A PVA empty SEARCH with MustReply discovers the current TCP
 listeners. Only TCP endpoints and packet origins on the named IP are accepted.
 The sidecar queries the built-in `server` RPC with `op=channels` at those
-listeners. It does not use SSH, scan TCP ports, open an acquisition socket,
-issue a PUT, or call any device-control RPC. Port 4210 is explicitly forbidden.
+listeners. Discovery does not use SSH, scan TCP ports, open an acquisition
+socket, issue a PUT, or call any device-control RPC. Port 4210 is explicitly
+forbidden as a PVA inventory endpoint. Hardware TCP acquisition is a separate
+opt-in with `--capture-config`.
 
 PVA loopback multicast fanout on the device must deliver directed discovery to
 both stock IOCs, and both must support the `server` channel enumeration RPC.
@@ -172,7 +175,8 @@ Source timestamps must come from the raw entry's declared timestamp field; a
 missing or invalid source timestamp is marked INVALID rather than replaced with
 the sidecar's clock.
 See [Redis demultiplexing](xrm-demux.md) for the exact configuration and stream
-contracts.
+contracts. Adding [TCP capture](xrm-capture.md) supplies complete raw pulses to
+that same configured stream without a Python producer.
 
 These demux outputs do not automatically create PVA waveform mappings. Configure
 ordinary read-only numeric arrays in `redis-pvxs-ioc` with the opt-in
@@ -187,8 +191,9 @@ PVA mirror continues to forward upstream timestamps unchanged.
 For operation planning, PM STOP freezes history; it does not stop capture.
 A 4 MHz provisioning setting is not a guarantee that the full selected channel
 payload can be carried over Ethernet. Qualify the actual channel count, sample
-format and sustained transport rate independently. ES/SPAD layouts are
-unsupported by this raw-stream demultiplexer.
+format and sustained transport rate independently. The explicit
+`acq4xx-es-int16-le` format supports the qualified sixteen-channel event
+profile; SPAD layouts remain unsupported.
 
 ```sh
 xrm-proxy --ip 10.200.8.253 --prefix SL:INST:ICM:XRM \

@@ -29,6 +29,8 @@
 - [PVA RPC to gRPC forwarding](rpc-forwarding.md): expose reflected gRPC methods
   as RPC PVs.
 - [Discovery](reccaster.md): native RecCeiver catalog registration and PVA search.
+- [XRM TCP capture](xrm-capture.md): opt-in event-profile capture, Redis producer
+  ownership, bounded buffering, reconnects, and delivery diagnostics.
 
 ## Contributors
 

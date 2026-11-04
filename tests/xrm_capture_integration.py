@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Black-box loopback qualification of XRM capture and its Redis handoff.
 
-Run through scripts/run-with-redis.py, passing --sidecar /path/to/xrm-proxy.
+Run through scripts/run-with-redis.py, passing --sidecar /path/to/xrm-proxy,
+--ioc /path/to/redis-pvxs-ioc and --pva-probe /path/to/xrm_capture_pva_probe.
 The synthetic profile is the qualified 32-byte ES header followed by 16383
 sample-major frames of sixteen little-endian int16 counts. No hardware,
 non-loopback network, external Python packages, or operator configuration is used.
@@ -287,6 +288,15 @@ def float32(value):
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
+def channel_goldens(tag, channel):
+    counts = b"".join(struct.pack("<h", count_value(sample, channel, tag)) for sample in range(SAMPLES))
+    volts = b"".join(struct.pack("<f", float32(float32(count_value(sample, channel, tag) * .25) - 1))
+                     for sample in range(SAMPLES))
+    current = b"".join(struct.pack("<f", float32(value[0] * 2.5))
+                       for value in struct.iter_unpack("<f", volts))
+    return counts, volts, current
+
+
 class CaptureTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="xrm-capture-test-")
@@ -460,12 +470,7 @@ class CaptureTests(unittest.TestCase):
                 current_rows = self.redis.rows(self.channel(channel, "current"))
                 self.assertEqual((len(count_rows), len(volt_rows), len(current_rows)), (1, 1, 1))
                 counts, volts, current = count_rows[0][1], volt_rows[0][1], current_rows[0][1]
-                expected_counts = b"".join(struct.pack("<h", count_value(sample, channel, 17))
-                                           for sample in range(SAMPLES))
-                expected_volts = b"".join(struct.pack("<f", float32(float32(count_value(sample, channel, 17) * .25) - 1))
-                                          for sample in range(SAMPLES))
-                expected_current = b"".join(struct.pack("<f", float32(value[0] * 2.5))
-                                            for value in struct.iter_unpack("<f", expected_volts))
+                expected_counts, expected_volts, expected_current = channel_goldens(17, channel)
                 self.assertEqual(counts[b"_"], expected_counts)
                 self.assertEqual(volts[b"_"], expected_volts)
                 self.assertEqual(current[b"_"], expected_current)
@@ -477,6 +482,82 @@ class CaptureTests(unittest.TestCase):
                     self.assertNotIn(b"acquisition_time_ns", record)
                     self.assertEqual(record[b"event_counter_0"], b"17")
                     self.assertEqual(record[b"event_counter_1"], b"12362")
+
+    def test_complete_capture_to_pva_preserves_waveforms_units_and_unknown_time(self):
+        self.demux = self.configuration(self.redis.socket.getpeername()[1], currents=True)
+        # RedisAdapter's wire schema is {base}:sub. Produce the two IOC-facing
+        # streams with that schema, while retaining a unique per-test suffix.
+        volts_key = "{XRM}:" + self.channel(1, "volts")
+        current_key = "{XRM}:" + self.channel(1, "current")
+        self.demux["sources"][0]["channels"][0]["volts"] = volts_key
+        self.demux["current_conversions"][0]["stream"] = volts_key
+        self.demux["current_conversions"][0]["output"] = current_key
+        self.start()
+        connection = self.device.accept()
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        endpoint = f"127.0.0.1:{port}"
+        config = {
+            "schema_version": 1,
+            "server": {"instance": "capture-fixture", "namespace": "", "interfaces": ["127.0.0.1"],
+                       "tcp_port": port, "udp_port": port, "auto_beacon": False},
+            "redis": {"host": "127.0.0.1", "port": self.redis.socket.getpeername()[1], "base_key": "XRM"},
+            "discovery": {"enabled": False},
+            "pvs": [
+                {"name": name, "type": "float32", "shape": "array",
+                 "read": {"backend": "redis", "key": self.channel(1, suffix)},
+                 "source_time": {"mode": "unavailable"},
+                 "source_health": {"required": False, "stale_after_ms": 0},
+                 "metadata": {"units": units}}
+                for name, suffix, units in (("CAPTURE:VOLTS", "volts", "V"),
+                                            ("CAPTURE:MAMPS", "current", "mA"))],
+        }
+        config_path = self.directory / "ioc.json"
+        config_path.write_text(json.dumps(config))
+        ioc_log_path = self.directory / "ioc.log"
+        environment = dict(os.environ, EPICS_PVA_AUTO_ADDR_LIST="NO", EPICS_PVA_ADDR_LIST=endpoint,
+                           EPICS_PVA_NAME_SERVERS="")
+        with ioc_log_path.open("w+") as log:
+            ioc = subprocess.Popen([ARGS.ioc, "--config", str(config_path)], stdout=log, stderr=log,
+                                   env=environment)
+            try:
+                expected = pulse(81)
+                connection.sendall(expected[:19])
+                connection.sendall(expected[19:])
+                self.assertEqual(self.wait_rows(1)[0][1], {b"_": expected})
+                eventually(lambda: self.redis.command("XLEN", current_key) == 1,
+                           "captured pulse reaches IOC-facing current stream", timeout=20)
+                _, volts, current = channel_goldens(81, 1)
+                for name, units, golden in (("CAPTURE:VOLTS", "V", volts),
+                                             ("CAPTURE:MAMPS", "mA", current)):
+                    golden_path = self.directory / (name.replace(":", "-") + ".float32-le")
+                    golden_path.write_bytes(golden)
+                    last_probe = []
+
+                    def probe_ready():
+                        self.alive()
+                        self.assertIsNone(ioc.poll(), ioc_log_path.read_text())
+                        result = subprocess.run([ARGS.pva_probe, endpoint, name, str(golden_path), units],
+                                                capture_output=True, text=True, timeout=8, env=environment)
+                        last_probe[:] = [result.stdout, result.stderr]
+                        return result.returncode == 0
+
+                    try:
+                        eventually(probe_ready, name + " exact float32 PVA waveform/units/unknown time",
+                                   timeout=15)
+                    except (AssertionError, subprocess.TimeoutExpired) as error:
+                        self.fail(f"{error}\nProbe output: {last_probe!r}\nIOC log:\n{ioc_log_path.read_text()}")
+            finally:
+                if ioc.poll() is None:
+                    ioc.terminate()
+                    try:
+                        ioc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        ioc.kill()
+                        ioc.wait(timeout=5)
+                        self.fail("IOC did not stop within five seconds: " + ioc_log_path.read_text())
+            self.assertEqual(ioc.returncode, 0, ioc_log_path.read_text())
 
     def test_raw_and_derived_retention_remain_bounded(self):
         self.demux["sources"][0]["retention"] = 2
@@ -640,8 +721,12 @@ class CaptureTests(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sidecar", required=True)
+    parser.add_argument("--ioc", required=True)
+    parser.add_argument("--pva-probe", required=True)
     ARGS, remaining = parser.parse_known_args()
     ARGS.sidecar = str(Path(ARGS.sidecar).resolve())
+    ARGS.ioc = str(Path(ARGS.ioc).resolve())
+    ARGS.pva_probe = str(Path(ARGS.pva_probe).resolve())
     if "REDIS_PVXS_TEST_REDIS_PORT" not in os.environ:
         parser.error("run through scripts/run-with-redis.py for an isolated Redis")
     unittest.main(argv=[__file__, *remaining])

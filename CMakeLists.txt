@@ -310,6 +310,8 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   target_compile_options(xrm_capture_tests PRIVATE -UNDEBUG)
   add_test(NAME xrm_capture_tests COMMAND xrm_capture_tests)
   set_tests_properties(xrm_capture_tests PROPERTIES TIMEOUT 15)
+  add_executable(xrm_capture_pva_probe tests/xrm_capture_pva_probe.cpp)
+  target_link_libraries(xrm_capture_pva_probe PRIVATE redis-pvxs-ioc-core)
   add_executable(xrm_event_tests tests/xrm_event_tests.cpp)
   target_include_directories(xrm_event_tests PRIVATE tools)
   target_compile_options(xrm_event_tests PRIVATE -UNDEBUG)
@@ -334,7 +336,8 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     --timeout 150
     -- ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/xrm_capture_integration.py
-    --sidecar $<TARGET_FILE:xrm-proxy>)
+    --sidecar $<TARGET_FILE:xrm-proxy> --ioc $<TARGET_FILE:redis-pvxs-ioc>
+    --pva-probe $<TARGET_FILE:xrm_capture_pva_probe>)
   set_tests_properties(xrm_capture_integration PROPERTIES TIMEOUT 180)
   add_executable(xrm_proxy_integration_fixture tests/xrm_proxy_integration_fixture.cpp)
   target_link_libraries(xrm_proxy_integration_fixture PRIVATE redis-pvxs-ioc-core)

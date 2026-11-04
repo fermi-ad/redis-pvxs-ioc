@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
 `redis-pvxs-ioc` is a standalone PVAccess service for hot-reloadable,
-Redis-backed EPICS process variables defined by YAML.
+Redis-backed process variables and selected upstream PVA channels defined by YAML.
 
 ## Key features
 
@@ -46,6 +46,15 @@ Redis-backed EPICS process variables defined by YAML.
 - **Dynamic integrations:** one-shot ChannelFinder publishing and
   reflection-based PVA RPC to gRPC forwarding without service-specific generated
   code in the IOC.
+- **Selected PVA gateway:** forward native operations for explicitly mapped
+  upstream channels at configured TCP addresses, with optional local access
+  policy, transactional reload, and discovery.
+  See [gateway configuration](docs/configuration.md#pva_gateway) for its
+  operation and security limits.
+- **XRM sidecar:** discover both native IOCs, publish source-qualified mappings
+  with an optional project prefix, and optionally demultiplex configured raw
+  Redis streams. See [XRM proxy](docs/xrm-proxy.md) and
+  [Redis demultiplexing](docs/xrm-demux.md).
 - **Container tooling:** released images include `pvxget`, `pvxput`, and other
   PVXS tools for validation and troubleshooting.
 

@@ -32,11 +32,12 @@ alarms: {}                # optional
 channelfinder: {}         # optional
 discovery: {}             # optional; automatic RecCeiver registration enabled
 limits: {}                # optional; bounded write queues, deadlines and payloads
-pvs: []                   # optional when rpc_services is non-empty
-rpc_services: []          # optional when pvs is non-empty
+pvs: []                   # optional with RPC services or selected gateway PVs
+rpc_services: []          # optional with PVs or selected gateway PVs
+pva_gateway: {}           # optional; explicitly selected upstream PVA channels
 ```
 
-At least one `pvs` or `rpc_services` entry is required. The old `PVList`,
+At least one `pvs`, `rpc_services`, `pva_gateway.pvs` entry or `pva_gateway.file` is required. The old `PVList`,
 `PVBase`, and `RedisBase` prototype keys are rejected.
 
 ## Operation limits
@@ -93,6 +94,138 @@ Native EPICS ACF access control is opt-in and startup-immutable. When enabled,
 the policy, macros, defaults, endpoint assignments, and optional file watcher
 are hot-reloadable. See [Access control](access-control.md) for the complete
 schema, authorization behavior, and reload guarantees.
+
+## `pva_gateway`
+
+The optional gateway forwards selected PVA channels from explicit numeric IPv4
+TCP endpoints. It supports GET_FIELD, GET, PUT, PUT_GET, PROCESS, ARRAY, monitors and RPC, including the
+client's operation-specific field selection and `pvRequest`. No Redis-backed
+PVs are required for a gateway-only IOC, but the usual Redis backend settings
+remain required for the alarm publisher.
+
+```yaml
+server:
+  instance: camera-gateway
+  namespace: VIEW
+redis:
+  base_key: gateway
+  host: redis
+  port: 6379
+access:
+  enabled: true             # built-in DEFAULT READ policy when file is omitted
+pva_gateway:
+  pvs:
+    - name: image
+      upstream: "CAMERA:IMAGE"
+      server: "192.0.2.10:5075"
+      aliases: ["LEGACY:IMAGE"]
+  file: /var/lib/xrm-proxy/gateway.yaml
+  cache_file: /var/lib/redis-pvxs-ioc/gateway.last-good.yaml
+  watch: {enabled: true, interval_ms: 1000, settle_ms: 250}
+```
+
+This exports `VIEW:image` and the exact alias `LEGACY:IMAGE` through the same
+canonical source. Canonical names receive `server.namespace`; aliases are exact
+full names, matching Redis PV aliases. Omit the namespace when a producer emits
+fully qualified canonical names. Inline `pvs` and the optional manifest are
+combined, with collisions checked across both sets, Redis PVs, aliases,
+diagnostics and reflected RPCs.
+
+Each source requires an explicit unicast `server: IPv4:TCP-port`; UDP search,
+environment address lists and name servers are not used. Unspecified,
+multicast, limited broadcast, `.255` addresses and local-interface broadcast
+addresses are rejected. A server/upstream pair may appear once; use aliases for
+multiple exported names. Direct addressing does not authenticate the server.
+Upstream names cannot match this generation's local endpoints or any endpoint
+still served by the preceding generation. Forwarding cycles through independent
+gateways remain the operator's responsibility.
+
+The gateway preserves the upstream PVA structure and operation requests.
+Each monitor has its own upstream subscription. Upstream disconnects and errors
+are reported to downstream clients; commands are never replayed after an
+uncertain timeout or disconnect. Operations, channels, monitor queues and
+retained payloads share process limits across the entire catalog. These limits
+cover admitted forwarding work; PVXS transport buffers and decoding allocations
+are additional memory, so `max_payload_bytes` is not an inbound wire-frame cap.
+For ARRAY reads with count zero (all remaining elements), the gateway checks the
+current upstream length before forwarding the original request. Concurrent
+upstream growth can exceed that estimate; the returned payload is checked again
+after receipt. Timeout recovery closes the affected downstream channel so the
+client can reconnect with fresh operation setups; other subscriptions on that
+channel also disconnect.
+Device authorization sees the gateway client's
+identity; local ACF evaluates the downstream identity independently.
+
+Access control is off by default, permitting forwarded writes and RPCs. Enabling
+`access` without a file installs a read-only `DEFAULT` policy, covering gateways,
+Redis PVs, RPCs and admin commands. A supplied ACF keeps its existing policy
+semantics. Main YAML can assign an inline source with `access` or select a
+particular exported name using `access_overrides`:
+
+```yaml
+access: {enabled: true, file: /etc/redis-pvxs-ioc/access.acf}
+pva_gateway:
+  file: /var/lib/xrm-proxy/gateway.yaml
+  access_overrides:
+    "LEGACY:COMMAND": {asg: OPERATORS, asl: 0}
+```
+
+The custom ACF must define every assigned ASG. Override keys match exact exported
+names; a namespace-relative canonical name is also accepted. Overrides can name
+exports not yet discovered. Each alias has its own local authorization while
+sharing the canonical upstream mapping. Manifests cannot select ASGs or change
+policy.
+
+The manifest is a bounded YAML or JSON document with exactly this schema:
+
+```yaml
+schema_version: 1
+revision: inventory-2026-10-29-001
+pvs:
+  - name: "BASE:DEVICE:STATUS"
+    upstream: "DEVICE:STATUS"
+    server: "192.0.2.10:5075"
+    aliases: ["LEGACY:STATUS"]
+```
+
+Only `schema_version`, `revision` and `pvs` are allowed at the root; entries permit
+only `name`, `upstream`, `server` and `aliases`. The nonempty revision is at most
+256 bytes, files at most 16 MiB, names at most 1024 bytes, and at most 100000 combined canonical and alias names are accepted.
+An empty `pvs` list intentionally withdraws manifest exports. Paths resolve
+relative to the main YAML. A producer should publish with atomic rename.
+
+The optional watcher polls by path, waits for stable bytes for `settle_ms`, and
+stages a complete internal configuration transaction. It requires no admin PVA
+WRITE permission and preserves the active ACF bytes; edited policies take effect
+through an explicit full reload, policy reload, or an enabled access watcher. Unchanged files do not increment the configuration generation.
+Invalid, missing or partially written candidates preserve the active generation;
+unchanged invalid content is not retried continuously. Changes to gateway
+mappings and aliases use the same all-or-nothing namespace publication as normal
+reloads. The `access.enabled` startup setting remains immutable.
+
+With no manifest at first startup, the IOC serves its inline/baseline endpoints
+and reports `waiting`. When `cache_file` is supplied, the IOC atomically persists
+the last accepted manifest there and revalidates it against the current main
+configuration on a later startup. If the producer file is unavailable or
+invalid, a valid cache starts in `stale` state. Use a separate writable state
+volume for the cache; the source manifest directory may remain read-only.
+Without `cache_file`, retention lasts for the current process. A cache write
+failure is reported without undoing an accepted generation.
+
+`--check-config` validates the current manifest, using a valid configured cache
+when the manifest is missing, unreadable or invalid. `--diff-config OLD NEW` resolves each configuration's
+current manifest and reports mapping changes plus `gateway_manifest_changed`
+for manifest reference, watcher, cache, revision or content changes. Comparing
+two YAML files that reference the same mutable manifest compares its current
+contents; keep versioned manifest files to compare historical inventories.
+
+`SYS:<instance>:gateway:status` exposes state, active and attempted manifest
+revision/fingerprint, errors, cache state, canonical/alias counts and generation.
+Its `sources` table reports canonical names, upstream endpoints, connectivity,
+channels, monitors and operation counters. Fingerprints are diagnostic content
+identities, not security tokens. Gateway catalog entries are published while
+upstreams are unavailable. The Redis `ready` diagnostic continues to describe
+Redis sources; gateway health is reported separately.
 
 ## Redis backends
 
@@ -293,6 +426,65 @@ alarm and zero source timestamp until valid data arrives. Empty numeric arrays
 are valid. Legacy payload byte order and source timestamp interpretation are
 unchanged; the exact Redis stream cursor is tracked separately for ordering.
 
+### Source time policy
+
+Ordinary numeric arrays may opt into an acquisition timestamp stored alongside
+the binary `_` payload. For example, the raw int16 output from
+[XRM demultiplexing](xrm-demux.md) can be served with:
+
+```yaml
+- name: XRM:CH5:raw
+  type: int16
+  shape: array
+  read: {key: verified-uut-CH5-raw}
+  source_time:
+    mode: unix-nanoseconds-v1
+    field: acquisition_time_ns
+    valid_field: acquisition_time_valid
+```
+
+The route key is relative to the configured Redis `base_key`; configure it to
+resolve to the demux output's exact stream key. Use `type: float32` for its
+calibrated volts output. This policy does not change the existing native binary
+array payload contract; demux outputs are little-endian and require a
+little-endian IOC host.
+
+| Mode | Timestamp source |
+| --- | --- |
+| `legacy-redis-id` | Existing Redis-ID timestamp interpretation; default when `source_time` is absent |
+| `unix-nanoseconds-v1` | Exact signed int64 Unix nanoseconds in `field`, with independent validity in `valid_field` |
+| `unavailable` | No acquisition time; publish a zero timestamp with an INVALID alarm |
+
+If `source_time` is present, `mode` is required. Unix mode requires both field
+names to be nonempty and distinct from each other and `_`. The other modes
+forbid `field` and `valid_field`. Unknown or duplicate fields reject the
+configuration. Both nonlegacy modes require an ordinary read-only numeric
+array: scalars, boolean/string arrays, and write/confirmation routes are
+rejected. NTNDArray rejects every `source_time` declaration because it has a
+separate [frame timestamp contract](ntndarray.md).
+
+Unix timestamp text accepts an optional `+` or `-` followed by decimal digits,
+within the signed int64 range. Whitespace, floating point, trailing characters
+and overflow reject the sample. A supplied validity field must be exactly `0`
+or `1`; an absent field defaults to false. Time may be absent when validity is
+absent or `0`. Validity `1` requires a supplied timestamp. Malformed supplied
+time rejects the sample even when validity is false.
+
+Accepted payloads with invalid or absent acquisition time still update the
+waveform, with an INVALID alarm. Any supplied timestamp is preserved exactly,
+including invalid, negative, zero and backward times; absent time publishes
+zero. No mode substitutes the IOC's receipt time or host clock for unavailable
+acquisition time. Malformed timing retains the previous accepted value and
+timestamp with an INVALID alarm, as malformed payloads do. Redis stream IDs
+remain the ordering and resume cursors independently of acquisition time.
+
+The source-status table exposes `sourceTimeMode`, `sourceTimePresent`,
+`sourceTimeValid` and `sourceTimeError` separately from payload validity and
+monotonic freshness. Changing the mode or either field name replaces the
+runtime during transactional reload; a failed candidate preserves the active
+generation. Omitting the policy preserves existing legacy/Pi timing. Native
+PVA gateway timestamps are forwarded unchanged and do not use this policy.
+
 ### Source health policy
 
 Scalar, array and NTNDArray PVs accept an optional `source_health` mapping:
@@ -308,7 +500,7 @@ readiness. It applies to both read and distinct confirmation sources. Setting it
 false retains source diagnostics and health alarms. `stale_after_ms` defaults to
 zero (cadence unspecified); otherwise it is 1–86400000 ms. Freshness measures
 time since the last valid snapshot/update was received on the IOC's monotonic
-clock. It does not estimate acquisition age from the legacy source timestamp.
+clock. It does not estimate acquisition age from the source timestamp.
 An idle source with valid data and no cadence stays fresh; a source that has
 never supplied valid data remains unready. A freshness failure retains the
 last-good value and source timestamp with an INVALID alarm. Health diagnostics
@@ -383,9 +575,9 @@ inverse mapping.
 
 `initial` is optional and must match the declared type and shape. At startup the
 runtime first attempts to load the latest Redis value; `initial` is the fallback
-when no snapshot is available. Live subscription updates then take over, and
-their Redis timestamps are carried into the PVA `timeStamp`. Boolean/string
-arrays are unsupported.
+when no snapshot is available. Live subscription updates then take over. Their
+PVA `timeStamp` follows the configured source time policy, which defaults to
+the existing Redis-ID interpretation. Boolean/string arrays are unsupported.
 
 ## `rpc_services`
 
@@ -454,8 +646,8 @@ settings requiring a restart. Credential values are never included. An omitted
 schema version and explicit version 1 compare equally. Alias ordering alone is
 not a change.
 
-A replacement includes type/route/confirmation changes and affected PVs when a
-backend definition changes. Alias-set changes are reported as `alias_changes`;
+A replacement includes type/route/confirmation and source-time policy changes,
+and affected PVs when a backend definition changes. Alias-set changes are reported as `alias_changes`;
 they retain the canonical runtime and disconnect only removed alias channels.
 Metadata changes include metadata, alarm thresholds, transforms, source-health policy and initial
 fallback definitions. They retain the runtime's subscription topology; changing

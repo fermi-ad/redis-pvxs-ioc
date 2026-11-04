@@ -8,7 +8,7 @@
 
 namespace redis_pvxs_ioc {
 
-enum class EndpointKind { Diagnostic, Value, Alias, RPC };
+enum class EndpointKind { Diagnostic, Value, Alias, RPC, Gateway };
 
 struct EndpointReservation {
   EndpointKind kind;
@@ -56,6 +56,12 @@ inline EndpointRegistry configuredEndpoints(const AppConfig& config) {
   result.addDiagnostics(config.server);
   for (size_t index = 0; index < config.pvs.size(); ++index)
     result.addPV(config.server, config.pvs[index], "root.pvs[" + std::to_string(index) + "]");
+  for (size_t index = 0; index < config.pvaGateway.pvs.size(); ++index) {
+    const auto names = fullGatewayNames(config.server, config.pvaGateway.pvs[index]);
+    for (size_t j = 0; j < names.size(); ++j)
+      result.reserve(names[j], j ? EndpointKind::Alias : EndpointKind::Gateway, names.front(),
+                     "root.pva_gateway.pvs[" + std::to_string(index) + "]" + (j ? ".aliases" : ".name"));
+  }
   return result;
 }
 

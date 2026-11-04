@@ -15,6 +15,7 @@ struct Registration {
   PVBinding binding;
   PVRegistry::Wrapper wrapper;
   std::atomic<bool> active{true};
+  std::mutex dispatchFence;
   std::mutex mutex;
   std::vector<std::weak_ptr<pvxs::server::ChannelControl>> channels;
   void track(const std::shared_ptr<pvxs::server::ChannelControl>& channel) {
@@ -41,12 +42,19 @@ public:
       : ExecOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
         target_(std::move(target)), registration_(std::move(registration)) {}
   void reply() override { target_->reply(); }
+  void reply(const pvxs::RemoteStatus& status) override { target_->reply(status); }
+  void reply(const pvxs::Value& value, const pvxs::RemoteStatus& status) override { target_->reply(value, status); }
   void reply(const pvxs::Value& value) override { target_->reply(value); }
   void error(const std::string& message) override { target_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); }
   void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
   void onCancel(std::function<void()>&& fn) override { target_->onCancel(std::move(fn)); }
   bool authorized(const pvxs::Value& value) override {
     return registration_->active && authorizeWriteDispatch(*target_, value);
+  }
+  bool commit(const std::function<bool()>& action) noexcept override {
+    std::unique_lock<std::mutex> guard(registration_->dispatchFence, std::try_to_lock);
+    return guard.owns_lock() && registration_->active && authorizeWriteCommit(*target_, action);
   }
 private:
   pvxs::Timer _timerOneShot(double delay, std::function<void()>&& fn) override {
@@ -56,20 +64,71 @@ private:
   std::shared_ptr<Registration> registration_;
 };
 
+class TrackedProxyExec final : public pvxs::server::ProxyExecOp, public OperationAuthorization {
+public:
+  TrackedProxyExec(std::unique_ptr<pvxs::server::ProxyExecOp> target, std::shared_ptr<Registration> registration)
+      : ProxyExecOp(target->name(), target->credentials(), target->kind(), target->action(), target->pvRequest()),
+        target_(std::move(target)), registration_(std::move(registration)) {}
+  void reply() override { target_->reply(); }
+  void reply(const pvxs::RemoteStatus& status) override { target_->reply(status); }
+  void reply(const pvxs::Value& value, const pvxs::RemoteStatus& status) override { target_->reply(value, status); }
+  void reply(const pvxs::Value& value) override { target_->reply(value); }
+  void replyLength(uint64_t length) override { target_->replyLength(length); }
+  void replyLength(uint64_t length, const pvxs::RemoteStatus& status) override { target_->replyLength(length, status); }
+  void error(const std::string& message) override { target_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); }
+  void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
+  void onCancel(std::function<void()>&& fn) override { target_->onCancel(std::move(fn)); }
+  bool authorized(const pvxs::Value& value) override { return registration_->active && authorizeWriteDispatch(*target_, value); }
+  bool commit(const std::function<bool()>& action) noexcept override {
+    std::unique_lock<std::mutex> guard(registration_->dispatchFence, std::try_to_lock);
+    return guard.owns_lock() && registration_->active && authorizeWriteCommit(*target_, action);
+  }
+private:
+  pvxs::Timer _timerOneShot(double delay, std::function<void()>&& fn) override { return target_->timerOneShot(delay, std::move(fn)); }
+  std::unique_ptr<pvxs::server::ProxyExecOp> target_;
+  std::shared_ptr<Registration> registration_;
+};
+
+class TrackedProxySetup final : public pvxs::server::ProxySetupOp {
+public:
+  TrackedProxySetup(std::unique_ptr<pvxs::server::ProxySetupOp> target, std::shared_ptr<Registration> registration)
+      : ProxySetupOp(target->name(), target->credentials(), target->kind(), target->pvRequest()),
+        target_(std::move(target)), registration_(std::move(registration)) {}
+  void connect(const pvxs::ProxyPrototype& type) override { target_->connect(type); }
+  void connect(const pvxs::ProxyPrototype& type, const pvxs::RemoteStatus& status) override { target_->connect(type, status); }
+  void error(const std::string& message) override { target_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); }
+  void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
+  void onClose(std::function<void(const std::string&)>&& fn) override { target_->onClose(std::move(fn)); }
+  void onExec(std::function<void(std::unique_ptr<pvxs::server::ProxyExecOp>&&, pvxs::ProxyRequest&&)>&& fn) override {
+    auto registration = registration_;
+    target_->onExec([registration, fn = std::move(fn)](std::unique_ptr<pvxs::server::ProxyExecOp>&& op, pvxs::ProxyRequest&& request) {
+      if (!registration->active) { op->error("endpoint retired"); return; }
+      fn(std::make_unique<TrackedProxyExec>(std::move(op), registration), std::move(request));
+    });
+  }
+private:
+  std::unique_ptr<pvxs::server::ProxySetupOp> target_;
+  std::shared_ptr<Registration> registration_;
+};
+
 class TrackedConnect final : public pvxs::server::ConnectOp {
 public:
   TrackedConnect(std::unique_ptr<pvxs::server::ConnectOp> target, std::shared_ptr<Registration> registration)
-      : ConnectOp(target->name(), target->credentials(), target->op(), target->pvRequest()),
+      : ConnectOp(target->name(), target->credentials(), target->op(), target->pvRequest(), target->subField()),
         target_(std::move(target)), registration_(std::move(registration)) {}
   void connect(const pvxs::Value& type) override { target_->connect(type); }
+  void connect(const pvxs::Value& type, const pvxs::RemoteStatus& status) override { target_->connect(type, status); }
   void error(const std::string& message) override { target_->error(message); }
+  void error(const pvxs::RemoteStatus& status) override { target_->error(status); }
   void logRemote(pvxs::Level level, const std::string& message) override { target_->logRemote(level, message); }
   void onClose(std::function<void(const std::string&)>&& fn) override { target_->onClose(std::move(fn)); }
   void onGet(std::function<void(std::unique_ptr<pvxs::server::ExecOp>&&)>&& fn) override {
     auto registration = registration_;
     target_->onGet([registration, fn = std::move(fn)](std::unique_ptr<pvxs::server::ExecOp>&& op) {
       if (!registration->active) { op->error("endpoint retired"); return; }
-      fn(std::move(op));
+      fn(std::make_unique<TrackedExec>(std::move(op), registration));
     });
   }
   void onPut(std::function<void(std::unique_ptr<pvxs::server::ExecOp>&&, pvxs::Value&&)>&& fn) override {
@@ -98,6 +157,13 @@ public:
       fn(std::make_unique<TrackedConnect>(std::move(op), registration));
     });
   }
+  void onProxy(std::function<void(std::unique_ptr<pvxs::server::ProxySetupOp>&&)>&& fn) override {
+    auto registration = registration_;
+    target_->onProxy([registration, fn = std::move(fn)](std::unique_ptr<pvxs::server::ProxySetupOp>&& op) {
+      if (!registration->active) { op->error("endpoint retired"); return; }
+      fn(std::make_unique<TrackedProxySetup>(std::move(op), registration));
+    });
+  }
   void onRPC(std::function<void(std::unique_ptr<pvxs::server::ExecOp>&&, pvxs::Value&&)>&& fn) override {
     auto registration = registration_;
     target_->onRPC([registration, fn = std::move(fn)](std::unique_ptr<pvxs::server::ExecOp>&& op, pvxs::Value&& value) {
@@ -114,6 +180,7 @@ public:
   }
   void onClose(std::function<void(const std::string&)>&& fn) override { target_->onClose(std::move(fn)); }
   void close() override { target_->close(); }
+  void closeAsync() override { target_->closeAsync(); }
 private:
   void _updateInfo(const std::shared_ptr<const pvxs::server::ReportInfo>& info) override { target_->updateInfo(info); }
   std::shared_ptr<pvxs::server::ChannelControl> target_;
@@ -153,7 +220,8 @@ std::shared_ptr<PVRegistry::Prepared> PVRegistry::prepare(PVBindings desired, co
   auto names = std::make_shared<std::set<std::string>>();
   for (auto& entry : desired) {
     const auto& name = entry.first;
-    if (name.empty() || name.find('\0') != std::string::npos || !entry.second.pv || !entry.second.owner)
+    if (name.empty() || name.find('\0') != std::string::npos ||
+        (bool(entry.second.pv) == bool(entry.second.attach)) || !entry.second.owner)
       throw std::invalid_argument("invalid endpoint binding: " + name);
     const auto old = result->previous->entries.find(name);
     if (old != result->previous->entries.end() && old->second->binding.owner == entry.second.owner &&
@@ -186,7 +254,10 @@ bool PVRegistry::publish(const std::shared_ptr<Prepared>& prepared,
       return false;
     }
     if (beforeCommit && !beforeCommit(error)) return false;
-    for (const auto& registration : prepared->retiring) registration->active = false;
+    for (const auto& registration : prepared->retiring) {
+      std::lock_guard<std::mutex> fence(registration->dispatchFence);
+      registration->active = false;
+    }
     std::atomic_store(&impl_->current, prepared->next);
   }
   error.clear();
@@ -216,7 +287,8 @@ void PVRegistry::onCreate(Channel&& channel) {
   Channel tracked = std::make_unique<TrackedChannel>(control, registration);
   if (registration->wrapper) tracked = registration->wrapper(std::move(tracked));
   if (!tracked) return;
-  registration->binding.pv.attach(std::move(tracked));
+  if (registration->binding.attach) registration->binding.attach(std::move(tracked));
+  else registration->binding.pv.attach(std::move(tracked));
   // Retirement may have drained the tracked channel list before attach
   // completed. Check after attaching; later retirements will find the channel
   // in that list. Operation callbacks also fence all retired registrations.

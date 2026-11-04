@@ -94,6 +94,18 @@ struct SourceHealthConfig {
   uint32_t staleAfterMs = 0;
 };
 
+enum class SourceTimeMode {
+  LegacyRedisId,
+  UnixNanosecondsV1,
+  Unavailable,
+};
+
+struct SourceTimeConfig {
+  SourceTimeMode mode = SourceTimeMode::LegacyRedisId;
+  std::string field;
+  std::string validField;
+};
+
 struct AccessAssignment {
   std::string asg = "DEFAULT";
   int asl = 0;
@@ -118,6 +130,32 @@ struct AccessConfig {
   std::map<std::string, std::string> macros;
   AccessWatchConfig watch;
   AccessDefaultsConfig defaults;
+};
+
+// A selected, explicitly addressed upstream PVA channel.  Local names are
+// relative to server.namespace; upstream names are complete device PV names.
+struct GatewayPVConfig {
+  std::string name;
+  std::string upstream;
+  std::string server;
+  std::vector<std::string> aliases;
+  std::optional<AccessAssignment> access;
+};
+
+struct GatewayConfig {
+  std::vector<GatewayPVConfig> pvs;
+  std::string file;
+  std::string cacheFile;
+  AccessWatchConfig watch;
+  // Main configuration only. Manifest input cannot select authorization policy.
+  std::map<std::string, AccessAssignment> accessOverrides;
+  std::string manifestRevision, manifestFingerprint;
+};
+
+struct GatewayManifest {
+  std::string revision;
+  std::string fingerprint;
+  std::vector<GatewayPVConfig> pvs;
 };
 
 // A backend gRPC service to expose as RPC PVs. The IOC reflects the service at
@@ -181,6 +219,7 @@ struct PVConfig {
   uint64_t maxFrameBytes = 32u * 1024u * 1024u;
   uint32_t maxFrameGap = kDefaultNDArrayMaxFrameGap;
   SourceHealthConfig sourceHealth;
+  SourceTimeConfig sourceTime;
 };
 
 struct ServerConfig {
@@ -253,11 +292,19 @@ struct AppConfig {
   OperationLimitsConfig limits;
   std::vector<PVConfig> pvs;
   std::vector<RpcServiceConfig> rpcServices;
+  GatewayConfig pvaGateway;
 };
 
 AppConfig loadConfigFile(const std::string& path);
+AppConfig loadConfigForDiff(const std::string& path);
+bool readGatewayManifestFile(const std::string& path, std::string& text);
 AppConfig loadConfigString(const std::string& text);
 std::string summarizeConfig(const AppConfig& config);
+GatewayManifest loadGatewayManifestString(const std::string& text, const AppConfig& base);
+AppConfig withGatewayManifest(const AppConfig& base, const GatewayManifest& manifest);
+AccessAssignment gatewayAccess(const AppConfig& config, const GatewayPVConfig& pv,
+                               const std::string& exportedName);
+std::vector<std::string> fullGatewayNames(const ServerConfig& server, const GatewayPVConfig& pv);
 
 bool isNumericType(PrimitiveType type);
 bool isFloatingPointType(PrimitiveType type);
@@ -277,6 +324,7 @@ bool sameRedisBackends(const RedisBackendConfigs& lhs, const RedisBackendConfigs
 bool sameAlarmStreamConfig(const AlarmStreamConfig& lhs, const AlarmStreamConfig& rhs);
 
 std::string fullPVName(const ServerConfig& server, const PVConfig& pv);
+std::string fullGatewayName(const ServerConfig& server, const GatewayPVConfig& pv);
 std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig& pv);
 std::string adminPVName(const ServerConfig& server, const std::string& suffix);
 std::string versionPVName(const ServerConfig& server);

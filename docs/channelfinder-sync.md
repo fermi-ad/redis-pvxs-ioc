@@ -1,6 +1,6 @@
 # ChannelFinder Sync
 
-`redis-pvxs-channelfinder-sync` publishes Redis-backed PV definitions to ChannelFinder. It does not serve values and it is not part of the hot IOC runtime path.
+`redis-pvxs-channelfinder-sync` publishes Redis-backed PV and selected PVA gateway definitions to ChannelFinder. It does not serve values and it is not part of the hot IOC runtime path.
 
 ## Dry Run
 
@@ -71,6 +71,10 @@ enabled. Non-2xx responses report their status without echoing server bodies.
 Each canonical Redis PV and each of its configured aliases becomes one
 ChannelFinder channel. Alias channels carry the same metadata and routes plus
 `aliasOf=<canonical resolved PVA name>`.
+
+Each configured gateway mapping becomes a channel with `source=pva-gateway`,
+`upstreamPV`, and `upstreamServer` properties. It is included even when the
+upstream device is disconnected.
 
 Properties include:
 

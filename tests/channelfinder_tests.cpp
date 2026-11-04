@@ -117,6 +117,16 @@ int main() {
          "https://cf.example/ChannelFinder/resources/channels");
   assert(throwsNormalize(""));
 
+  auto withGateway = config;
+  withGateway.pvaGateway.pvs.push_back({"camera", "DEVICE:camera", "127.0.0.1:5075", {}});
+  const auto gatewayChannels = buildChannelFinderChannels(withGateway, "2026-05-06T00:00:00Z");
+  assert(gatewayChannels.size() == 4u);
+  assert(gatewayChannels.back().name == "DEMO:camera");
+  assert(gatewayChannels.back().properties.at("source") == "pva-gateway");
+  assert(gatewayChannels.back().properties.at("upstreamPV") == "DEVICE:camera");
+  assert(gatewayChannels.back().properties.at("upstreamServer") == "127.0.0.1:5075");
+  assert(!gatewayChannels.back().properties.count("redisReadKey"));
+
   std::cout << "channelfinder tests passed\n";
   return 0;
 }

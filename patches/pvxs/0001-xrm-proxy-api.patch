@@ -1,0 +1,3645 @@
+diff --git a/src/Makefile b/src/Makefile
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -59,6 +59,7 @@
+ INC += pvxs/sharedpv.h
+ INC += pvxs/source.h
+ INC += pvxs/client.h
++INC += pvxs/proxy.h
+ 
+ LIBRARY = pvxs
+ 
+@@ -89,6 +90,7 @@
+ LIB_SRCS += serverintrospect.cpp
+ LIB_SRCS += serverget.cpp
+ LIB_SRCS += servermon.cpp
++LIB_SRCS += serverproxy.cpp
+ LIB_SRCS += serversource.cpp
+ LIB_SRCS += sharedpv.cpp
+ 
+@@ -99,6 +101,7 @@
+ LIB_SRCS += clientget.cpp
+ LIB_SRCS += clientmon.cpp
+ LIB_SRCS += clientdiscover.cpp
++LIB_SRCS += clientproxy.cpp
+ 
+ LIB_LIBS += Com
+ 
+diff --git a/src/client.cpp b/src/client.cpp
+--- a/src/client.cpp
++++ b/src/client.cpp
+@@ -82,6 +82,14 @@
+ 
+ RemoteError::RemoteError(const std::string& msg)
+     :std::runtime_error(msg)
++{
++    _status.severity = RemoteStatus::Error;
++    _status.message = msg;
++}
++
++RemoteError::RemoteError(const RemoteStatus& status)
++    :std::runtime_error(status.message)
++    ,_status(status)
+ {}
+ 
+ RemoteError::~RemoteError() {}
+diff --git a/src/clientget.cpp b/src/clientget.cpp
+--- a/src/clientget.cpp
++++ b/src/clientget.cpp
+@@ -113,7 +113,9 @@
+ 
+     std::function<Value(Value&&)> builder;
+     std::function<void(Result&&)> done;
+-    std::function<void (const Value&)> onInit;
++    std::function<void (const Value&, const RemoteStatus&)> onInit;
++    std::function<void()> beforeSend;
++    bool attempted = false;
+     Value pvRequest;
+     // For RPC, the user provided argument Value
+     // For GET, PUT a duplicate of RequestInfo::prototype
+@@ -212,11 +214,14 @@
+         loop.dispatch([self, a, cb, put]() mutable {
+             if(self->autoExec) {
+                 client::Result ret(std::make_exception_ptr(std::invalid_argument("reExec() requires Operation creation with .autoExec(false)")));
+-                cb(std::move(ret));
++                if(cb) cb(std::move(ret));
+                 return;
+             }
+-            if(self->state!=Idle)
++            if(self->state!=Idle) {
++                client::Result ret(std::make_exception_ptr(std::logic_error("Operation is not ready for execution")));
++                if(cb) cb(std::move(ret));
+                 return;
++            }
+ 
+             if(self->op==RPC) {
+                 self->arg = std::move(a);
+@@ -252,8 +257,16 @@
+         _reExecImpl(true, arg, std::move(resultcb));
+     }
+ 
++    void _reExecRPC(const Value& arg, std::function<void(Result&&)>&& cb) override final
++    {
++        if(op!=RPC)
++            throw std::logic_error("reExecRPC() only meaningful for .rpc()");
++        _reExecImpl(true, arg, std::move(cb));
++    }
++
+     void _reExec(bool put)
+     {
++        attempted = false;
+         if(op==Put && !put) {
+             state = GPROp::GetOPut;
+ 
+@@ -280,6 +293,18 @@
+                 state = GPROp::Exec;
+ 
+             } catch(std::exception& e) {
++                result = Result(std::current_exception());
++                state = GPROp::Done;
++            }
++        }
++
++        // The guard runs after a successful builder and before any execution
++        // bytes are serialized.  The automatic PUT prefetch is not the mutation.
++        if(state!=GPROp::Done && !(state==GPROp::GetOPut && autoExec)) {
++            try {
++                if(beforeSend) beforeSend();
++                attempted = true;
++            } catch(...) {
+                 result = Result(std::current_exception());
+                 state = GPROp::Done;
+             }
+@@ -364,8 +389,8 @@
+         if(state==Connecting || state==Done) {
+             // noop
+ 
+-        } else if(state==Exec && op!=Get && !autoExec) {
+-            // can't restart as server side-effects may occur
++        } else if((state==Exec || state==GetOPut) && attempted && (beforeSend || (op!=Get && !autoExec))) {
++            // An execution may have side effects, including record.process GET.
+             state = Done;
+             result = Result(std::make_exception_ptr(Disconnect()));
+ 
+@@ -500,7 +525,7 @@
+     decltype (gpr->state) prev = gpr->state;
+ 
+     if(!sts.isSuccess()) {
+-        gpr->result = Result(std::make_exception_ptr(RemoteError(sts.msg)));
++        gpr->result = Result(std::make_exception_ptr(RemoteError(remoteStatus(sts))), remoteStatus(sts));
+ 
+         if(gpr->state==GPROp::Exec && !gpr->autoExec) {
+             gpr->state = GPROp::Idle; // repeated exec may yield a different result
+@@ -519,7 +544,7 @@
+ 
+         try {
+             if(gpr->onInit)
+-                gpr->onInit(data);
++                gpr->onInit(data, remoteStatus(sts));
+         } catch(std::exception& e) {
+             log_err_printf(setup, "Server %s op%02x \"%s\" onInit() error: %s\n",
+                            peerName.c_str(), cmd, gpr->chan->name.c_str(), e.what());
+@@ -544,14 +569,14 @@
+         } else {
+             // deliver get result
+             gpr->state = GPROp::Idle;
+-            gpr->result = Result(std::move(data), peerName);
++            gpr->result = Result(std::move(data), peerName, remoteStatus(sts));
+             gpr->notify();
+             return;
+         }
+ 
+     } else if(gpr->state==GPROp::Exec) {
+         // data always empty for CMD_PUT
+-        gpr->result = Result(std::move(data), peerName);
++        gpr->result = Result(std::move(data), peerName, remoteStatus(sts));
+ 
+         if(!gpr->autoExec) {
+             gpr->state = GPROp::Idle;
+@@ -633,6 +658,7 @@
+     op->setDone(std::move(_result), std::move(_onInit));
+     op->autoExec = _autoexec;
+     op->pvRequest = _buildReq();
++    op->beforeSend = std::move(_beforeSend);
+ 
+     return gpr_setup(context, _name, _server, std::move(op), _syncCancel);
+ }
+@@ -663,6 +689,7 @@
+     op->getOput = _doGet;
+     op->autoExec = _autoexec;
+     op->pvRequest = _buildReq();
++    op->beforeSend = std::move(_beforeSend);
+ 
+     return gpr_setup(context, _name, _server, std::move(op), _syncCancel);
+ }
+@@ -671,13 +698,11 @@
+ {
+     if(!ctx)
+         throw std::logic_error("NULL Builder");
+-    if(!_autoexec)
+-        throw std::logic_error("autoExec(false) not possible for rpc()");
+ 
+     auto context(ctx->impl->shared_from_this());
+ 
+     auto op(std::make_shared<GPROp>(Operation::RPC, context->tcp_loop, _name));
+-    op->setDone(std::move(_result), nullptr);
++    op->setDone(std::move(_result), std::move(_onInit));
+     if(_argument) {
+         if(!_autoexec)
+             throw std::invalid_argument("Pass RPC argument during reExec()");
+@@ -688,6 +713,7 @@
+     }
+     op->autoExec = _autoexec;
+     op->pvRequest = _buildReq();
++    op->beforeSend = std::move(_beforeSend);
+ 
+     return gpr_setup(context, _name, _server, std::move(op), _syncCancel);
+ }
+diff --git a/src/clientimpl.h b/src/clientimpl.h
+--- a/src/clientimpl.h
++++ b/src/clientimpl.h
+@@ -22,6 +22,15 @@
+ 
+ namespace pvxs {
+ namespace client {
++
++inline RemoteStatus remoteStatus(const impl::Status& source)
++{
++    RemoteStatus result;
++    result.severity = static_cast<RemoteStatus::Severity>(source.code);
++    result.message = source.msg;
++    result.stack = source.trace;
++    return result;
++}
+ 
+ struct Channel;
+ struct ContextImpl;
+@@ -142,7 +151,9 @@
+ 
+     CASE(GET);
+     CASE(PUT);
+-    //CASE(PUT_GET);
++    CASE(PUT_GET);
++    CASE(PROCESS);
++    CASE(ARRAY);
+     CASE(MONITOR);
+     CASE(RPC);
+     CASE(GET_FIELD);
+@@ -151,6 +162,7 @@
+ #undef CASE
+ 
+     void handle_GPR(pva_app_msg_t cmd);
++    void handle_proxy(pva_app_msg_t cmd);
+ protected:
+     void tickEcho();
+     static void tickEchoS(evutil_socket_t fd, short evt, void *raw);
+diff --git a/src/clientintrospect.cpp b/src/clientintrospect.cpp
+--- a/src/clientintrospect.cpp
++++ b/src/clientintrospect.cpp
+@@ -21,6 +21,7 @@
+ {
+     std::function<void(Result&&)> done;
+     Value result;
++    std::string subField;
+ 
+     enum state_t {
+         Connecting, // waiting for an active Channel
+@@ -87,8 +88,7 @@
+ 
+             to_wire(R, chan->sid);
+             to_wire(R, ioid);
+-            // sub-field, which no one knows how to use...
+-            to_wire(R, "");
++            to_wire(R, subField);
+         }
+         chan->statTx += conn->enqueueTxBody(CMD_GET_FIELD);
+ 
+@@ -163,9 +163,9 @@
+         auto done = std::move(info->done);
+         Result res;
+         if(sts.isSuccess()) {
+-            res = Result(std::move(prototype), peerName);
++            res = Result(std::move(prototype), peerName, remoteStatus(sts));
+         } else {
+-            res = Result(std::make_exception_ptr(RemoteError(sts.msg)));
++            res = Result(std::make_exception_ptr(RemoteError(remoteStatus(sts))), remoteStatus(sts));
+         }
+         try {
+             done(std::move(res));
+@@ -190,6 +190,7 @@
+     auto context(ctx->impl->shared_from_this());
+ 
+     auto op(std::make_shared<InfoOp>(context->tcp_loop, _name));
++    op->subField = _subField;
+     if(_result) {
+         op->done = std::move(_result);
+     } else {
+diff --git a/src/clientmon.cpp b/src/clientmon.cpp
+--- a/src/clientmon.cpp
++++ b/src/clientmon.cpp
+@@ -30,6 +30,8 @@
+ namespace {
+ struct Entry {
+     Value val;
++    std::vector<size_t> overrun;
++    RemoteStatus status;
+     std::exception_ptr exc;
+     Entry() = default;
+     explicit Entry(Value&& v) :val(std::move(v)) {}
+@@ -43,7 +45,7 @@
+ 
+     // const after exec()
+     std::weak_ptr<SubscriptionImpl> self; // internal
+-    std::function<void (Subscription&, const Value&)> onInit;
++    std::function<void (Subscription&, const Value&, const RemoteStatus&)> onInit;
+     std::function<void(Subscription&)> event;
+     Value pvRequest;
+     bool pipeline = false;
+@@ -118,33 +120,42 @@
+         }
+     }
+ 
++    void doPause(bool p)
++    {
++        log_info_printf(io, "Server %s channel %s monitor %s\n",
++                        chan && chan->conn ? chan->conn->peerName.c_str() : "<disconnected>",
++                        channelName.c_str(),
++                        p ? "pause" : "resume");
++
++        if((state==Idle && !p) || (state==Running && p)) {
++            auto& conn = chan->conn;
++
++            {
++                uint8_t subcmd = p ? 0x04 : 0x44; // STOP | START
++
++                (void)evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
++
++                EvOutBuf R(conn->sendBE, conn->txBody.get());
++
++                to_wire(R, chan->sid);
++                to_wire(R, ioid);
++                to_wire(R, subcmd);
++            }
++            chan->statTx += conn->enqueueTxBody(CMD_MONITOR);
++
++            state = p ? Idle : Running;
++        }
++    }
++
+     virtual void pause(bool p) override final
+     {
+-        loop.call([this, p](){
+-            log_info_printf(io, "Server %s channel %s monitor %s\n",
+-                            chan->conn ? chan->conn->peerName.c_str() : "<disconnected>",
+-                            chan->name.c_str(),
+-                            p ? "pause" : "resume");
+-
+-            if((state==Idle && !p) || (state==Running && p)) {
+-                auto& conn = chan->conn;
+-
+-                {
+-                    uint8_t subcmd = p ? 0x04 : 0x44; // STOP | START
+-
+-                    (void)evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
+-
+-                    EvOutBuf R(conn->sendBE, conn->txBody.get());
+-
+-                    to_wire(R, chan->sid);
+-                    to_wire(R, ioid);
+-                    to_wire(R, subcmd);
+-                }
+-                chan->statTx += conn->enqueueTxBody(CMD_MONITOR);
+-
+-                state = p ? Idle : Running;
+-            }
+-        });
++        loop.call([this, p]() { doPause(p); });
++    }
++
++    virtual void pauseAsync(bool p) override final
++    {
++        auto hold=self.lock();
++        if(hold) loop.dispatch([hold, p]() { hold->doPause(p); });
+     }
+ 
+     virtual void stats(SubscriptionStat& ret, bool reset) override final {
+@@ -159,7 +170,7 @@
+         }
+     }
+ 
+-    void _pop(Value& ret, bool canthrow)
++    void _pop(Value& ret, bool canthrow, std::vector<size_t>* overrun=nullptr, RemoteStatus* status=nullptr)
+     {
+         {
+             if(!queue.empty()) {
+@@ -193,8 +204,11 @@
+ 
+                 if(ent.exc)
+                     std::rethrow_exception(ent.exc);
+-                else
++                else {
+                     ret = std::move(ent.val);
++                    if(overrun) *overrun = std::move(ent.overrun);
++                    if(status) *status = std::move(ent.status);
++                }
+ 
+             } else {
+                 needNotify = true;
+@@ -212,6 +226,14 @@
+             Guard G(lock);
+             _pop(ret, true);
+         }
++        return ret;
++    }
++
++    virtual MonitorEvent popEvent() override final
++    {
++        MonitorEvent ret;
++        Guard G(lock);
++        _pop(ret.value, true, &ret.overrun, &ret.status);
+         return ret;
+     }
+ 
+@@ -486,6 +508,7 @@
+ 
+     RequestInfo* info=nullptr;
+     bool servSquash = false;
++    std::vector<size_t> overrunIndexes;
+     if(M.good()) {
+         auto it = opByIOID.find(ioid);
+         if(it!=opByIOID.end()) {
+@@ -590,15 +613,9 @@
+ 
+             BitMask overrun;
+             from_wire(M, overrun);
+-            for(auto i : range(overrun.wsize())) {
+-                (void)i;
+-                if(overrun.word(i)) {
+-                    // this update Value is the result of combining
+-                    // two or more Values on the server side.
+-                    servSquash = true;
+-                    break;
+-                }
+-            }
++            for(size_t bit=overrun.findSet(); bit<overrun.size(); bit=overrun.findSet(bit+1u))
++                overrunIndexes.push_back(bit);
++            servSquash = !overrunIndexes.empty();
+         }
+     }
+ 
+@@ -614,7 +631,7 @@
+     Entry update;
+ 
+     if(!sts.isSuccess()) {
+-        update.exc = std::make_exception_ptr(RemoteError(sts.msg));
++        update.exc = std::make_exception_ptr(RemoteError(remoteStatus(sts)));
+         mon->state = SubscriptionImpl::Done;
+ 
+     } else if(mon->state==SubscriptionImpl::Creating) {
+@@ -626,7 +643,7 @@
+ 
+         try {
+             if(mon->onInit)
+-                mon->onInit(*mon, info->prototype);
++                mon->onInit(*mon, info->prototype, remoteStatus(sts));
+         }catch(std::exception& e){
+             mon->state = SubscriptionImpl::Done;
+             update.exc = std::current_exception();
+@@ -640,6 +657,8 @@
+ 
+     } else if(data) { // Idle or Running
+         update.val = std::move(data);
++        if(final) update.status = remoteStatus(sts);
++        update.overrun = std::move(overrunIndexes);
+ 
+     } else {
+         // NULL update.  can this happen?
+@@ -690,7 +709,24 @@
+                                  peerName.c_str(),
+                                  mon->chan->name.c_str());
+ 
+-                mon->queue.back().val.assign(update.val);
++                auto& previous = mon->queue.back();
++                auto& old = previous.overrun;
++                // The client queue also loses intermediate values when two
++                // deltas write the same field.  Parent marks cover descendants.
++                if(previous.val.isMarked(true) && update.val.isMarked(true))
++                    old.push_back(0u);
++                auto fresh = update.val.iall().begin();
++                auto base = Value::Helper::desc(previous.val);
++                for(auto field : previous.val.iall()) {
++                    auto next = *fresh++;
++                    if(field.isMarked(true) && next.isMarked(true))
++                        old.push_back(size_t(Value::Helper::desc(field)-base));
++                }
++                previous.val.assign(update.val);
++                previous.status = update.status;
++                old.insert(old.end(), update.overrun.begin(), update.overrun.end());
++                std::sort(old.begin(), old.end());
++                old.erase(std::unique(old.begin(), old.end()), old.end());
+                 mon->nCliSquash++;
+ 
+             } else if(update.exc || update.val) {
+@@ -707,7 +743,7 @@
+                                 peerName.c_str(),
+                                 mon->chan->name.c_str());
+ 
+-                mon->queue.emplace_back(std::make_exception_ptr(Finished()));
++                mon->queue.emplace_back(std::make_exception_ptr(Finished(remoteStatus(sts))));
+             }
+ 
+             if(mon->queue.empty()) {
+diff --git a/src/clientproxy.cpp b/src/clientproxy.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/clientproxy.cpp
+@@ -0,0 +1,311 @@
++/** Project-owned PVA PROCESS, PUT_GET, and ARRAY client support. */
++#include <limits>
++#include <pvxs/log.h>
++#include "clientimpl.h"
++
++namespace pvxs {
++int xrmProxyApiVersion() { return 1; }
++namespace client {
++DEFINE_LOGGER(proxyio, "pvxs.client.proxy");
++namespace {
++struct ProxyOp final : OperationBase {
++    std::weak_ptr<ProxyOp> self;
++    const ProxyKind kind;
++    Value pvRequest;
++    ProxyPrototype prototype;
++    Value putCache, getCache;
++    std::function<void(const ProxyPrototype&, const RemoteStatus&)> onInit;
++    std::function<void(Result&&)> setupResult, completion;
++    std::function<void()> beforeSend;
++    ProxyRequest request;
++    bool pending = false;
++    bool setupSucceeded = false;
++    enum { Connecting, Creating, Idle, Executing, Done } state = Connecting;
++    uint8_t expected = 0;
++
++    ProxyOp(ProxyKind kind, const evbase& loop, const std::string& name)
++        :OperationBase(operation_t(uint8_t(kind)), loop, name), kind(kind) {}
++    ~ProxyOp() { if(onWorker && loop.assertInRunningLoop()) cancelImpl(true); }
++
++    // std::function move need not clear its source on every standard library.
++    // Swap when consuming a callback so later cancellation cannot deliver twice.
++    static std::function<void(Result&&)> take(std::function<void(Result&&)>& source) {
++        std::function<void(Result&&)> result;
++        result.swap(source);
++        return result;
++    }
++    static void deliver(std::function<void(Result&&)> cb, Result&& result) {
++        if(!cb) return;
++        try { cb(std::move(result)); }
++        catch(std::exception& e) { log_exc_printf(proxyio, "Proxy result callback: %s\n", e.what()); }
++        catch(...) { log_err_printf(proxyio, "%s\n", "Proxy result callback threw"); }
++    }
++    void failSetup(const std::exception_ptr& error, const RemoteStatus& status = RemoteStatus{}) {
++        auto cb(take(completion));
++        std::function<void(Result&&)> setup;
++        if(!setupSucceeded) setup.swap(setupResult);
++        else setupResult={};
++        cancelImpl(true);
++        deliver(std::move(setup), Result(error, status));
++        deliver(std::move(cb), Result(error, status));
++    }
++    bool cancelImpl(bool implicit) {
++        bool active = state!=Done;
++        auto cb(take(completion));
++        if(chan && chan->conn && (state==Creating || state==Idle || state==Executing)) {
++            chan->conn->sendDestroyRequest(chan->sid, ioid);
++            chan->conn->opByIOID.erase(ioid);
++            chan->opByIOID.erase(ioid);
++        }
++        state = Done;
++        pending = false;
++        if(!implicit) deliver(std::move(cb), Result(std::make_exception_ptr(Interrupted())));
++        return active;
++    }
++    bool cancel() override final {
++        bool ret=false;
++        loop.tryCall([this, &ret]() {
++            ret=cancelImpl(false);
++            setupResult={}; onInit={}; beforeSend={};
++        });
++        return ret;
++    }
++    void _reExecGet(std::function<void(Result&&)>&& cb) override final {
++        deliver(std::move(cb), Result(std::make_exception_ptr(std::logic_error("Use proxy execute()"))));
++    }
++    void _reExecPut(const Value&, std::function<void(Result&&)>&& cb) override final {
++        deliver(std::move(cb), Result(std::make_exception_ptr(std::logic_error("Use proxy execute()"))));
++    }
++    void _executeProxy(const ProxyRequest& req, std::function<void(Result&&)>&& cb) override final {
++        auto hold(self.lock());
++        loop.dispatch([hold, req, cb]() mutable {
++            if(hold->state==Done || hold->state==Executing || hold->pending) {
++                deliver(std::move(cb), Result(std::make_exception_ptr(std::logic_error("Proxy operation is closed or busy"))));
++                return;
++            }
++            hold->request=req;
++            hold->completion.swap(cb);
++            hold->pending=true;
++            if(hold->state==Idle) hold->sendExecution();
++        });
++    }
++    uint8_t validate() {
++        using A=ProxyAction;
++        const auto& req=request;
++        switch(kind) {
++        case ProxyKind::Process:
++            if(req.action==A::Process) return 0;
++            break;
++        case ProxyKind::PutGet:
++            if(req.action==A::GetPut) return 0x80;
++            if(req.action==A::GetGet) return 0x40;
++            if(req.action==A::PutGet) {
++                if(!req.value || !req.value.equalType(prototype.put))
++                    throw std::invalid_argument("PUT_GET value does not match put prototype");
++                return 0;
++            }
++            break;
++        case ProxyKind::Array:
++            // PVA sizes use a compact unsigned 32-bit wire encoding.
++            if(req.offset>0xffffffffu || req.count>0xffffffffu || req.stride>0xffffffffu || req.length>0xffffffffu)
++                throw std::invalid_argument("ARRAY argument exceeds wire size limit");
++            if((req.action==A::ArrayGet || req.action==A::ArrayPut) && !req.stride)
++                throw std::invalid_argument("ARRAY stride must be positive");
++            if(req.action==A::ArrayGet) return 0x40;
++            if(req.action==A::ArraySetLength) return 0x80;
++            if(req.action==A::ArrayGetLength) return 0x04;
++            if(req.action==A::ArrayPut) {
++                if(!req.value || !req.value.equalType(prototype.put))
++                    throw std::invalid_argument("ARRAY value does not match prototype");
++                if(req.count && req.count>req.value.as<shared_array<const void>>().size())
++                    throw std::invalid_argument("ARRAY count exceeds supplied value length");
++                return 0;
++            }
++            break;
++        }
++        throw std::invalid_argument("Action is not valid for proxy kind");
++    }
++    void sendExecution() {
++        Value payload;
++        try {
++            expected=validate();
++            payload=request.value;
++            if(request.action==ProxyAction::ArrayPut && request.count) {
++                auto array(payload.as<shared_array<const void>>());
++                payload=payload.cloneEmpty();
++                payload=shared_array<const void>(array.dataPtr(), size_t(request.count), array.original_type());
++            }
++            // Admission hook is the last user callback before serialization.
++            if(beforeSend) beforeSend();
++        } catch(...) {
++            pending=false;
++            deliver(take(completion), Result(std::current_exception()));
++            return;
++        }
++        // The hook can synchronously cancel this handle.
++        if(state!=Idle || !pending) return;
++        auto conn(chan->conn);
++        evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
++        bool good;
++        {
++            EvOutBuf out(conn->sendBE, conn->txBody.get());
++            to_wire(out, chan->sid); to_wire(out, ioid); to_wire(out, expected);
++            if(kind==ProxyKind::PutGet && request.action==ProxyAction::PutGet) {
++                to_wire_valid(out, payload);
++            } else if(kind==ProxyKind::Array) {
++                switch(request.action) {
++                case ProxyAction::ArrayGet:
++                    to_wire(out, Size{size_t(request.offset)});
++                    to_wire(out, Size{size_t(request.count)});
++                    to_wire(out, Size{size_t(request.stride)});
++                    break;
++                case ProxyAction::ArrayPut:
++                    to_wire(out, Size{size_t(request.offset)});
++                    to_wire(out, Size{size_t(request.stride)});
++                    to_wire_full(out, payload);
++                    break;
++                case ProxyAction::ArraySetLength: to_wire(out, Size{size_t(request.length)}); break;
++                default: break;
++                }
++            }
++            good=out.good();
++        }
++        pending=false;
++        if(!good) {
++            evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
++            deliver(take(completion), Result(std::make_exception_ptr(std::runtime_error("Unable to serialize proxy request"))));
++            return;
++        }
++        if(kind==ProxyKind::PutGet && request.action==ProxyAction::PutGet) {
++            auto written=request.value.cloneEmpty();
++            // Native decoding expands parent marks to leaf marks.  Locally
++            // supplied Values may only mark a parent; copy covered leaves
++            // explicitly, since clone() only copies directly marked leaves.
++            for(auto field : request.value.iall()) {
++                if(field.type()!=TypeCode::Struct && field.isMarked(true))
++                    written[request.value.nameOf(field)].assign(field);
++            }
++            cache_sync(putCache, written);
++        }
++        state=Executing;
++        chan->statTx+=conn->enqueueTxBody(pva_app_msg_t(uint8_t(kind)));
++    }
++    void createOp() override final {
++        if(state!=Connecting) return;
++        auto conn(chan->conn);
++        evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
++        {
++            EvOutBuf out(conn->sendBE, conn->txBody.get());
++            to_wire(out, chan->sid); to_wire(out, ioid); to_wire(out, uint8_t(0x08));
++            to_wire(out, Value::Helper::desc(pvRequest)); to_wire_full(out, pvRequest);
++        }
++        state=Creating;
++        chan->statTx+=conn->enqueueTxBody(pva_app_msg_t(uint8_t(kind)));
++    }
++    void disconnected(const std::shared_ptr<OperationBase>& handle) override final {
++        if(state==Done || state==Connecting) return;
++        // Fail every admitted execution; no mutation is ever replayed.
++        if(state==Executing || pending) {
++            failSetup(std::make_exception_ptr(Disconnect()));
++        } else {
++            state=Connecting;
++            setupSucceeded=false;
++            chan->pending.push_back(handle);
++        }
++    }
++};
++}
++
++void Connection::handle_proxy(pva_app_msg_t cmd) {
++    const auto rxlen=8u+evbuffer_get_length(segBuf.get());
++    EvInBuf in(peerBE, segBuf.get(), 16);
++    uint32_t ioid=0;
++    uint8_t subcmd=0;
++    Status status;
++    from_wire(in, ioid); from_wire(in, subcmd); from_wire(in, status);
++    auto found=opByIOID.find(ioid);
++    if(!in.good()) { bev.reset(); return; }
++    auto handle=found==opByIOID.end() ? std::shared_ptr<OperationBase>() : found->second.handle.lock();
++    if(!handle) { rxRegistryDirty=true; return; }
++    if(uint8_t(handle->op)!=uint8_t(cmd)) { bev.reset(); return; }
++    auto op=static_cast<ProxyOp*>(handle.get());
++    bool init=subcmd&0x08;
++    if((init && op->state!=ProxyOp::Creating) || (!init && (op->state!=ProxyOp::Executing || subcmd!=op->expected))) {
++        bev.reset(); return;
++    }
++    Value data;
++    if(status.isSuccess()) {
++        if(init) {
++            if(cmd==CMD_PUT_GET) {
++                from_wire_type(in, rxRegistry, op->prototype.put);
++                from_wire_type(in, rxRegistry, op->prototype.get);
++                op->putCache=op->prototype.put.cloneEmpty();
++                op->getCache=op->prototype.get.cloneEmpty();
++            } else if(cmd==CMD_ARRAY) {
++                from_wire_type(in, rxRegistry, op->prototype.put);
++                op->prototype.get=op->prototype.put;
++                if(!op->prototype.put.type().isarray()) in.fault(__FILE__, __LINE__);
++            }
++        } else if(cmd==CMD_PUT_GET) {
++            auto& cache = subcmd&0x80 ? op->putCache : op->getCache;
++            if(!cache) cache=(subcmd&0x80 ? op->prototype.put : op->prototype.get).cloneEmpty();
++            data=cache.cloneEmpty();
++            from_wire_valid(in, rxRegistry, data);
++            if(in.good()) cache_sync(cache, data);
++        } else if(cmd==CMD_ARRAY && subcmd&0x40) {
++            data=op->prototype.get.cloneEmpty();
++            from_wire_full(in, rxRegistry, data);
++        } else if(cmd==CMD_ARRAY && subcmd&0x04) {
++            Size length{0}; from_wire(in, length);
++            data=TypeDef(TypeCode::UInt64).create(); data=uint64_t(length.size);
++        }
++    }
++    if(!in.good()) { bev.reset(); return; }
++    op->chan->statRx+=rxlen;
++    if(init) {
++        if(!status.isSuccess()) {
++            auto error=std::make_exception_ptr(RemoteError(remoteStatus(status)));
++            op->failSetup(error, remoteStatus(status));
++            return;
++        }
++        op->state=ProxyOp::Idle;
++        try { if(op->onInit) op->onInit(op->prototype, remoteStatus(status)); }
++        catch(...) {
++            auto error=std::current_exception(); op->failSetup(error); return;
++        }
++        op->setupSucceeded=true;
++        if(op->state==ProxyOp::Idle && op->pending) op->sendExecution();
++    } else {
++        op->state=ProxyOp::Idle;
++        Result result=status.isSuccess() ? Result(std::move(data), peerName, remoteStatus(status)) : Result(std::make_exception_ptr(RemoteError(remoteStatus(status))), remoteStatus(status));
++        ProxyOp::deliver(ProxyOp::take(op->completion), std::move(result));
++    }
++}
++void Connection::handle_PROCESS() { handle_proxy(CMD_PROCESS); }
++void Connection::handle_PUT_GET() { handle_proxy(CMD_PUT_GET); }
++void Connection::handle_ARRAY() { handle_proxy(CMD_ARRAY); }
++
++std::shared_ptr<ProxyOperation> ProxyBuilder::exec() {
++    if(!ctx || _name.empty()) throw std::logic_error("Proxy requires a context and channel name");
++    auto context(ctx->impl->shared_from_this());
++    auto op=std::make_shared<ProxyOp>(_kind, context->tcp_loop, _name);
++    op->self=op;
++    op->pvRequest=_buildReq(); op->onInit.swap(_onInit);
++    op->setupResult.swap(_result); op->beforeSend.swap(_beforeSend);
++    auto syncCancel=_syncCancel;
++    std::shared_ptr<ProxyOperation> external(op.get(), [op, syncCancel](ProxyOperation*) mutable {
++        auto temp(std::move(op)); auto loop(temp->loop);
++        loop.tryInvoke(syncCancel, std::bind([](std::shared_ptr<ProxyOp>& hold) { hold->cancelImpl(true); }, std::move(temp)));
++    });
++    auto name(_name), server(_server);
++    context->tcp_loop.dispatch([op, context, name, server]() {
++        op->onWorker=true;
++        try {
++            op->chan=Channel::build(context, name, server);
++            op->chan->pending.push_back(op); op->chan->createOperations();
++        } catch(...) { op->failSetup(std::current_exception()); }
++    });
++    return external;
++}
++} // namespace client
++} // namespace pvxs
+diff --git a/src/conn.cpp b/src/conn.cpp
+--- a/src/conn.cpp
++++ b/src/conn.cpp
+@@ -114,6 +114,8 @@
+     CASE(GET);
+     CASE(PUT);
+     CASE(PUT_GET);
++    CASE(PROCESS);
++    CASE(ARRAY);
+     CASE(MONITOR);
+     CASE(RPC);
+     CASE(CANCEL_REQUEST);
+@@ -265,6 +267,8 @@
+                     CASE(GET);
+                     CASE(PUT);
+                     CASE(PUT_GET);
++                    CASE(PROCESS);
++                    CASE(ARRAY);
+                     CASE(MONITOR);
+                     CASE(RPC);
+                     CASE(CANCEL_REQUEST);
+diff --git a/src/conn.h b/src/conn.h
+--- a/src/conn.h
++++ b/src/conn.h
+@@ -79,6 +79,8 @@
+     CASE(GET);
+     CASE(PUT);
+     CASE(PUT_GET);
++    CASE(PROCESS);
++    CASE(ARRAY);
+     CASE(MONITOR);
+     CASE(RPC);
+     CASE(CANCEL_REQUEST);
+diff --git a/src/pvxs/client.h b/src/pvxs/client.h
+--- a/src/pvxs/client.h
++++ b/src/pvxs/client.h
+@@ -20,6 +20,7 @@
+ 
+ #include <pvxs/version.h>
+ #include <pvxs/data.h>
++#include <pvxs/proxy.h>
+ #include <pvxs/netcommon.h>
+ #include <pvxs/util.h>
+ 
+@@ -42,16 +43,26 @@
+ //! Error condition signaled by server
+ struct PVXS_API RemoteError : public std::runtime_error
+ {
++private:
++    RemoteStatus _status;
++public:
+     RemoteError(const std::string& msg);
++    RemoteError(const RemoteStatus& status);
+     virtual ~RemoteError();
++    const RemoteStatus& status() const { return _status; }
+ };
+ 
+ //! For monitor only.  Subscription has completed normally
+ //! and no more events will ever be received.
+ struct PVXS_API Finished : public Disconnect
+ {
++private:
++    RemoteStatus _status;
++public:
+     Finished() = default;
++    explicit Finished(const RemoteStatus& status) :_status(status) {}
+     virtual ~Finished();
++    const RemoteStatus& status() const { return _status; }
+ };
+ 
+ //! For monitor only.  Subscription has (re)connected.
+@@ -83,10 +94,16 @@
+     Value _result;
+     std::exception_ptr _error;
+     std::string _peerName;
++    RemoteStatus _status;
+ public:
+     Result() = default;
+     Result(Value&& val, const std::string& peerName) :_result(std::move(val)), _peerName(peerName) {}
+     explicit Result(const std::exception_ptr& err) :_error(err) {}
++    Result(Value&& val, const std::string& peerName, const RemoteStatus& status)
++        :_result(std::move(val)), _peerName(peerName), _status(status) {}
++    Result(const std::exception_ptr& err, const RemoteStatus& status)
++        :_error(err), _status(status) {}
++    const RemoteStatus& status() const { return _status; }
+ 
+     //! Access to the Value, or rethrow the exception
+     Value& operator()() {
+@@ -108,6 +125,9 @@
+         Info    = 17, // CMD_GET_FIELD
+         Get     = 10, // CMD_GET
+         Put     = 11, // CMD_PUT
++        Process = 16,
++        PutGet  = 12,
++        Array   = 14,
+         RPC     = 20, // CMD_RPC
+         Monitor = 13, // CMD_MONITOR
+         Discover = 3, // CMD_SEARCH
+@@ -152,15 +172,27 @@
+ protected:
+     virtual void _reExecGet(std::function<void(client::Result&&)>&& resultcb) =0;
+     virtual void _reExecPut(const Value& arg, std::function<void(client::Result&&)>&& resultcb) =0;
++    virtual void _reExecRPC(const Value&, std::function<void(Result&&)>&& cb) {
++        Result err(std::make_exception_ptr(std::logic_error("Operation does not support RPC")));
++        if(cb) cb(std::move(err));
++    }
++    virtual void _executeProxy(const ProxyRequest&, std::function<void(Result&&)>&& cb) {
++        Result err(std::make_exception_ptr(std::logic_error("Operation does not support proxy execute")));
++        if(cb) cb(std::move(err));
++    }
+ public:
+ #ifdef PVXS_EXPERT_API_ENABLED
+     // usable when Builder::autoExec(false)
+     // For GET/PUT, (re)issue request for current value
+     inline void reExecGet(std::function<void(client::Result&&)>&& resultcb) { this->_reExecGet(std::move(resultcb)); }
++    inline void reExecRPC(const Value& arg, std::function<void(Result&&)>&& cb) { _reExecRPC(arg, std::move(cb)); }
+     // For PUT (re)issue request to set current value
+     inline void reExecPut(const Value& arg, std::function<void(client::Result&&)>&& resultcb) { this->_reExecPut(arg, std::move(resultcb)); }
+ #endif
+-};
++    void execute(const ProxyRequest& req, std::function<void(Result&&)> cb) { _executeProxy(req, std::move(cb)); }
++};
++
++using ProxyOperation = Operation;
+ 
+ //! Information about the state of a Subscription
+ struct SubscriptionStat {
+@@ -229,6 +261,7 @@
+      * @endcode
+      */
+     virtual Value pop() =0;
++    virtual MonitorEvent popEvent() { MonitorEvent evt; evt.value = pop(); return evt; }
+ 
+ protected:
+     virtual bool doPop(std::vector<Value>& out, size_t limit=0u) =0;
+@@ -266,6 +299,8 @@
+     //! by exec() is released.
+     //! @since 0.2.0
+     virtual std::shared_ptr<Subscription> shared_from_this() const =0;
++    //! Queue a pause/resume request without waiting for the client worker.
++    virtual void pauseAsync(bool p=true) { pause(p); }
+ };
+ 
+ //! Handle for entry in Channel cache
+@@ -278,6 +313,7 @@
+     virtual bool connected() const =0;
+ };
+ 
++class ProxyBuilder;
+ class GetBuilder;
+ class PutBuilder;
+ class RPCBuilder;
+@@ -428,6 +464,8 @@
+     inline
+     RPCBuilder rpc(const std::string& pvname);
+ 
++    inline ProxyBuilder proxy(const std::string& pvname, ProxyKind kind);
++
+     /** Execute "stateless" remote procedure call operation.
+      *
+      * Simple blocking
+@@ -618,6 +656,7 @@
+     unsigned _prio = 0u;
+     bool _autoexec = true;
+     bool _syncCancel = true;
++    std::function<void()> _beforeSend;
+ 
+     CommonBase() {}
+     CommonBase(const std::shared_ptr<Context::Pvt>& ctx, const std::string& name) : ctx(ctx), _name(name) {}
+@@ -691,6 +730,7 @@
+ 
+     SubBuilder& priority(int p) { this->_prio = p; return _sb(); }
+     SubBuilder& server(const std::string& s) { this->_server = s; return _sb(); }
++    SubBuilder& beforeSend(std::function<void()> cb) { this->_beforeSend = std::move(cb); return _sb(); }
+ 
+ #ifdef PVXS_EXPERT_API_ENABLED
+     // for GET/PUT control whether operations automatically proceed from INIT to EXEC
+@@ -713,7 +753,8 @@
+ //! Prepare a remote GET or GET_FIELD (info) operation.
+ //! See Context::get()
+ class GetBuilder : public detail::CommonBuilder<GetBuilder, detail::CommonBase> {
+-    std::function<void (const Value&)> _onInit;
++    std::string _subField;
++    std::function<void (const Value&, const RemoteStatus&)> _onInit;
+     std::function<void(Result&&)> _result;
+     bool _get = false;
+     PVXS_API
+@@ -725,12 +766,16 @@
+     GetBuilder(const std::shared_ptr<Context::Pvt>& ctx, const std::string& name, bool get) :CommonBuilder{ctx,name}, _get(get) {}
+     //! Callback through which result Value or an error will be delivered.
+     //! The functor is stored in the Operation returned by exec().
++    GetBuilder& subField(const std::string& fld) { _subField = fld; return *this; }
+     GetBuilder& result(std::function<void(Result&&)>&& cb) { _result = std::move(cb); return *this; }
+ 
+ #ifdef PVXS_EXPERT_API_ENABLED
+     // called during operation INIT phase for Get/Put/Monitor when remote type
+     // description is available.
+-    GetBuilder& onInit(std::function<void (const Value&)>&& cb) { this->_onInit = std::move(cb); return *this; }
++    GetBuilder& onInit(std::function<void (const Value&)>&& cb) {
++        this->_onInit = [cb](const Value& value, const RemoteStatus&) { if(cb) cb(value); }; return *this;
++    }
++    GetBuilder& onInit(std::function<void(const Value&, const RemoteStatus&)> cb) { _onInit = std::move(cb); return *this; }
+ #endif
+ 
+     /** Execute the network operation.
+@@ -750,7 +795,7 @@
+ //! Prepare a remote PUT operation
+ //! See Context::put()
+ class PutBuilder : public detail::CommonBuilder<PutBuilder, detail::PRBase> {
+-    std::function<void (const Value&)> _onInit;
++    std::function<void (const Value&, const RemoteStatus&)> _onInit;
+     std::function<Value(Value&&)> _builder;
+     std::function<void(Result&&)> _result;
+     bool _doGet = true;
+@@ -806,7 +851,10 @@
+ #ifdef PVXS_EXPERT_API_ENABLED
+     // called during operation INIT phase for Get/Put/Monitor when remote type
+     // description is available.
+-    PutBuilder& onInit(std::function<void (const Value&)>&& cb) { this->_onInit = std::move(cb); return *this; }
++    PutBuilder& onInit(std::function<void (const Value&)>&& cb) {
++        this->_onInit = [cb](const Value& value, const RemoteStatus&) { if(cb) cb(value); }; return *this;
++    }
++    PutBuilder& onInit(std::function<void(const Value&, const RemoteStatus&)> cb) { _onInit = std::move(cb); return *this; }
+ #endif
+ 
+     /** Execute the network operation.
+@@ -824,6 +872,7 @@
+ //! Prepare a remote RPC operation.
+ //! See Context::rpc()
+ class RPCBuilder : public detail::CommonBuilder<RPCBuilder, detail::PRBase> {
++    std::function<void(const Value&, const RemoteStatus&)> _onInit;
+     Value _argument;
+     std::function<void(Result&&)> _result;
+ public:
+@@ -831,6 +880,10 @@
+     RPCBuilder(const std::shared_ptr<Context::Pvt>& ctx, const std::string& name) :CommonBuilder{ctx,name} {}
+     //! Callback through which result Value or an error will be delivered.
+     //! The functor is stored in the Operation returned by exec().
++    RPCBuilder& onInit(std::function<void(const Value&)> cb) {
++        _onInit = [cb](const Value& value, const RemoteStatus&) { if(cb) cb(value); }; return *this;
++    }
++    RPCBuilder& onInit(std::function<void(const Value&, const RemoteStatus&)> cb) { _onInit = std::move(cb); return *this; }
+     RPCBuilder& result(std::function<void(Result&&)>&& cb) { _result = std::move(cb); return *this; }
+ 
+     RPCBuilder& arg(const std::string& name, const void *ptr, StoreType type) {
+@@ -868,10 +921,28 @@
+     return ret;
+ }
+ 
++/** Prepare a manually executed PROCESS, PUT_GET, or ARRAY operation. */
++class ProxyBuilder : public detail::CommonBuilder<ProxyBuilder, detail::CommonBase> {
++    ProxyKind _kind = ProxyKind::Process;
++    std::function<void(const ProxyPrototype&, const RemoteStatus&)> _onInit;
++    std::function<void(Result&&)> _result;
++public:
++    ProxyBuilder() = default;
++    ProxyBuilder(const std::shared_ptr<Context::Pvt>& ctx, const std::string& name, ProxyKind kind)
++        :CommonBuilder{ctx, name}, _kind(kind) {}
++    ProxyBuilder& onInit(std::function<void(const ProxyPrototype&)> cb) {
++        _onInit = [cb](const ProxyPrototype& value, const RemoteStatus&) { if(cb) cb(value); }; return *this;
++    }
++    ProxyBuilder& onInit(std::function<void(const ProxyPrototype&, const RemoteStatus&)> cb) { _onInit = std::move(cb); return *this; }
++    ProxyBuilder& result(std::function<void(Result&&)> cb) { _result = std::move(cb); return *this; }
++    PVXS_API std::shared_ptr<ProxyOperation> exec();
++};
++ProxyBuilder Context::proxy(const std::string& name, ProxyKind kind) { return ProxyBuilder{pvt, name, kind}; }
++
+ //! Prepare a remote subscription
+ //! See Context::monitor()
+ class MonitorBuilder : public detail::CommonBuilder<MonitorBuilder, detail::CommonBase> {
+-    std::function<void(Subscription&, const Value&)> _onInit;
++    std::function<void(Subscription&, const Value&, const RemoteStatus&)> _onInit;
+     std::function<void(Subscription&)> _event;
+     bool _maskConn = true;
+     bool _maskDisconn = false;
+@@ -895,7 +966,10 @@
+ #ifdef PVXS_EXPERT_API_ENABLED
+     // called during operation INIT phase for Get/Put/Monitor when remote type
+     // description is available.
+-    MonitorBuilder& onInit(std::function<void (Subscription&, const Value&)>&& cb) { this->_onInit = std::move(cb); return *this; }
++    MonitorBuilder& onInit(std::function<void (Subscription&, const Value&)>&& cb) {
++        _onInit = [cb](Subscription& sub, const Value& value, const RemoteStatus&) { if(cb) cb(sub, value); }; return *this;
++    }
++    MonitorBuilder& onInit(std::function<void(Subscription&, const Value&, const RemoteStatus&)> cb) { _onInit = std::move(cb); return *this; }
+ #endif
+ 
+     //! Submit request to subscribe
+diff --git a/src/pvxs/proxy.h b/src/pvxs/proxy.h
+new file mode 100644
+--- /dev/null
++++ b/src/pvxs/proxy.h
+@@ -0,0 +1,71 @@
++/** Project-owned PVA proxy extensions against the bundled PVXS source. */
++#ifndef PVXS_PROXY_H
++#define PVXS_PROXY_H
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <vector>
++#include <pvxs/data.h>
++
++#define PVXS_PROJECT_PROXY_API 1
++#define PVXS_XRM_PROXY_API 1
++
++namespace pvxs {
++
++/** Link-time check that headers and library carry the same proxy extension. */
++PVXS_API int xrmProxyApiVersion();
++
++/** Native PVA status, including successful warnings and remote stack text. */
++struct RemoteStatus {
++    enum Severity : uint8_t { Ok = 0, Warning = 1, Error = 2, Fatal = 3 };
++    Severity severity = Ok;
++    std::string message;
++    std::string stack;
++
++    RemoteStatus() = default;
++    RemoteStatus(Severity severity, const std::string& message = std::string(),
++                 const std::string& stack = std::string())
++        : severity(severity), message(message), stack(stack) {}
++    bool isSuccess() const { return severity == Ok || severity == Warning; }
++    bool isDefault() const { return severity == Ok && message.empty() && stack.empty(); }
++};
++
++enum class ProxyKind : uint8_t { Process = 16, PutGet = 12, Array = 14 };
++
++enum class ProxyAction : uint8_t {
++    Process, PutGet, GetPut, GetGet,
++    ArrayGet, ArrayPut, ArrayGetLength, ArraySetLength
++};
++
++struct ProxyRequest {
++    ProxyAction action = ProxyAction::Process;
++    Value value;
++    uint64_t offset = 0;
++    uint64_t count = 0;
++    uint64_t stride = 1;
++    uint64_t length = 0;
++
++    bool mutating() const {
++        return action == ProxyAction::Process || action == ProxyAction::PutGet ||
++               action == ProxyAction::ArrayPut || action == ProxyAction::ArraySetLength;
++    }
++};
++
++struct ProxyPrototype {
++    Value put;
++    Value get;
++};
++
++/** One monitor update and the field indexes reported as overrun by the source. */
++struct MonitorEvent {
++    Value value;
++    std::vector<size_t> overrun;
++    RemoteStatus status;
++    // A transport-local reservation retained with this queued value.
++    std::shared_ptr<void> lease;
++};
++
++} // namespace pvxs
++#endif
+diff --git a/src/pvxs/source.h b/src/pvxs/source.h
+--- a/src/pvxs/source.h
++++ b/src/pvxs/source.h
+@@ -11,6 +11,7 @@
+ 
+ #include <pvxs/data.h>
+ #include <pvxs/server.h>
++#include <pvxs/proxy.h>
+ #include "srvcommon.h"
+ 
+ namespace pvxs {
+@@ -23,21 +24,29 @@
+ struct PVXS_API ConnectOp : public OpBase, public RemoteLogger {
+ protected:
+     Value _pvRequest;
++    std::string _subField;
+ public:
+     const Value& pvRequest() const { return _pvRequest; }
++    //! Native GET_FIELD subfield, empty when the complete type was requested.
++    const std::string& subField() const { return _subField; }
+ 
+     //! For GET_FIELD, GET, or PUT.  Inform peer of our data-type.
+     //! @throws std::runtime_error if the client pvRequest() field mask does not select any fields of prototype.
+     virtual void connect(const Value& prototype) =0;
++    virtual void connect(const Value& prototype, const RemoteStatus& status) {
++        if(status.isSuccess()) connect(prototype); else error(status);
++    }
+     //! Indicate that this operation can not be setup
+     //! @since 1.2.3 Does not block
+     virtual void error(const std::string& msg) =0;
++    virtual void error(const RemoteStatus& status) { error(status.message); }
+ 
+     ConnectOp(const std::string& name,
+            const std::shared_ptr<const ClientCredentials>& cred, op_t op,
+-           const Value& pvRequest)
++           const Value& pvRequest, const std::string& subField = std::string())
+         :OpBase(name, cred, op)
+         ,_pvRequest(pvRequest)
++        ,_subField(subField)
+     {}
+     virtual ~ConnectOp();
+ 
+@@ -82,6 +91,13 @@
+ protected:
+     virtual bool doPost(const Value& val, bool maybe, bool force) =0;
+ public:
++    //! Queue a monitor update together with its source overrun field indexes.
++    virtual bool postEvent(const MonitorEvent& event, bool maybe=false, bool force=false) {
++        return doPost(event.value, maybe, force);
++    }
++    //! Terminate an established subscription with an error status.
++    virtual void error(const std::string&) { finish(); }
++    virtual void error(const RemoteStatus& status) { error(status.message); }
+ 
+     //! Add a new entry to the monitor queue.
+     //! If nFree()<=0 the output queue will be over-filled with this element.
+@@ -112,6 +128,8 @@
+     void finish() {
+         doPost(Value(), false, true);
+     }
++    //! Finish with the native success or warning status carried by a final frame.
++    virtual void finish(const RemoteStatus&) { finish(); }
+ 
+     //! Poll information and statistics for this subscription.
+     //! @since 1.1.0 Added 'reset' argument.
+@@ -133,6 +151,52 @@
+     virtual void onLowMark(std::function<void()>&&) =0;
+ };
+ 
++//! Execution of a native PROCESS, PUT_GET, or ARRAY operation.
++struct PVXS_API ProxyExecOp : public ExecOp {
++private:
++    const ProxyKind _kind;
++    const ProxyAction _action;
++public:
++    ProxyExecOp(const std::string& name,
++                const std::shared_ptr<const ClientCredentials>& cred,
++                ProxyKind kind, ProxyAction action, const Value& pvRequest)
++        :ExecOp(name, cred, kind==ProxyKind::Process ? Process : kind==ProxyKind::PutGet ? PutGet : Array, pvRequest)
++        ,_kind(kind), _action(action)
++    {}
++    virtual ~ProxyExecOp();
++    ProxyKind kind() const { return _kind; }
++    ProxyAction action() const { return _action; }
++    virtual void replyLength(uint64_t length) =0;
++    virtual void replyLength(uint64_t length, const RemoteStatus& status) {
++        if(status.isSuccess()) replyLength(length); else error(status);
++    }
++};
++
++//! Setup of a native PROCESS, PUT_GET, or ARRAY operation.
++struct PVXS_API ProxySetupOp : public OpBase, public RemoteLogger {
++private:
++    const ProxyKind _kind;
++    const Value _pvRequest;
++public:
++    ProxySetupOp(const std::string& name,
++                 const std::shared_ptr<const ClientCredentials>& cred,
++                 ProxyKind kind, const Value& pvRequest)
++        :OpBase(name, cred, kind==ProxyKind::Process ? Process : kind==ProxyKind::PutGet ? PutGet : Array)
++        ,_kind(kind), _pvRequest(pvRequest)
++    {}
++    virtual ~ProxySetupOp();
++    ProxyKind kind() const { return _kind; }
++    const Value& pvRequest() const { return _pvRequest; }
++    virtual void connect(const ProxyPrototype&) =0;
++    virtual void connect(const ProxyPrototype& prototype, const RemoteStatus& status) {
++        if(status.isSuccess()) connect(prototype); else error(status);
++    }
++    virtual void error(const std::string&) =0;
++    virtual void error(const RemoteStatus& status) { error(status.message); }
++    virtual void onExec(std::function<void(std::unique_ptr<ProxyExecOp>&&, ProxyRequest&&)>&&) =0;
++    virtual void onClose(std::function<void(const std::string&)>&&) =0;
++};
++
+ //! Handle for subscription which is being setup
+ struct PVXS_API MonitorSetupOp : public OpBase, public RemoteLogger {
+ protected:
+@@ -144,10 +208,16 @@
+     //! The queue is initially stopped.
+     //! @throws std::runtime_error if the client pvRequest() field mask does not select any fields of prototype.
+     virtual std::unique_ptr<MonitorControlOp> connect(const Value& prototype) =0;
++    virtual std::unique_ptr<MonitorControlOp> connect(const Value& prototype, const RemoteStatus& status) {
++        if(status.isSuccess()) return connect(prototype);
++        error(status);
++        return std::unique_ptr<MonitorControlOp>();
++    }
+ 
+     //! Indicate that this operation can not be setup
+     //! @since 1.2.3 Does not block
+     virtual void error(const std::string& msg) =0;
++    virtual void error(const RemoteStatus& status) { error(status.message); }
+ 
+     MonitorSetupOp(const std::string& name,
+            const std::shared_ptr<const ClientCredentials>& cred, op_t op,
+@@ -176,6 +246,8 @@
+     virtual void onRPC(std::function<void(std::unique_ptr<ExecOp>&&, Value&&)>&& fn)=0;
+     //! Invoked when the peer create a new subscription
+     virtual void onSubscribe(std::function<void(std::unique_ptr<MonitorSetupOp>&&)>&&)=0;
++    //! Invoked when a native PROCESS, PUT_GET, or ARRAY operation is requested.
++    virtual void onProxy(std::function<void(std::unique_ptr<ProxySetupOp>&&)>&&) {}
+ 
+     //! Callback when the channel closes (eg. peer disconnect)
+     virtual void onClose(std::function<void(const std::string&)>&&) =0;
+@@ -194,6 +266,10 @@
+ #endif
+ private:
+     virtual void _updateInfo(const std::shared_ptr<const ReportInfo>& info) =0;
++public:
++    //! Queue disconnection after previously queued replies and errors.
++    //! Unlike close(), this always defers teardown when called from a handler.
++    virtual void closeAsync() { close(); }
+ };
+ 
+ /** Interface through which a Server discovers Channel names and
+diff --git a/src/pvxs/srvcommon.h b/src/pvxs/srvcommon.h
+--- a/src/pvxs/srvcommon.h
++++ b/src/pvxs/srvcommon.h
+@@ -18,6 +18,7 @@
+ #include <pvxs/version.h>
+ #include <pvxs/util.h>
+ #include <pvxs/data.h>
++#include <pvxs/proxy.h>
+ 
+ namespace pvxs {
+ enum struct Level;
+@@ -66,6 +67,9 @@
+         Get,  //!< A GET operation
+         Put,  //!< A PUT operation
+         RPC,  //!< A RPC operation
++        Process, //!< A PROCESS operation
++        PutGet,  //!< A PUT_GET operation
++        Array,   //!< An ARRAY operation
+     };
+ protected:
+     const std::string _name;
+@@ -108,9 +112,17 @@
+     virtual void reply() =0;
+     //! Issue a reply with data.  For a GET or RPC  (or PUT/Get)
+     virtual void reply(const Value& val) =0;
++    //! Reply while retaining native PVA severity, message, and stack.
++    virtual void reply(const Value& val, const RemoteStatus& status) {
++        if(status.isSuccess()) reply(val); else error(status);
++    }
++    virtual void reply(const RemoteStatus& status) {
++        if(status.isSuccess()) reply(); else error(status);
++    }
+     //! Indicate the request has resulted in an error.
+     //! @since 1.2.3 Does not block
+     virtual void error(const std::string& msg) =0;
++    virtual void error(const RemoteStatus& status) { error(status.message); }
+ 
+     //! Callback invoked if the peer cancels the operation before reply() or error() is called.
+     virtual void onCancel(std::function<void()>&&) =0;
+diff --git a/src/pvxs/version.h b/src/pvxs/version.h
+--- a/src/pvxs/version.h
++++ b/src/pvxs/version.h
+@@ -25,6 +25,10 @@
+ #ifndef PVXS_API
+ #  define PVXS_API
+ #endif
++
++// Project-owned extension capability. The library must report this same version.
++#define PVXS_XRM_PROXY_API 1
++namespace pvxs { PVXS_API int xrmProxyApiVersion(); }
+ 
+ #include <pvxs/versionNum.h>
+ 
+diff --git a/src/server.cpp b/src/server.cpp
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -852,6 +852,8 @@
+ ChannelControl::~ChannelControl() {}
+ 
+ ConnectOp::~ConnectOp() {}
++ProxySetupOp::~ProxySetupOp() {}
++ProxyExecOp::~ProxyExecOp() {}
+ ExecOp::~ExecOp() {}
+ 
+ MonitorControlOp::~MonitorControlOp() {}
+diff --git a/src/serverchan.cpp b/src/serverchan.cpp
+--- a/src/serverchan.cpp
++++ b/src/serverchan.cpp
+@@ -55,6 +55,9 @@
+     }
+ 
+     auto fn(std::move(onClose));
++    // A moved-from std::function is not guaranteed to be empty (in
++    // particular libc++ can retain a small trivially copyable target).
++    onClose = nullptr;
+     if(fn)
+         fn("");
+ }
+@@ -112,6 +115,17 @@
+     });
+ }
+ 
++void ServerChannelControl::onProxy(std::function<void(std::unique_ptr<server::ProxySetupOp>&&)>&& fn)
++{
++    auto serv = server.lock();
++    if(!serv)
++        return;
++    serv->acceptor_loop.call([this, &fn](){
++        if(auto ch = chan.lock())
++            ch->onProxy = std::move(fn);
++    });
++}
++
+ void ServerChannelControl::onClose(std::function<void(const std::string&)>&& fn)
+ {
+     auto serv = server.lock();
+@@ -127,32 +141,50 @@
+     });
+ }
+ 
++namespace {
++void closeChannel(const std::weak_ptr<ServerChan>& channel)
++{
++    auto ch = channel.lock();
++    if(!ch)
++        return;
++    auto conn = ch->conn.lock();
++    if(conn && conn->connection() && ch->state==ServerChan::Active) {
++        log_debug_printf(connio, "%s %s Send unsolicited Channel Destroy\n",
++                         conn->peerName.c_str(), ch->name.c_str());
++
++        auto tx = bufferevent_get_output(conn->connection());
++        EvOutBuf R(conn->sendBE, tx);
++        to_wire(R, Header{CMD_DESTROY_CHANNEL, pva_flags::Server, 8});
++        to_wire(R, ch->sid);
++        to_wire(R, ch->cid);
++        conn->statTx += 16u;
++        ch->statTx += 16u;
++    }
++    ch->cleanup();
++}
++} // namespace
++
+ void ServerChannelControl::close()
+ {
+-    // fail soft if server stopped, or channel/connection already closed
+-    auto serv = server.lock();
+-    if(!serv)
+-        return;
+-
+-    serv->acceptor_loop.call([this](){
+-        auto ch = chan.lock();
+-        if(!ch)
+-            return;
+-        auto conn = ch->conn.lock();
+-        if(conn && conn->connection() && ch->state==ServerChan::Active) {
+-            log_debug_printf(connio, "%s %s Send unsolicited Channel Destroy\n",
+-                             conn->peerName.c_str(), ch->name.c_str());
+-
+-            auto tx = bufferevent_get_output(conn->connection());
+-            EvOutBuf R(conn->sendBE, tx);
+-            to_wire(R, Header{CMD_DESTROY_CHANNEL, pva_flags::Server, 8});
+-            to_wire(R, ch->sid);
+-            to_wire(R, ch->cid);
+-            conn->statTx += 16u;
+-            ch->statTx += 16u;
+-        }
+-
+-        ch->cleanup();
++    auto serv = server.lock();
++    if(!serv)
++        return;
++    auto channel = chan;
++    serv->acceptor_loop.call([channel](){ closeChannel(channel); });
++}
++
++void ServerChannelControl::closeAsync()
++{
++    auto serv = server.lock();
++    if(!serv)
++        return;
++    auto weakServer = server;
++    auto channel = chan;
++    // Always dispatch, including from this same worker.  This preserves FIFO
++    // order with ExecOp::reply()/error() and does not retain the control handle.
++    serv->acceptor_loop.dispatch([weakServer, channel](){
++        if(auto keepServer = weakServer.lock())
++            closeChannel(channel);
+     });
+ }
+ 
+@@ -303,7 +335,7 @@
+                     if(chan->state!=ServerChan::Creating) {
+                         msg = "rejected";
+ 
+-                    } else if(chan->onOp || chan->onRPC || chan->onSubscribe || chan->onClose) {
++                    } else if(chan->onOp || chan->onRPC || chan->onSubscribe || chan->onProxy || chan->onClose) {
+                         msg = "accepted";
+                         claimed = true;
+ 
+diff --git a/src/serverconn.cpp b/src/serverconn.cpp
+--- a/src/serverconn.cpp
++++ b/src/serverconn.cpp
+@@ -256,9 +256,6 @@
+     // ignored (so far no auth plugin actually uses)
+ }
+ 
+-void ServerConn::handle_PUT_GET()
+-{}
+-
+ void ServerConn::handle_CANCEL_REQUEST()
+ {
+     EvInBuf M(peerBE, segBuf.get(), 16);
+@@ -285,8 +282,10 @@
+     if(op->state==ServerOp::Executing) {
+         op->state = ServerOp::Idle;
+ 
+-        if(op->onCancel)
+-            op->onCancel();
++        auto fn(std::move(op->onCancel));
++        op->onCancel = nullptr;
++        if(fn)
++            fn();
+ 
+     } else {
+         // an allowed race
+@@ -491,6 +490,7 @@
+ 
+     if(state==ServerOp::Executing && onCancel) {
+         auto fn(std::move(onCancel));
++        onCancel = nullptr;
+         fn();
+     }
+ 
+@@ -498,6 +498,7 @@
+ 
+     onCancel = nullptr;
+     auto closer(std::move(onClose));
++    onClose = nullptr;
+     bool notify = closer.operator bool();
+ 
+     if(auto ch = chan.lock()) {
+diff --git a/src/serverconn.h b/src/serverconn.h
+--- a/src/serverconn.h
++++ b/src/serverconn.h
+@@ -28,6 +28,11 @@
+ struct ServIface;
+ struct ServerConn;
+ struct ServerChan;
++
++inline Status serverStatus(const RemoteStatus& status)
++{
++    return Status{Status::type_t(status.severity), status.message, status.stack};
++}
+ 
+ // base for tracking in-progress operations.  cf. ServerConn::opByIOID and ServerChan::opByIOID
+ struct ServerOp
+@@ -86,11 +91,13 @@
+     virtual void onOp(std::function<void(std::unique_ptr<server::ConnectOp>&&)>&& fn) override final;
+     virtual void onRPC(std::function<void(std::unique_ptr<server::ExecOp>&&, Value&&)>&& fn) override final;
+     virtual void onSubscribe(std::function<void(std::unique_ptr<server::MonitorSetupOp>&&)>&& fn) override final;
++    virtual void onProxy(std::function<void(std::unique_ptr<server::ProxySetupOp>&&)>&& fn) override final;
+ 
+     virtual void onClose(std::function<void(const std::string&)>&& fn) override final;
+     virtual void close() override final;
+ 
+     virtual void _updateInfo(const std::shared_ptr<const ReportInfo>& info) override final;
++    virtual void closeAsync() override final;
+ 
+     const std::weak_ptr<server::Server::Pvt> server;
+     const std::weak_ptr<ServerChan> chan;
+@@ -117,6 +124,7 @@
+     std::function<void(std::unique_ptr<server::ConnectOp>&&)> onOp;
+     std::function<void(std::unique_ptr<server::ExecOp>&&, Value&&)> onRPC;
+     std::function<void(std::unique_ptr<server::MonitorSetupOp>&&)> onSubscribe;
++    std::function<void(std::unique_ptr<server::ProxySetupOp>&&)> onProxy;
+     std::function<void(const std::string&)> onClose;
+ 
+     std::map<uint32_t, std::shared_ptr<ServerOp> > opByIOID; // our subset of ServerConn::opByIOID
+@@ -168,6 +176,8 @@
+     CASE(GET);
+     CASE(PUT);
+     CASE(PUT_GET);
++    CASE(PROCESS);
++    CASE(ARRAY);
+     CASE(MONITOR);
+     CASE(RPC);
+     CASE(CANCEL_REQUEST);
+@@ -178,6 +188,7 @@
+ #undef CASE
+ 
+     void handle_GPR(pva_app_msg_t cmd);
++    void handle_PROXY(pva_app_msg_t cmd);
+ 
+     virtual std::shared_ptr<ConnBase> self_from_this() override final;
+ public:
+diff --git a/src/serverget.cpp b/src/serverget.cpp
+--- a/src/serverget.cpp
++++ b/src/serverget.cpp
+@@ -34,8 +34,12 @@
+     {}
+     virtual ~ServerGPR() {}
+ 
+-    void doReply(const Value& value,
+-                 const std::string& msg)
++    void doReply(const Value& value, const std::string& msg)
++    {
++        doReply(value, msg.empty() ? Status{} : Status::error(msg));
++    }
++
++    void doReply(const Value& value, const Status& sts)
+     {
+         auto ch = chan.lock();
+         if(!ch)
+@@ -56,7 +60,7 @@
+              * PUT w/o subcmd&0x40 and !value
+              */
+ 
+-            if(!msg.empty()) {
++            if(!sts.isSuccess()) {
+                 // noop
+ 
+             } else if(cmd==CMD_GET || (cmd==CMD_PUT && (subcmd&0x40))) {
+@@ -70,10 +74,6 @@
+                     throw std::logic_error("PUT reply can't include Value");
+             }
+         }
+-
+-        Status sts{};
+-        if(!msg.empty())
+-            sts = Status::error(msg);
+ 
+         {
+             (void)evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
+@@ -149,6 +149,7 @@
+     pva_app_msg_t cmd = pva_app_msg_t(-1); //spoil
+     uint8_t subcmd = 0u; // valid when state==Executing or Creating
+     bool lastRequest=false;
++    uint64_t generation=0u;
+ 
+     std::shared_ptr<const FieldDesc> type;
+     Value pvRequest;
+@@ -181,10 +182,18 @@
+ 
+     virtual void connect(const Value& prototype) override final
+     {
+-        auto serv = server.lock();
+-        if(!serv)
+-            return;
+-        serv->acceptor_loop.call([this, &prototype](){
++        connect(prototype, RemoteStatus());
++    }
++    virtual void connect(const Value& prototype, const RemoteStatus& status) override final
++    {
++        if(!status.isSuccess()) {
++            error(status);
++            return;
++        }
++        auto serv = server.lock();
++        if(!serv)
++            return;
++        serv->acceptor_loop.call([this, &prototype, &status](){
+             if(auto oper = op.lock()) {
+                 if(oper->state!=ServerOp::Creating)
+                     return;
+@@ -200,7 +209,7 @@
+                     oper->pvMask = request2mask(oper->type.get(), _pvRequest);
+                 }
+ 
+-                oper->doReply(Value(), std::string());
++                oper->doReply(Value(), serverStatus(status));
+             }
+         });
+     }
+@@ -217,6 +226,18 @@
+                 if(oper->state==ServerOp::Creating)
+                     oper->doReply(Value(), msg);
+             }
++        });
++    }
++
++    virtual void error(const RemoteStatus& status) override final
++    {
++        auto serv = server.lock();
++        if(!serv) return;
++        auto weak = op;
++        serv->acceptor_loop.dispatch([weak, status]() {
++            if(auto oper = weak.lock())
++                if(oper->state==ServerOp::Creating)
++                    oper->doReply(Value(), serverStatus(status));
+         });
+     }
+ 
+@@ -274,6 +295,7 @@
+         :server::ExecOp(name, conn->cred, cmd2op(cmd), op->pvRequest)
+         ,server(server)
+         ,op(op)
++        ,generation(op->generation)
+     {}
+     virtual ~ServerGPRExec() {}
+ 
+@@ -284,13 +306,23 @@
+ 
+     virtual void reply(const Value& val) override final
+     {
++        reply(val, RemoteStatus());
++    }
++    virtual void reply(const RemoteStatus& status) override final
++    {
++        reply(Value(), status);
++    }
++    virtual void reply(const Value& val, const RemoteStatus& status) override final
++    {
+         auto serv = server.lock();
+         if(!serv)
+             return;
+         auto op(this->op);
+-        serv->acceptor_loop.dispatch([op, val](){
++        auto seq = generation;
++        serv->acceptor_loop.dispatch([op, seq, val, status](){
+             if(auto oper = op.lock()) {
+-                oper->doReply(val, std::string());
++                if(oper->state==ServerOp::Executing && oper->generation==seq)
++                    oper->doReply(val, serverStatus(status));
+             }
+         });
+     }
+@@ -299,14 +331,19 @@
+     {
+         if(msg.empty())
+             throw std::invalid_argument("Must provide error message");
+-        auto serv = server.lock();
+-        if(!serv)
+-            return;
+-        auto op(this->op);
+-        serv->acceptor_loop.dispatch([op, msg](){
+-            if(auto oper = op.lock()) {
+-                oper->doReply(Value(), msg);
+-            }
++        error(RemoteStatus(RemoteStatus::Error, msg));
++    }
++
++    virtual void error(const RemoteStatus& status) override final
++    {
++        auto serv = server.lock();
++        if(!serv) return;
++        auto weak = op;
++        auto seq = generation;
++        serv->acceptor_loop.dispatch([weak, seq, status]() {
++            if(auto oper = weak.lock())
++                if(oper->state==ServerOp::Executing && oper->generation==seq)
++                    oper->doReply(Value(), serverStatus(status));
+         });
+     }
+ 
+@@ -317,7 +354,8 @@
+             return;
+         serv->acceptor_loop.call([this, &fn](){
+             if(auto oper = op.lock())
+-                oper->onCancel = std::move(fn);
++                if(oper->state==ServerOp::Executing && oper->generation==generation)
++                    oper->onCancel = std::move(fn);
+         });
+     }
+ 
+@@ -332,11 +370,24 @@
+ 
+     virtual void logRemote(Level lvl, const std::string& msg) override final
+     {
+-        doLogRemote(this, lvl, msg);
++        auto serv = server.lock();
++        if(!serv) return;
++        auto weak = op;
++        auto seq = generation;
++        serv->acceptor_loop.dispatch([weak, seq, lvl, msg]() {
++            if(auto oper = weak.lock()) {
++                if(oper->state!=ServerOp::Executing || oper->generation!=seq)
++                    return;
++                if(auto chan = oper->chan.lock())
++                    if(auto conn = chan->conn.lock())
++                        conn->logRemote(oper->ioid, lvl, msg);
++            }
++        });
+     }
+ 
+     const std::weak_ptr<server::Server::Pvt> server;
+     const std::weak_ptr<ServerGPR> op;
++    const uint64_t generation;
+ 
+     INST_COUNTER(ServerGPRExec);
+ };
+@@ -470,6 +521,7 @@
+             if(!op->lastRequest)
+                 op->lastRequest = subcmd&0x10;
+ 
++            ++op->generation;
+             std::unique_ptr<ServerGPRExec> ctrl{new ServerGPRExec(this, cmd, iface->server->internal_self, chan->name, op)};
+ 
+             op->subcmd = subcmd;
+diff --git a/src/serverintrospect.cpp b/src/serverintrospect.cpp
+--- a/src/serverintrospect.cpp
++++ b/src/serverintrospect.cpp
+@@ -62,8 +62,9 @@
+ {
+     ServerIntrospectControl(ServerConn *conn, ServerChan *chan,
+                             const std::weak_ptr<server::Server::Pvt>& server,
+-                            const std::weak_ptr<ServerIntrospect>& op)
+-        :server::ConnectOp(chan->name, conn->cred, Info, Value()) // TODO: pvRequest?
++                            const std::weak_ptr<ServerIntrospect>& op,
++                            const std::string& subfield)
++        :server::ConnectOp(chan->name, conn->cred, Info, Value(), subfield)
+         ,server(server)
+         ,op(op)
+     {}
+@@ -73,17 +74,29 @@
+ 
+     virtual void connect(const Value& prototype) override final
+     {
++        connect(prototype, RemoteStatus());
++    }
++    virtual void connect(const Value& prototype, const RemoteStatus& status) override final
++    {
++        if(!status.isSuccess()) {
++            error(status);
++            return;
++        }
+         auto desc = Value::Helper::desc(prototype);
+         if(!desc)
+             throw std::logic_error("Can't reply to GET_FIELD with Null prototype");
+-        Status sts{Status::Ok};
+-        doReply(desc, sts);
++        doReply(desc, serverStatus(status));
+     }
+ 
+     virtual void error(const std::string &msg) override final
+     {
+         Status sts{Status::Error, msg};
+         doReply(nullptr, sts);
++    }
++
++    virtual void error(const RemoteStatus& status) override final
++    {
++        doReply(nullptr, serverStatus(status));
+     }
+ 
+     void doReply(const FieldDesc* type, const Status& sts)
+@@ -164,7 +177,7 @@
+     chan->statRx += rxlen;
+ 
+     auto op(std::make_shared<ServerIntrospect>(chan, ioid));
+-    std::unique_ptr<ServerIntrospectControl> ctrl(new ServerIntrospectControl(this, chan.get(), iface->server->internal_self, op));
++    std::unique_ptr<ServerIntrospectControl> ctrl(new ServerIntrospectControl(this, chan.get(), iface->server->internal_self, op, subfield));
+ 
+     op->state = ServerOp::Executing; // this is a one-shot operation
+ 
+diff --git a/src/servermon.cpp b/src/servermon.cpp
+--- a/src/servermon.cpp
++++ b/src/servermon.cpp
+@@ -23,6 +23,20 @@
+ namespace {
+ 
+ typedef epicsGuard<epicsMutex> Guard;
++
++// Same ancestor semantics as Value::isMarked(true), indexed in the wire type.
++bool markedField(const Value& value, size_t bit)
++{
++    auto desc = Value::Helper::desc(value);
++    auto store = Value::Helper::store_ptr(value);
++    while(true) {
++        if(store[bit].valid)
++            return true;
++        if(!bit)
++            return false;
++        bit -= desc[bit].parent_index;
++    }
++}
+ 
+ struct MonitorOp final : public ServerOp
+ {
+@@ -51,7 +65,7 @@
+     // const after setup phase
+     std::shared_ptr<const FieldDesc> type;
+     BitMask pvMask;
+-    std::string msg;
++    Status setupStatus{};
+ 
+     // Further members guarded by this lock (except as noted)
+     mutable epicsMutex lock;
+@@ -69,7 +83,14 @@
+     size_t maxQueue=0u;
+     size_t nSquash=0u;
+ 
+-    std::deque<Value> queue;
++    struct QueuedEvent : MonitorEvent {
++        // Squashed Values can retain fields from every contributing event.
++        // Flat storage avoids recursive lease destruction after long overloads.
++        std::vector<std::shared_ptr<void>> squashedLeases;
++        QueuedEvent() = default;
++        QueuedEvent(const MonitorEvent& event) :MonitorEvent(event) {}
++    };
++    std::deque<QueuedEvent> queue;
+ 
+     INST_COUNTER(MonitorOp);
+ 
+@@ -79,7 +100,7 @@
+     void maybeReply(server::Server::Pvt* server, const std::shared_ptr<MonitorOp>& op)
+     {
+         // can we send a reply?
+-        if(!op->scheduled && op->state==Executing && !op->queue.empty() && (!op->pipeline || op->window))
++        if(!op->scheduled && op->state==Executing && !op->queue.empty() && (!op->pipeline || op->window || op->finished))
+         {
+             // based on operation state, yes
+             server->acceptor_loop.dispatch([op](){
+@@ -145,9 +166,8 @@
+                                  conn->peerName.c_str(), unsigned(self->ioid));
+                 return; // nothing to do
+ 
+-            } else if(!self->queue.front()) {
++            } else if(!self->queue.front().value) {
+                 subcmd = 0x10;
+-                self->cleanup();
+                 log_debug_printf(connio, "Client %s IOID %u finishes\n",
+                                  conn->peerName.c_str(), unsigned(self->ioid));
+             }
+@@ -160,23 +180,21 @@
+             to_wire(R, uint32_t(self->ioid));
+             to_wire(R, subcmd);
+             if(subcmd&0x08) {
+-                if(!self->msg.empty() || !self->type) {
+-                    to_wire(R, Status::error(self->msg));
+-
+-                } else {
+-                    to_wire(R, Status{});
++                to_wire(R, self->setupStatus);
++                if(self->setupStatus.isSuccess() && self->type)
+                     to_wire(R, self->type.get());
+-                }
+ 
+             } else if(!self->queue.empty()) {
+                 auto& ent = self->queue.front();
+-                if(ent) {
+-                    to_wire_valid(R, ent, &self->pvMask);
+-                    // TODO: placeholder for overrun mask
+-                    to_wire(R, uint8_t(0u));
++                if(ent.value) {
++                    to_wire_valid(R, ent.value, &self->pvMask);
++                    BitMask overrun(self->type->size());
++                    for(auto bit : ent.overrun)
++                        overrun[bit] = true;
++                    to_wire(R, overrun);
+ 
+                 } else { // finish (could be used to send an error)
+-                    to_wire(R, Status{});
++                    to_wire(R, serverStatus(ent.status));
+                 }
+ 
+                 self->queue.pop_front();
+@@ -184,6 +202,8 @@
+         }
+ 
+         ch->statTx += conn->enqueueTxBody(pva_app_msg_t::CMD_MONITOR);
++        if(subcmd&0x10)
++            self->cleanup();
+ 
+         if(self->state == ServerOp::Dead) {
+             return;
+@@ -222,6 +242,9 @@
+ 
+     void cleanup() override final
+     {
++        Guard G(lock);
++        finished = true;
++        queue.clear();
+         ServerOp::cleanup(); // calls onCancel()
+         // release any bound variables
+         onHighMark = nullptr;
+@@ -240,6 +263,7 @@
+ 
+ struct ServerMonitorControl : public server::MonitorControlOp
+ {
++    using server::MonitorControlOp::finish;
+     ServerMonitorControl(ServerMonitorSetup* setup,
+                      const std::weak_ptr<server::Server::Pvt>& server,
+                      const std::string& name,
+@@ -250,30 +274,42 @@
+ 
+     virtual bool doPost(const Value& val, bool maybe, bool force) override final
+     {
++        MonitorEvent event;
++        event.value = val;
++        return postEvent(event, maybe, force);
++    }
++
++    virtual bool postEvent(const MonitorEvent& event, bool maybe, bool force) override final
++    {
++        const auto& val = event.value;
++        if(val && !event.status.isDefault())
++            throw std::invalid_argument("Native MONITOR data frames cannot carry a status; use setup or terminal status");
+         auto mon(op.lock());
+         if(!mon)
+             return false;
+ 
+         if(val && mon->type && mon->type.get()!=Value::Helper::desc(val))
+             throw std::logic_error("Type change not allowed in post().  Recommend pvxs::Value::cloneEmpty()");
+-
+-        // pvMask is const at this point, so no need to lock
++        for(auto bit : event.overrun)
++            if(!mon->type || bit>=mon->type->size())
++                throw std::out_of_range("Monitor overrun field index outside prototype");
++
++        Guard G(mon->lock);
++        if(mon->finished || mon->state==ServerOp::Dead)
++            return false;
++
+         bool real = mon->first; // always post through first update
+         if(real)
+             mon->first = false;
+         else
+-            real = testmask(val, mon->pvMask); // consider mask for subsequent updates
+-
+-        Guard G(mon->lock);
+-        if(mon->finished)
+-            return false;
++            real = !val || !event.overrun.empty() || testmask(val, mon->pvMask);
+ 
+         if(real || !val) {
+ 
+             if((mon->queue.size() < mon->limit) || force || !val) {
+ 
+                 mon->finished = !val;
+-                mon->queue.push_back(val);
++                mon->queue.push_back(event);
+ 
+                 if(mon->maxQueue < mon->queue.size())
+                     mon->maxQueue = mon->queue.size();
+@@ -282,7 +318,23 @@
+                 // squash
+                 assert(mon->limit>0 && !mon->queue.empty());
+ 
+-                mon->queue.back().assign(val);
++                auto& back = mon->queue.back();
++                for(size_t bit=0u; bit<mon->type->size();) {
++                    if(markedField(back.value, bit) && markedField(val, bit)) {
++                        if(mon->pvMask[bit])
++                            back.overrun.push_back(bit);
++                        // A marked structure covers its descendants.
++                        bit += mon->type.get()[bit].size();
++                    } else {
++                        ++bit;
++                    }
++                }
++                back.value.assign(val);
++                if(event.lease)
++                    back.squashedLeases.push_back(event.lease);
++                back.overrun.insert(back.overrun.end(), event.overrun.begin(), event.overrun.end());
++                std::sort(back.overrun.begin(), back.overrun.end());
++                back.overrun.erase(std::unique(back.overrun.begin(), back.overrun.end()), back.overrun.end());
+                 mon->nSquash++;
+ 
+             } else {
+@@ -294,6 +346,25 @@
+         }
+ 
+         return mon->queue.size() < mon->limit;
++    }
++
++    virtual void error(const std::string& msg) override final
++    {
++        if(msg.empty())
++            throw std::invalid_argument("Must provide error message");
++        error(RemoteStatus(RemoteStatus::Error, msg));
++    }
++    virtual void error(const RemoteStatus& status) override final
++    {
++        MonitorEvent event;
++        event.status = status;
++        postEvent(event, false, true);
++    }
++    virtual void finish(const RemoteStatus& status) override final
++    {
++        MonitorEvent event;
++        event.status = status;
++        postEvent(event, false, true);
+     }
+ 
+     virtual void stats(server::MonitorStat& stat, bool reset) const override final
+@@ -396,6 +467,14 @@
+ 
+     virtual std::unique_ptr<server::MonitorControlOp> connect(const Value &prototype) override final
+     {
++        return connect(prototype, RemoteStatus());
++    }
++    virtual std::unique_ptr<server::MonitorControlOp> connect(const Value &prototype, const RemoteStatus& status) override final
++    {
++        if(!status.isSuccess()) {
++            error(status);
++            return std::unique_ptr<server::MonitorControlOp>();
++        }
+         if(!prototype)
+             throw std::invalid_argument("Must provide prototype");
+         auto type = Value::Helper::type(prototype);
+@@ -406,11 +485,12 @@
+         auto serv = server.lock();
+         if(!serv)
+             return ret;
+-        serv->acceptor_loop.call([this, &type, &ret, &mask](){
++        serv->acceptor_loop.call([this, &type, &ret, &mask, &status](){
+             if(auto oper = op.lock()) {
+                 if(oper->state!=ServerOp::Creating)
+                     return;
+                 oper->type = std::move(type);
++                oper->setupStatus = serverStatus(status);
+                 oper->pvMask = std::move(mask);
+                 ret.reset(new ServerMonitorControl(this, server, _name, oper));
+                 MonitorOp::doReply(oper);
+@@ -432,7 +512,21 @@
+         serv->acceptor_loop.dispatch([op, msg]() mutable {
+             if(auto oper = op.lock()) {
+                 if(oper->state==ServerOp::Creating) {
+-                    oper->msg = std::move(msg);
++                    oper->setupStatus = Status::error(msg);
++                    MonitorOp::doReply(oper);
++                }
++            }
++        });
++    }
++    virtual void error(const RemoteStatus& status) override final
++    {
++        auto serv = server.lock();
++        if(!serv) return;
++        auto weak = op;
++        serv->acceptor_loop.dispatch([weak, status]() {
++            if(auto oper = weak.lock()) {
++                if(oper->state==ServerOp::Creating) {
++                    oper->setupStatus = serverStatus(status);
+                     MonitorOp::doReply(oper);
+                 }
+             }
+diff --git a/src/serverproxy.cpp b/src/serverproxy.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/serverproxy.cpp
+@@ -0,0 +1,398 @@
++/**
++ * Copyright - See the COPYRIGHT that is included with this distribution.
++ * pvxs is distributed subject to a Software License Agreement found
++ * in file LICENSE that is included with this distribution.
++ */
++#include <limits>
++#include <pvxs/log.h>
++#include "serverconn.h"
++
++namespace pvxs { namespace impl {
++DEFINE_LOGGER(proxysetup, "pvxs.tcp.setup");
++
++namespace {
++
++ProxyKind proxyKind(pva_app_msg_t cmd)
++{
++    return cmd==CMD_PROCESS ? ProxyKind::Process : cmd==CMD_PUT_GET ? ProxyKind::PutGet : ProxyKind::Array;
++}
++
++struct ServerProxy final : ServerOp {
++    const pva_app_msg_t cmd;
++    Value pvRequest;
++    Type putType, getType;
++    uint8_t subcmd = 0u;
++    uint64_t generation = 0u;
++    ProxyAction action = ProxyAction::Process;
++    std::function<void(std::unique_ptr<server::ProxyExecOp>&&, ProxyRequest&&)> onExec;
++
++    ServerProxy(const std::shared_ptr<ServerChan>& chan, uint32_t ioid, pva_app_msg_t cmd)
++        :ServerOp(chan, ioid), cmd(cmd)
++    {}
++
++    void cleanup() override final
++    {
++        ServerOp::cleanup();
++        onExec = nullptr;
++    }
++
++    void show(std::ostream& strm) const override final
++    {
++        strm<<(cmd==CMD_PROCESS ? "PROCESS" : cmd==CMD_PUT_GET ? "PUT_GET" : "ARRAY")<<'\n';
++    }
++
++    // Always called on the connection worker.  Generation prevents a delayed reply
++    // to a canceled request from completing a later request using the same IOID.
++    void reply(uint64_t seq, const Value& value, uint64_t length, const std::string& error)
++    {
++        reply(seq, value, length, error.empty() ? Status{} : Status::error(error));
++    }
++    void reply(uint64_t seq, const Value& value, uint64_t length, const Status& status)
++    {
++        if((state!=Creating && state!=Executing) || seq!=generation)
++            return;
++        auto ch = chan.lock();
++        if(!ch)
++            return;
++        auto conn = ch->conn.lock();
++        if(!conn || !conn->connection() || conn->state==ConnBase::Disconnected)
++            return;
++
++        auto sts = status;
++        if(sts.isSuccess() && state==Executing) {
++            auto expected = action==ProxyAction::GetPut ? putType : getType;
++            const bool hasValue = cmd==CMD_PUT_GET || action==ProxyAction::ArrayGet;
++            if(hasValue && (!value || Value::Helper::desc(value)!=expected.get()))
++                sts = Status::error("Reply must use the prototype provided to connect()");
++            else if(!hasValue && value)
++                sts = Status::error("Operation reply must not include a value");
++            else if(action==ProxyAction::ArrayGetLength && length>std::numeric_limits<uint32_t>::max())
++                sts = Status::error("Array length exceeds the PVA size limit");
++        }
++
++        const bool creating = state==Creating;
++        (void)evbuffer_drain(conn->txBody.get(), evbuffer_get_length(conn->txBody.get()));
++        {
++            EvOutBuf R(conn->sendBE, conn->txBody.get());
++            to_wire(R, ioid);
++            to_wire(R, subcmd);
++            to_wire(R, sts);
++            if(sts.isSuccess()) {
++                if(creating) {
++                    if(cmd==CMD_PUT_GET) {
++                        to_wire(R, putType.get());
++                        to_wire(R, getType.get());
++                    } else if(cmd==CMD_ARRAY) {
++                        to_wire(R, getType.get());
++                    }
++                } else if(cmd==CMD_PUT_GET) {
++                    to_wire_valid(R, value);
++                } else if(action==ProxyAction::ArrayGet) {
++                    to_wire_full(R, value);
++                } else if(action==ProxyAction::ArrayGetLength) {
++                    to_wire(R, Size{size_t(length)});
++                }
++            }
++            if(!R.good())
++                throw std::runtime_error("Unable to encode proxy reply");
++        }
++        ch->statTx += conn->enqueueTxBody(cmd);
++        onCancel = nullptr;
++        if((creating && !sts.isSuccess()) || (!creating && (subcmd&0x10)))
++            cleanup();
++        else
++            state = Idle;
++    }
++};
++
++struct ProxyConnect final : server::ProxySetupOp {
++    const std::weak_ptr<server::Server::Pvt> server;
++    const std::weak_ptr<ServerProxy> op;
++
++    ProxyConnect(ServerConn* conn, const std::shared_ptr<ServerChan>& chan, const std::shared_ptr<ServerProxy>& op)
++        :ProxySetupOp(chan->name, conn->cred, proxyKind(op->cmd), op->pvRequest)
++        ,server(conn->iface->server->internal_self), op(op)
++    {}
++    ~ProxyConnect() { error("Operation setup was not completed"); }
++
++    void connect(const ProxyPrototype& proto) override final
++    {
++        connect(proto, RemoteStatus());
++    }
++    void connect(const ProxyPrototype& proto, const RemoteStatus& status) override final
++    {
++        if(!status.isSuccess()) {
++            error(status);
++            return;
++        }
++        if(kind()==ProxyKind::Process && (proto.put || proto.get))
++            throw std::invalid_argument("PROCESS does not have value prototypes");
++        if(kind()==ProxyKind::PutGet && (!proto.put || !proto.get ||
++                proto.put.type()!=TypeCode::Struct || proto.get.type()!=TypeCode::Struct))
++            throw std::invalid_argument("PUT_GET requires put and get structure prototypes");
++        if(kind()==ProxyKind::Array && (!proto.put || !proto.get ||
++                !proto.get.type().isarray() || !proto.put.equalType(proto.get)))
++            throw std::invalid_argument("ARRAY requires matching root array prototypes");
++        auto serv = server.lock();
++        if(!serv)
++            return;
++        serv->acceptor_loop.call([this, &proto, &status]() {
++            if(auto oper = op.lock()) {
++                if(oper->state!=ServerOp::Creating)
++                    return;
++                oper->putType = Value::Helper::type(proto.put);
++                oper->getType = Value::Helper::type(proto.get);
++                oper->reply(oper->generation, Value(), 0u, serverStatus(status));
++            }
++        });
++    }
++
++    void error(const std::string& msg) override final
++    {
++        if(msg.empty())
++            throw std::invalid_argument("Must provide error message");
++        if(auto serv = server.lock()) {
++            auto weak = op;
++            serv->acceptor_loop.dispatch([weak, msg]() {
++                if(auto oper = weak.lock())
++                    if(oper->state==ServerOp::Creating)
++                        oper->reply(oper->generation, Value(), 0u, msg);
++            });
++        }
++    }
++
++    void error(const RemoteStatus& status) override final
++    {
++        if(auto serv = server.lock()) {
++            auto weak = op;
++            serv->acceptor_loop.dispatch([weak, status]() {
++                if(auto oper = weak.lock())
++                    if(oper->state==ServerOp::Creating)
++                        oper->reply(oper->generation, Value(), 0u, serverStatus(status));
++            });
++        }
++    }
++
++    void onExec(std::function<void(std::unique_ptr<server::ProxyExecOp>&&, ProxyRequest&&)>&& fn) override final
++    {
++        if(auto serv = server.lock())
++            serv->acceptor_loop.call([this, &fn]() {
++                if(auto oper = op.lock())
++                    oper->onExec = std::move(fn);
++            });
++    }
++    void onClose(std::function<void(const std::string&)>&& fn) override final
++    {
++        if(auto serv = server.lock())
++            serv->acceptor_loop.call([this, &fn]() {
++                if(auto oper = op.lock())
++                    oper->onClose = std::move(fn);
++            });
++    }
++    void logRemote(Level lvl, const std::string& msg) override final { doLogRemote(this, lvl, msg); }
++};
++
++struct ProxyExec final : server::ProxyExecOp {
++    const std::weak_ptr<server::Server::Pvt> server;
++    const std::weak_ptr<ServerProxy> op;
++    const uint64_t generation;
++
++    ProxyExec(ServerConn* conn, const std::shared_ptr<ServerChan>& chan, const std::shared_ptr<ServerProxy>& oper)
++        :ProxyExecOp(chan->name, conn->cred, proxyKind(oper->cmd), oper->action, oper->pvRequest)
++        ,server(conn->iface->server->internal_self), op(oper), generation(oper->generation)
++    {}
++    ~ProxyExec() { error("Operation execution was not completed"); }
++
++    void send(const Value& value, uint64_t length, const std::string& msg)
++    {
++        send(value, length, msg.empty() ? Status{} : Status::error(msg));
++    }
++    void send(const Value& value, uint64_t length, const Status& status)
++    {
++        if(auto serv = server.lock()) {
++            auto weak = op;
++            auto seq = generation;
++            serv->acceptor_loop.dispatch([weak, seq, value, length, status]() {
++                if(auto oper = weak.lock())
++                    if(oper->state==ServerOp::Executing)
++                        oper->reply(seq, value, length, status);
++            });
++        }
++    }
++    void reply() override final { send(Value(), 0u, std::string()); }
++    void reply(const Value& value) override final { send(value, 0u, std::string()); }
++    void reply(const Value& value, const RemoteStatus& status) override final {
++        send(value, 0u, serverStatus(status));
++    }
++    void reply(const RemoteStatus& status) override final {
++        send(Value(), 0u, serverStatus(status));
++    }
++    void replyLength(uint64_t length) override final { replyLength(length, RemoteStatus()); }
++    void replyLength(uint64_t length, const RemoteStatus& status) override final {
++        if(action()!=ProxyAction::ArrayGetLength)
++            throw std::logic_error("replyLength() is only valid for ARRAY getLength");
++        send(Value(), length, serverStatus(status));
++    }
++    void error(const std::string& msg) override final {
++        if(msg.empty())
++            throw std::invalid_argument("Must provide error message");
++        send(Value(), 0u, msg);
++    }
++    void error(const RemoteStatus& status) override final {
++        send(Value(), 0u, serverStatus(status));
++    }
++    void onCancel(std::function<void()>&& fn) override final
++    {
++        if(auto serv = server.lock())
++            serv->acceptor_loop.call([this, &fn]() {
++                if(auto oper = op.lock())
++                    if(oper->state==ServerOp::Executing && generation==oper->generation)
++                        oper->onCancel = std::move(fn);
++            });
++    }
++    Timer _timerOneShot(double delay, std::function<void()>&& fn) override final
++    {
++        auto serv = server.lock();
++        if(!serv)
++            throw std::logic_error("Can't start timer on dead server");
++        return Timer::Pvt::buildOneShot(delay, serv->acceptor_loop.internal(), std::move(fn));
++    }
++    void logRemote(Level lvl, const std::string& msg) override final { doLogRemote(this, lvl, msg); }
++};
++
++} // namespace
++
++void ServerConn::handle_PROXY(pva_app_msg_t cmd)
++{
++    const auto rxlen = 8u + evbuffer_get_length(segBuf.get());
++    EvInBuf M(peerBE, segBuf.get(), 16);
++    uint32_t sid=0u, ioid=0u;
++    uint8_t subcmd=0u;
++    from_wire(M, sid);
++    from_wire(M, ioid);
++    from_wire(M, subcmd);
++    if(!M.good()) {
++        bev.reset();
++        return;
++    }
++
++    auto fail = [this, cmd, ioid, subcmd](const std::string& msg) {
++        (void)evbuffer_drain(txBody.get(), evbuffer_get_length(txBody.get()));
++        {
++            EvOutBuf R(sendBE, txBody.get());
++            to_wire(R, ioid);
++            to_wire(R, subcmd);
++            to_wire(R, Status::error(msg));
++        }
++        enqueueTxBody(cmd);
++    };
++
++    if(subcmd&0x08) {
++        Value request;
++        from_wire_type_value(M, rxRegistry, request);
++        if(!M.good()) {
++            bev.reset();
++            return;
++        }
++        auto chan = lookupSID(sid);
++        if(!chan) {
++            fail("Unknown channel");
++            return;
++        }
++        if(opByIOID.count(ioid)) {
++            fail("Operation identifier is already in use");
++            return;
++        }
++        chan->statRx += rxlen;
++        auto oper = std::make_shared<ServerProxy>(chan, ioid, cmd);
++        oper->state = ServerOp::Creating;
++        oper->subcmd = subcmd;
++        oper->pvRequest = request;
++        opByIOID[ioid] = oper;
++        chan->opByIOID[ioid] = oper;
++        std::unique_ptr<server::ProxySetupOp> ctrl(new ProxyConnect(this, chan, oper));
++        try {
++            if(chan->onProxy)
++                chan->onProxy(std::move(ctrl));
++            else
++                ctrl->error("Native proxy operation is not implemented for this PV");
++        } catch(std::exception& e) {
++            oper->reply(oper->generation, Value(), 0u, e.what());
++        }
++        return;
++    }
++
++    auto it = opByIOID.find(ioid);
++    auto oper = it==opByIOID.end() ? std::shared_ptr<ServerProxy>() : std::dynamic_pointer_cast<ServerProxy>(it->second);
++    auto chan = oper ? oper->chan.lock() : std::shared_ptr<ServerChan>();
++    if(!oper || !chan || chan->sid!=sid || oper->cmd!=cmd) {
++        rxRegistryDirty = true;
++        fail("Unknown or incompatible operation");
++        return;
++    }
++    if(oper->state!=ServerOp::Idle) {
++        rxRegistryDirty = true;
++        fail("Operation is not ready for execution");
++        return;
++    }
++
++    ProxyRequest request;
++    if(cmd==CMD_PROCESS) {
++        request.action = ProxyAction::Process;
++    } else if(cmd==CMD_PUT_GET) {
++        request.action = (subcmd&0x40) ? ProxyAction::GetGet : (subcmd&0x80) ? ProxyAction::GetPut : ProxyAction::PutGet;
++        if(request.action==ProxyAction::PutGet) {
++            request.value = Value::Helper::build(oper->putType);
++            from_wire_valid(M, rxRegistry, request.value);
++        }
++    } else {
++        Size offset{}, count{}, stride{}, length{};
++        if(subcmd&0x40) {
++            request.action = ProxyAction::ArrayGet;
++            from_wire(M, offset);
++            from_wire(M, count);
++            from_wire(M, stride);
++        } else if(subcmd&0x80) {
++            request.action = ProxyAction::ArraySetLength;
++            from_wire(M, length);
++        } else if(subcmd&0x04) {
++            request.action = ProxyAction::ArrayGetLength;
++        } else {
++            request.action = ProxyAction::ArrayPut;
++            from_wire(M, offset);
++            from_wire(M, stride);
++            request.value = Value::Helper::build(oper->putType);
++            from_wire_full(M, rxRegistry, request.value);
++            if(M.good())
++                count.size = request.value.as<shared_array<const void>>().size();
++        }
++        request.offset = offset.size;
++        request.count = count.size;
++        request.stride = stride.size;
++        request.length = length.size;
++    }
++    if(!M.good()) {
++        bev.reset();
++        return;
++    }
++    chan->statRx += rxlen;
++    oper->subcmd = subcmd;
++    oper->action = request.action;
++    oper->generation++;
++    oper->state = ServerOp::Executing;
++    std::unique_ptr<server::ProxyExecOp> ctrl(new ProxyExec(this, chan, oper));
++    try {
++        if(oper->onExec)
++            oper->onExec(std::move(ctrl), std::move(request));
++        else
++            ctrl->error("Native operation execution is not implemented for this PV");
++    } catch(std::exception& e) {
++        oper->reply(oper->generation, Value(), 0u, e.what());
++    }
++}
++
++void ServerConn::handle_PROCESS() { handle_PROXY(CMD_PROCESS); }
++void ServerConn::handle_PUT_GET() { handle_PROXY(CMD_PUT_GET); }
++void ServerConn::handle_ARRAY() { handle_PROXY(CMD_ARRAY); }
++
++}} // namespace pvxs::impl
+diff --git a/test/Makefile b/test/Makefile
+--- a/test/Makefile
++++ b/test/Makefile
+@@ -70,6 +70,14 @@
+ TESTPROD_HOST += testinfo
+ testinfo_SRCS += testinfo.cpp
+ TESTS += testinfo
++
++TESTPROD_HOST += testproxyserver
++testproxyserver_SRCS += testproxyserver.cpp
++TESTS += testproxyserver
++
++TESTPROD_HOST += testproxyclient
++testproxyclient_SRCS += testproxyclient.cpp
++TESTS += testproxyclient
+ 
+ TESTPROD_HOST += testget
+ testget_SRCS += testget.cpp
+diff --git a/test/proxy/Makefile b/test/proxy/Makefile
+new file mode 100644
+--- /dev/null
++++ b/test/proxy/Makefile
+@@ -0,0 +1,20 @@
++TOP=../..
++include $(TOP)/configure/CONFIG
++
++# These protocol regressions require only PVXS, libevent, and Base libCom.
++# Keep them buildable without IOC record libraries.
++USR_CPPFLAGS += -I$(TOP)/src
++USR_VPATH += $(TOP)/test
++# RULES_PVXS_MODULE supplies PVXS's configured libevent link dependencies.
++PROD_LIBS = pvxs Com
++
++TESTPROD_HOST += testproxyclient
++testproxyclient_SRCS += testproxyclient.cpp
++TESTS += testproxyclient
++
++TESTPROD_HOST += testproxyserver
++testproxyserver_SRCS += testproxyserver.cpp
++TESTS += testproxyserver
++
++TESTSCRIPTS_HOST += $(TESTS:%=%.t)
++include $(TOP)/configure/RULES
+diff --git a/test/testproxyclient.cpp b/test/testproxyclient.cpp
+new file mode 100644
+--- /dev/null
++++ b/test/testproxyclient.cpp
+@@ -0,0 +1,505 @@
++/** Regression coverage for client admission hooks and manual RPC. */
++#define PVXS_ENABLE_EXPERT_API
++#include <atomic>
++#include <testMain.h>
++#include <epicsUnitTest.h>
++#include <epicsEvent.h>
++#include <epicsThread.h>
++#include <algorithm>
++#include <pvxs/unittest.h>
++#include <pvxs/client.h>
++#include <pvxs/server.h>
++#include <pvxs/sharedpv.h>
++#include <pvxs/source.h>
++#include <pvxs/nt.h>
++
++namespace {
++using namespace pvxs;
++
++struct Fixture {
++    Value initial=nt::NTScalar{TypeCode::Int32}.create();
++    server::SharedPV pv=server::SharedPV::buildMailbox();
++    server::Server serv=server::Config::isolated().build().addPV("value", pv);
++    client::Context cli=serv.clientConfig().build();
++    std::atomic<unsigned> rpcCount{0};
++    Fixture() {
++        initial["value"]=7;
++        pv.onRPC([this](server::SharedPV&, std::unique_ptr<server::ExecOp>&& op, Value&& value) {
++            ++rpcCount;
++            op->reply(value);
++        });
++        pv.open(initial);
++        serv.start();
++    }
++};
++
++void guardedIO() {
++    Fixture f;
++    std::atomic<unsigned> guard{0};
++    auto get=f.cli.get("value").beforeSend([&]() { ++guard; }).exec();
++    testEq(get->wait(5.0)["value"].as<int32_t>(), 7);
++    testEq(guard.load(), 1u);
++
++    auto put=f.cli.put("value").set("value", int32_t(42)).beforeSend([&]() {
++        ++guard;
++        throw std::runtime_error("admission denied");
++    }).exec();
++    testThrowsMatch<std::runtime_error>("admission denied", [&]() { put->wait(5.0); });
++    testEq(guard.load(), 2u);
++    testEq(f.pv.fetch()["value"].as<int32_t>(), 7);
++
++    auto rpc=f.cli.rpc("value", f.initial).beforeSend([&]() {
++        ++guard;
++        throw std::runtime_error("RPC denied");
++    }).exec();
++    testThrowsMatch<std::runtime_error>("RPC denied", [&]() { rpc->wait(5.0); });
++    testEq(guard.load(), 3u);
++    testEq(f.rpcCount.load(), 0u);
++}
++
++void manualRPC() {
++    Fixture f;
++    epicsEvent initialized, completed;
++    client::Result result;
++    std::atomic<unsigned> guard{0};
++    auto op=f.cli.rpc("value").autoExec(false)
++        .onInit([&](const Value& prototype) { testFalse(bool(prototype)); initialized.signal(); })
++        .beforeSend([&]() { ++guard; })
++        .result([&](client::Result&& r) { result=std::move(r); completed.signal(); })
++        .exec();
++    testOk1(initialized.wait(5.0));
++    testEq(f.rpcCount.load(), 0u);
++    for(int32_t number=10; number<12; ++number) {
++        auto value=f.initial.clone(); value["value"]=number;
++        op->reExecRPC(value, [&](client::Result&& r) { result=std::move(r); completed.signal(); });
++        testOk1(completed.wait(5.0));
++        testFalse(result.error());
++        testEq(result()["value"].as<int32_t>(), number);
++    }
++    testEq(guard.load(), 2u);
++    testEq(f.rpcCount.load(), 2u);
++    op->cancel();
++    op->reExecRPC(f.initial, [&](client::Result&& r) { result=std::move(r); completed.signal(); });
++    testOk1(completed.wait(5.0));
++    testThrows<std::logic_error>([&]() { result(); });
++    testEq(guard.load(), 2u);
++}
++
++void busyRPC() {
++    Fixture f;
++    epicsEvent initialized, entered, done, rejected;
++    std::unique_ptr<server::ExecOp> held;
++    client::Result first, second;
++    f.pv.onRPC([&](server::SharedPV&, std::unique_ptr<server::ExecOp>&& op, Value&&) {
++        held=std::move(op); entered.signal();
++    });
++    auto op=f.cli.rpc("value").autoExec(false)
++        .onInit([&](const Value&) { initialized.signal(); }).exec();
++    testOk1(initialized.wait(5.0));
++    op->reExecRPC(f.initial, [&](client::Result&& r) { first=std::move(r); done.signal(); });
++    testOk1(entered.wait(5.0));
++    op->reExecRPC(f.initial, [&](client::Result&& r) { second=std::move(r); rejected.signal(); });
++    testOk1(rejected.wait(5.0));
++    testThrows<std::logic_error>([&]() { second(); });
++    held->reply(f.initial); held.reset();
++    testOk1(done.wait(5.0));
++    testFalse(first.error());
++}
++struct AdmissionSource : server::Source {
++    Value prototype=nt::NTScalar{TypeCode::Int32}.create();
++    std::atomic<unsigned> gets{0}, puts{0}, rpcs{0};
++    bool drop=false;
++    AdmissionSource() { prototype["value"]=19; }
++    void onSearch(Search& search) override { for(auto& name : search) name.claim(); }
++    void onCreate(std::unique_ptr<server::ChannelControl>&& raw) override {
++        std::shared_ptr<server::ChannelControl> channel(std::move(raw));
++        channel->onOp([this, channel](std::unique_ptr<server::ConnectOp>&& op) {
++            op->onGet([this, channel](std::unique_ptr<server::ExecOp>&& exec) {
++                auto count=++gets;
++                if(drop && count==1) channel->close();
++                else exec->reply(prototype);
++            });
++            op->onPut([this, channel](std::unique_ptr<server::ExecOp>&& exec, Value&&) {
++                auto count=++puts;
++                if(drop && count==1) channel->close();
++                else exec->reply();
++            });
++            op->connect(prototype);
++        });
++        channel->onRPC([this, channel](std::unique_ptr<server::ExecOp>&& exec, Value&& value) {
++            auto count=++rpcs;
++            if(drop && count==1) channel->close();
++            else exec->reply(value);
++        });
++    }
++};
++
++void deniedProcessGet() {
++    auto source=std::make_shared<AdmissionSource>();
++    auto serv=server::Config::isolated().build().addSource("admission", source).start();
++    auto cli=serv.clientConfig().build();
++    std::atomic<unsigned> guard{0};
++    auto op=cli.get("value").record("process", true).beforeSend([&]() {
++        ++guard; throw std::runtime_error("process GET denied");
++    }).exec();
++    testThrowsMatch<std::runtime_error>("process GET denied", [&]() { op->wait(5.0); });
++    testEq(guard.load(), 1u);
++    testEq(source->gets.load(), 0u);
++}
++
++void noReplay(unsigned kind) {
++    auto source=std::make_shared<AdmissionSource>(); source->drop=true;
++    auto serv=server::Config::isolated().build().addSource("admission", source).start();
++    auto cli=serv.clientConfig().build();
++    std::atomic<unsigned> guards{0};
++    auto guard=[&]() { ++guards; };
++    std::shared_ptr<client::Operation> op;
++    if(kind==0) op=cli.get("value").record("process", true).beforeSend(guard).exec();
++    else if(kind==1) op=cli.put("value").fetchPresent(false).set("value", 42).beforeSend(guard).exec();
++    else op=cli.rpc("value", source->prototype).beforeSend(guard).exec();
++    testThrows<client::Disconnect>([&]() { op->wait(5.0); });
++    // A successful new operation proves the target channel has reconnected.
++    testTrue(bool(cli.info("value").exec()->wait(5.0)));
++    testEq(guards.load(), 1u);
++    testEq(kind==0 ? source->gets.load() : kind==1 ? source->puts.load() : source->rpcs.load(), 1u);
++}
++
++void defaultGetRetry() {
++    auto source=std::make_shared<AdmissionSource>(); source->drop=true;
++    auto serv=server::Config::isolated().build().addSource("retry", source).start();
++    auto cli=serv.clientConfig().build();
++    auto op=cli.get("value").exec();
++    testEq(op->wait(5.0)["value"].as<int32_t>(), 19);
++    testEq(source->gets.load(), 2u);
++}
++
++struct DelayedProxySource : AdmissionSource {
++    epicsEvent setup;
++    std::unique_ptr<server::ProxySetupOp> held;
++    std::atomic<unsigned> executions{0};
++    void onCreate(std::unique_ptr<server::ChannelControl>&& raw) override {
++        raw->onOp([this](std::unique_ptr<server::ConnectOp>&& op) { op->connect(prototype); });
++        raw->onProxy([this](std::unique_ptr<server::ProxySetupOp>&& op) {
++            op->onExec([this](std::unique_ptr<server::ProxyExecOp>&& exec, ProxyRequest&&) {
++                ++executions; exec->reply();
++            });
++            held=std::move(op); setup.signal();
++        });
++    }
++};
++
++void cancelDeferredProxy() {
++    auto source=std::make_shared<DelayedProxySource>();
++    auto serv=server::Config::isolated().build().addSource("deferred", source).start();
++    auto cli=serv.clientConfig().build();
++    epicsEvent completed, rejected;
++    client::Result first, second;
++    std::atomic<unsigned> guards{0};
++    auto op=cli.proxy("value", ProxyKind::Process).beforeSend([&]() { ++guards; }).exec();
++    ProxyRequest request;
++    op->execute(request, [&](client::Result&& result) { first=std::move(result); completed.signal(); });
++    testOk1(source->setup.wait(5.0));
++    op->execute(request, [&](client::Result&& result) { second=std::move(result); rejected.signal(); });
++    testOk1(rejected.wait(5.0));
++    testThrows<std::logic_error>([&]() { second(); });
++    testTrue(op->cancel());
++    testOk1(completed.wait(5.0));
++    testThrows<client::Interrupted>([&]() { first(); });
++    source->held->connect(ProxyPrototype{}); source->held.reset();
++    testTrue(bool(cli.info("value").exec()->wait(5.0)));
++    testEq(source->executions.load(), 0u);
++    testEq(guards.load(), 0u);
++}
++
++void localMonitorOverrun() {
++    Fixture f;
++    epicsEvent available;
++    auto sub=f.cli.monitor("value").record("queueSize", 2)
++        .event([&](client::Subscription&) { available.signal(); }).exec();
++    testOk1(available.wait(5.0));
++    auto delta=f.initial.cloneEmpty(); delta["value"]=22;
++    f.pv.post(delta);
++    client::SubscriptionStat stats;
++    for(unsigned i=0; i<300; ++i) {
++        sub->stats(stats);
++        if(stats.nQueue==2u) break;
++        epicsThreadSleep(0.01);
++    }
++    testEq(stats.nQueue, size_t(2));
++    delta=delta.cloneEmpty(); delta["value"]=23;
++    f.pv.post(delta);
++    for(unsigned i=0; i<300; ++i) {
++        sub->stats(stats);
++        if(stats.nCliSquash) break;
++        epicsThreadSleep(0.01);
++    }
++    testEq(stats.nCliSquash, size_t(1));
++    testEq(sub->pop()["value"].as<int32_t>(), 7);
++    auto event=sub->popEvent();
++    testEq(event.value["value"].as<int32_t>(), 23);
++    testTrue(std::find(event.overrun.begin(), event.overrun.end(), size_t(1))!=event.overrun.end());
++    sub->cancel();
++}
++
++RemoteStatus warning() { return RemoteStatus(RemoteStatus::Warning, "native warning", "warning stack"); }
++RemoteStatus remoteFailure(bool fatal=false) {
++    return RemoteStatus(fatal ? RemoteStatus::Fatal : RemoteStatus::Error,
++                        fatal ? "native fatal" : "native error", "remote stack");
++}
++void checkStatus(const RemoteStatus& actual, const RemoteStatus& expected) {
++    testEq(actual.severity, expected.severity);
++    testEq(actual.message, expected.message);
++    testEq(actual.stack, expected.stack);
++}
++struct StatusSource : server::Source {
++    Value prototype=nt::NTScalar{TypeCode::Int32}.create();
++    StatusSource() { prototype["value"]=39; }
++    void onSearch(Search& search) override { for(auto& name : search) name.claim(); }
++    void onCreate(std::unique_ptr<server::ChannelControl>&& raw) override {
++        const std::string name(raw->name());
++        raw->onOp([this, name](std::unique_ptr<server::ConnectOp>&& op) {
++            if(name=="setup-error") { op->error(remoteFailure()); return; }
++            op->onGet([this, name](std::unique_ptr<server::ExecOp>&& exec) {
++                if(name=="error" || name=="fatal") exec->error(remoteFailure(name=="fatal"));
++                else exec->reply(prototype, warning());
++            });
++            op->onPut([name](std::unique_ptr<server::ExecOp>&& exec, Value&&) {
++                if(name=="error" || name=="fatal") exec->error(remoteFailure(name=="fatal"));
++                else exec->reply(warning());
++            });
++            op->connect(prototype, warning());
++        });
++        raw->onRPC([name](std::unique_ptr<server::ExecOp>&& exec, Value&& value) {
++            if(name=="error" || name=="fatal") exec->error(remoteFailure(name=="fatal"));
++            else exec->reply(value, warning());
++        });
++        raw->onProxy([name](std::unique_ptr<server::ProxySetupOp>&& op) {
++            if(name=="setup-error") { op->error(remoteFailure()); return; }
++            op->onExec([name](std::unique_ptr<server::ProxyExecOp>&& exec, ProxyRequest&&) {
++                if(name=="error" || name=="fatal") exec->error(remoteFailure(name=="fatal"));
++                else exec->reply(warning());
++            });
++            op->connect(ProxyPrototype{}, warning());
++        });
++        raw->onSubscribe([this, name](std::unique_ptr<server::MonitorSetupOp>&& op) {
++            auto monitor=op->connect(prototype, warning());
++            auto value=prototype.clone();
++            monitor->post(value);
++            if(name=="error" || name=="fatal") monitor->error(remoteFailure(name=="fatal"));
++            else monitor->finish(warning());
++        });
++    }
++};
++
++void nativeStatus() {
++    auto source=std::make_shared<StatusSource>();
++    auto serv=server::Config::isolated().build().addSource("status", source).start();
++    auto cli=serv.clientConfig().build();
++    client::Result result;
++    epicsEvent done;
++    auto callback=[&](client::Result&& value) { result=std::move(value); done.signal(); };
++    auto get=cli.get("warn").onInit([&](const Value&, const RemoteStatus& status) { checkStatus(status, warning()); })
++        .result(callback).exec();
++    testOk1(done.wait(5.0));
++    testFalse(result.error()); checkStatus(result.status(), warning());
++    testEq(result()["value"].as<int32_t>(), 39);
++    auto info=cli.info("warn").result(callback).exec();
++    testOk1(done.wait(5.0)); testFalse(result.error()); checkStatus(result.status(), warning());
++    auto put=cli.put("warn").fetchPresent(false).set("value", 41)
++        .onInit([&](const Value&, const RemoteStatus& status) { checkStatus(status, warning()); })
++        .result(callback).exec();
++    testOk1(done.wait(5.0)); testFalse(result.error()); checkStatus(result.status(), warning());
++    auto rpc=cli.rpc("warn", source->prototype)
++        .onInit([&](const Value&, const RemoteStatus& status) { checkStatus(status, RemoteStatus{}); })
++        .result(callback).exec();
++    testOk1(done.wait(5.0)); testFalse(result.error()); checkStatus(result.status(), warning());
++    for(auto name : {"error", "fatal", "setup-error"}) {
++        auto expected=remoteFailure(std::string(name)=="fatal");
++        auto fail=cli.get(name).result(callback).exec();
++        testOk1(done.wait(5.0)); testTrue(result.error()); checkStatus(result.status(), expected);
++        try { result(); testFail("Expected RemoteError"); }
++        catch(client::RemoteError& error) { checkStatus(error.status(), expected); }
++    }
++    auto process=cli.proxy("warn", ProxyKind::Process)
++        .onInit([&](const ProxyPrototype&, const RemoteStatus& status) { checkStatus(status, warning()); }).exec();
++    process->execute(ProxyRequest{}, callback);
++    testOk1(done.wait(5.0)); testFalse(result.error()); checkStatus(result.status(), warning());
++    auto badprocess=cli.proxy("fatal", ProxyKind::Process).exec();
++    badprocess->execute(ProxyRequest{}, callback);
++    testOk1(done.wait(5.0)); testTrue(result.error()); checkStatus(result.status(), remoteFailure(true));
++}
++
++void nativeMonitorStatus() {
++    auto source=std::make_shared<StatusSource>();
++    auto serv=server::Config::isolated().build().addSource("status", source).start();
++    auto cli=serv.clientConfig().build();
++    epicsEvent available;
++    auto sub=cli.monitor("warn").maskDisconnected(false)
++        .onInit([&](client::Subscription&, const Value&, const RemoteStatus& status) { checkStatus(status, warning()); })
++        .event([&](client::Subscription&) { available.signal(); }).exec();
++    bool sawValue=false, finished=false;
++    for(unsigned attempt=0; attempt<5 && !finished; ++attempt) {
++        testOk1(available.wait(5.0));
++        try {
++            while(true) {
++                auto event=sub->popEvent();
++                if(!event.value) break;
++                sawValue=true; checkStatus(event.status, RemoteStatus{});
++            }
++        } catch(client::Finished& final) { finished=true; checkStatus(final.status(), warning()); }
++    }
++    testTrue(sawValue); testTrue(finished);
++    sub->cancel();
++    auto failed=cli.monitor("fatal").maskDisconnected(false)
++        .event([&](client::Subscription&) { available.signal(); }).exec();
++    bool remoteError=false;
++    for(unsigned attempt=0; attempt<5 && !remoteError; ++attempt) {
++        testOk1(available.wait(5.0));
++        try { while(failed->popEvent().value) {} }
++        catch(client::RemoteError& error) { remoteError=true; checkStatus(error.status(), remoteFailure(true)); }
++    }
++    testTrue(remoteError);
++}
++
++struct CallbackCounter {
++    std::atomic<unsigned> calls{0};
++    epicsEvent done;
++};
++void proxyCallbackOnce() {
++    auto source=std::make_shared<StatusSource>();
++    auto serv=server::Config::isolated().build().addSource("once", source).start();
++    auto cli=serv.clientConfig().build();
++    CallbackCounter success, setupError, executionError;
++    auto op=cli.proxy("warn", ProxyKind::Process).exec();
++    op->execute(ProxyRequest{}, [&success](client::Result&&) { ++success.calls; success.done.signal(); });
++    testOk1(success.done.wait(5.0));
++    testTrue(op->cancel());
++    testEq(success.calls.load(), 1u);
++    testFalse(op->cancel());
++    testEq(success.calls.load(), 1u);
++
++    auto bad=cli.proxy("setup-error", ProxyKind::Process)
++        .result([&setupError](client::Result&&) { ++setupError.calls; setupError.done.signal(); }).exec();
++    bad->execute(ProxyRequest{}, [&executionError](client::Result&&) { ++executionError.calls; executionError.done.signal(); });
++    testOk1(setupError.done.wait(5.0));
++    testOk1(executionError.done.wait(5.0));
++    testFalse(bad->cancel());
++    testEq(setupError.calls.load(), 1u);
++    testEq(executionError.calls.load(), 1u);
++
++    CallbackCounter guardError;
++    auto denied=cli.proxy("warn", ProxyKind::Process).beforeSend([]() { throw std::runtime_error("denied"); }).exec();
++    denied->execute(ProxyRequest{}, [&guardError](client::Result&&) { ++guardError.calls; guardError.done.signal(); });
++    testOk1(guardError.done.wait(5.0));
++    testTrue(denied->cancel());
++    testEq(guardError.calls.load(), 1u);
++
++    auto delayed=std::make_shared<DelayedProxySource>();
++    auto delayedServer=server::Config::isolated().build().addSource("delayed", delayed).start();
++    auto delayedClient=delayedServer.clientConfig().build();
++    CallbackCounter canceled;
++    auto queued=delayedClient.proxy("value", ProxyKind::Process).exec();
++    queued->execute(ProxyRequest{}, [&canceled](client::Result&&) { ++canceled.calls; canceled.done.signal(); });
++    testOk1(delayed->setup.wait(5.0));
++    testTrue(queued->cancel());
++    testOk1(canceled.done.wait(5.0));
++    testFalse(queued->cancel());
++    delayed->held->connect(ProxyPrototype{}); delayed->held.reset();
++    testTrue(bool(delayedClient.info("value").exec()->wait(5.0)));
++    testEq(canceled.calls.load(), 1u);
++}
++
++struct DeltaProxySource : AdmissionSource {
++    Value deltaType=TypeDef(TypeCode::Struct, {members::Int32("changing"), members::String("fixed")}).create();
++    unsigned putReads=0, getReads=0;
++    void onCreate(std::unique_ptr<server::ChannelControl>&& raw) override {
++        raw->onProxy([this](std::unique_ptr<server::ProxySetupOp>&& op) {
++            op->onExec([this](std::unique_ptr<server::ProxyExecOp>&& exec, ProxyRequest&& request) {
++                auto value=deltaType.cloneEmpty();
++                if(request.action==ProxyAction::GetPut) {
++                    value["changing"]=int32_t(++putReads);
++                    if(putReads==1) value["fixed"]="put";
++                } else {
++                    value["changing"]=int32_t(10u*(++getReads));
++                    if(getReads==1) value["fixed"]="get";
++                }
++                exec->reply(value);
++            });
++            ProxyPrototype prototype; prototype.put=deltaType; prototype.get=deltaType;
++            op->connect(prototype);
++        });
++    }
++};
++void proxyDeltaCaches() {
++    auto source=std::make_shared<DeltaProxySource>();
++    auto serv=server::Config::isolated().build().addSource("delta", source).start();
++    auto cli=serv.clientConfig().build();
++    auto op=cli.proxy("value", ProxyKind::PutGet).exec();
++    epicsEvent done;
++    client::Result result;
++    auto run=[&](const ProxyRequest& request) -> Value {
++        op->execute(request, [&](client::Result&& value) { result=std::move(value); done.signal(); });
++        testOk1(done.wait(5.0));
++        return result();
++    };
++    ProxyRequest request; request.action=ProxyAction::GetPut;
++    auto firstPut=run(request);
++    testEq(firstPut["fixed"].as<std::string>(), std::string("put"));
++    request.action=ProxyAction::GetGet;
++    auto firstGet=run(request);
++    testEq(firstGet["fixed"].as<std::string>(), std::string("get"));
++    firstGet["fixed"]="caller-mutated";
++    request.action=ProxyAction::PutGet;
++    request.value=source->deltaType.cloneEmpty(); request.value["fixed"]="written";
++    auto written=run(request);
++    testEq(written["changing"].as<int32_t>(), 20);
++    testEq(written["fixed"].as<std::string>(), std::string("get"));
++    testTrue(written["changing"].isMarked()); testFalse(written["fixed"].isMarked());
++    request.action=ProxyAction::GetPut; request.value=Value();
++    auto secondPut=run(request);
++    testEq(secondPut["changing"].as<int32_t>(), 2);
++    testEq(secondPut["fixed"].as<std::string>(), std::string("written"));
++    testTrue(secondPut["changing"].isMarked()); testFalse(secondPut["fixed"].isMarked());
++    request.action=ProxyAction::GetGet;
++    auto secondGet=run(request);
++    testEq(secondGet["changing"].as<int32_t>(), 30);
++    testEq(secondGet["fixed"].as<std::string>(), std::string("get"));
++    testTrue(secondGet["changing"].isMarked()); testFalse(secondGet["fixed"].isMarked());
++    request.action=ProxyAction::PutGet;
++    request.value=source->deltaType.cloneEmpty();
++    request.value["changing"]=100; request.value["fixed"]="root-written";
++    request.value.unmark(); request.value.mark();
++    run(request);
++    request.action=ProxyAction::GetPut; request.value=Value();
++    auto afterRootWrite=run(request);
++    testEq(afterRootWrite["fixed"].as<std::string>(), std::string("root-written"));
++    testFalse(afterRootWrite["fixed"].isMarked());
++}
++
++void monitorPauseAsync() {
++    Fixture f;
++    epicsEvent entered, release;
++    std::atomic<bool> first{true};
++    auto sub=f.cli.monitor("value").event([&](client::Subscription&) {
++        if(first.exchange(false)) { entered.signal(); release.wait(5.0); }
++    }).exec();
++    testOk1(entered.wait(5.0));
++    auto start=epicsTime::getCurrent();
++    sub->pauseAsync(true);
++    testTrue(epicsTime::getCurrent()-start < 1.0);
++    release.signal();
++    sub->cancel();
++}
++
++}
++MAIN(testproxyclient) {
++    testPlan(0);
++    testSetup();
++    guardedIO(); manualRPC(); busyRPC();
++    deniedProcessGet(); noReplay(0); noReplay(1); noReplay(2);
++    defaultGetRetry(); cancelDeferredProxy(); localMonitorOverrun();
++    nativeStatus(); nativeMonitorStatus();
++    proxyCallbackOnce(); proxyDeltaCaches(); monitorPauseAsync();
++    cleanup_for_valgrind();
++    return testDone();
++}
+diff --git a/test/testproxyserver.cpp b/test/testproxyserver.cpp
+new file mode 100644
+--- /dev/null
++++ b/test/testproxyserver.cpp
+@@ -0,0 +1,541 @@
++/** Native PVA proxy operation and monitor forwarding regressions. */
++#define PVXS_ENABLE_EXPERT_API
++#include <atomic>
++#include <testMain.h>
++#include <epicsUnitTest.h>
++#include <epicsEvent.h>
++#include <pvxs/unittest.h>
++#include <pvxs/log.h>
++#include <pvxs/client.h>
++#include <pvxs/source.h>
++#include <pvxs/sharedArray.h>
++#include "clientimpl.h"
++
++namespace {
++using namespace pvxs;
++
++struct ProxySource final : server::Source {
++    Value put = TypeDef(TypeCode::Struct, {members::Int32("input")}).create();
++    Value get = TypeDef(TypeCode::Struct, {members::Int64("output")}).create();
++    Value array = TypeDef(TypeCode::Int32A).create();
++    uint64_t length = 5u;
++    ProxyRequest last;
++    std::atomic<unsigned> nProcess{0u};
++    std::atomic<unsigned> nChannelClosed{0u};
++    epicsEvent channelClosed;
++    std::string subfield;
++    struct LeaseState {
++        std::atomic<unsigned> freed{0u};
++        epicsEvent allFreed;
++    };
++    std::shared_ptr<LeaseState> leaseState = std::make_shared<LeaseState>();
++    std::vector<std::weak_ptr<void>> leases;
++    epicsEvent leasesQueued, releaseLeases;
++    std::shared_ptr<server::MonitorControlOp> mon;
++    epicsEvent cancelStarted, canceled, closed;
++    std::unique_ptr<server::ProxyExecOp> held;
++
++    void onSearch(Search& op) override final { for(auto& name : op) name.claim(); }
++    void onCreate(std::unique_ptr<server::ChannelControl>&& op) override final
++    {
++        auto chan = std::move(op);
++        const auto name = chan->name();
++        // A small trivial closure exercises implementations where moving a
++        // std::function leaves the original target engaged.
++        chan->onClose([this](const std::string&) {
++            nChannelClosed++;
++            channelClosed.signal();
++        });
++        if(name=="proxyonly") {
++            chan->onProxy([](std::unique_ptr<server::ProxySetupOp>&& setup) {
++                setup->onExec([](std::unique_ptr<server::ProxyExecOp>&& exec, ProxyRequest&&) {
++                    exec->reply();
++                });
++                setup->connect(ProxyPrototype{});
++            });
++            return;
++        }
++        chan->onOp([this](std::unique_ptr<server::ConnectOp>&& op) {
++            subfield = op->subField();
++            op->connect(subfield.empty() ? put : put[subfield]);
++        });
++        chan->onSubscribe([this, name](std::unique_ptr<server::MonitorSetupOp>&& op) {
++            mon = op->connect(put);
++            if(name=="lease") {
++                for(int32_t value=0; value<6; value++) {
++                    MonitorEvent event;
++                    event.value = put.cloneEmpty();
++                    event.value["input"] = value;
++                    auto state = leaseState;
++                    event.lease = std::shared_ptr<void>(new int(value), [state](void* ptr) {
++                        delete static_cast<int*>(ptr);
++                        if(++state->freed==6u) state->allFreed.signal();
++                    });
++                    leases.push_back(event.lease);
++                    mon->postEvent(event);
++                }
++                leasesQueued.signal();
++                if(!releaseLeases.wait(5.0))
++                    throw std::runtime_error("Timed out waiting for lease inspection");
++                mon->finish();
++                return;
++            }
++            if(name=="squash") {
++                // Queue while stopped to force two local squashes of the last entry.
++                for(int32_t value=0; value<6; value++) {
++                    auto event = put.cloneEmpty();
++                    event["input"] = value;
++                    mon->post(event);
++                }
++                mon->finish();
++                return;
++            }
++            mon->onStart([this](bool start) {
++                if(!start) return;
++                MonitorEvent event;
++                event.value = put.cloneEmpty();
++                event.value["input"] = 42;
++                event.overrun = {1u};
++                mon->postEvent(event);
++                mon->error("upstream monitor failed");
++            });
++        });
++        if(name=="unsupported")
++            return;
++        chan->onProxy([this, name](std::unique_ptr<server::ProxySetupOp>&& op) {
++            ProxyPrototype proto;
++            if(op->kind()==ProxyKind::PutGet) {
++                proto.put = put;
++                proto.get = get;
++            } else if(op->kind()==ProxyKind::Array) {
++                proto.put = proto.get = array;
++            }
++            op->onClose([this](const std::string&) { closed.signal(); });
++            if(name=="noexec") {
++                op->connect(proto);
++                return;
++            }
++            op->onExec([this, name](std::unique_ptr<server::ProxyExecOp>&& op, ProxyRequest&& request) {
++                last = request;
++                if(name=="cancel") {
++                    op->onCancel([this]() { canceled.signal(); });
++                    held = std::move(op);
++                    cancelStarted.signal();
++                    return;
++                }
++                if(name=="error") {
++                    op->error("upstream execution failed");
++                    return;
++                }
++                switch(request.action) {
++                case ProxyAction::Process:
++                    nProcess++;
++                    op->reply();
++                    break;
++                case ProxyAction::GetPut: {
++                    auto value = put.cloneEmpty();
++                    value["input"] = 3;
++                    op->reply(value);
++                    break;
++                }
++                case ProxyAction::GetGet:
++                case ProxyAction::PutGet: {
++                    auto value = get.cloneEmpty();
++                    value["output"] = request.action==ProxyAction::GetGet ? 77 : request.value["input"].as<int32_t>()*2;
++                    op->reply(value);
++                    break;
++                }
++                case ProxyAction::ArrayGet: {
++                    auto value = array.cloneEmpty();
++                    value = shared_array<const int32_t>({11, 33});
++                    op->reply(value);
++                    break;
++                }
++                case ProxyAction::ArrayPut:
++                    op->reply();
++                    break;
++                case ProxyAction::ArraySetLength:
++                    length = request.length;
++                    op->reply();
++                    break;
++                case ProxyAction::ArrayGetLength:
++                    op->replyLength(length);
++                    break;
++                }
++            });
++            op->connect(proto);
++        });
++    }
++};
++
++struct Completion {
++    epicsEvent done;
++    client::Result result;
++    void operator()(client::Result&& value) { result=std::move(value); done.signal(); }
++    Value wait() {
++        if(!done.wait(5.0))
++            throw std::runtime_error("Timed out waiting for native proxy execution");
++        return result();
++    }
++};
++
++Value execute(const std::shared_ptr<client::ProxyOperation>& op, const ProxyRequest& request)
++{
++    Completion completion;
++    op->execute(request, [&completion](client::Result&& result) { completion(std::move(result)); });
++    return completion.wait();
++}
++
++void testNative()
++{
++    auto source = std::make_shared<ProxySource>();
++    auto serv = server::Config::isolated().build().addSource("proxy", source).start();
++    auto cli = serv.clientConfig().build();
++
++    ProxyRequest request;
++    auto proxyOnly = cli.proxy("proxyonly", ProxyKind::Process).exec();
++    testFalse(execute(proxyOnly, request));
++    auto process = cli.proxy("proxy", ProxyKind::Process).exec();
++    testFalse(execute(process, request));
++    testEq(source->nProcess.load(), 1u);
++
++    ProxyPrototype prototype;
++    epicsEvent initialized;
++    auto putget = cli.proxy("proxy", ProxyKind::PutGet)
++            .onInit([&](const ProxyPrototype& value) { prototype=value; initialized.signal(); }).exec();
++    if(!initialized.wait(5.0))
++        throw std::runtime_error("PUT_GET setup did not complete");
++    testTrue(!!prototype.put["input"]);
++    testTrue(!!prototype.get["output"]);
++    testFalse(prototype.put.equalType(prototype.get));
++    request.action=ProxyAction::GetPut;
++    testEq(execute(putget, request)["input"].as<int32_t>(), 3);
++    request.action=ProxyAction::GetGet;
++    testEq(execute(putget, request)["output"].as<int64_t>(), 77);
++    request.action=ProxyAction::PutGet;
++    request.value=prototype.put.cloneEmpty();
++    request.value["input"]=8;
++    testEq(execute(putget, request)["output"].as<int64_t>(), 16);
++
++    ProxyPrototype arrayPrototype;
++    epicsEvent arrayInitialized;
++    auto array = cli.proxy("proxy", ProxyKind::Array)
++            .onInit([&](const ProxyPrototype& value) { arrayPrototype=value; arrayInitialized.signal(); }).exec();
++    if(!arrayInitialized.wait(5.0))
++        throw std::runtime_error("ARRAY setup did not complete");
++    testEq(arrayPrototype.get.type(), TypeCode(TypeCode::Int32A));
++    request=ProxyRequest();
++    request.action=ProxyAction::ArrayGet;
++    request.offset=260u;
++    request.count=2u;
++    request.stride=3u;
++    auto values=execute(array, request).as<shared_array<const int32_t>>();
++    testEq(values.size(), 2u);
++    testEq(values[0], 11);
++    testEq(values[1], 33);
++    testEq(source->last.offset, 260u);
++    testEq(source->last.count, 2u);
++    testEq(source->last.stride, 3u);
++    request.action=ProxyAction::ArrayPut;
++    request.value=arrayPrototype.put.cloneEmpty();
++    request.value=shared_array<const int32_t>({7, 9});
++    testFalse(execute(array, request));
++    testEq(source->last.value.as<shared_array<const int32_t>>()[1], 9);
++    testEq(source->last.offset, 260u);
++    testEq(source->last.count, 2u);
++    testEq(source->last.stride, 3u);
++    request=ProxyRequest();
++    request.action=ProxyAction::ArraySetLength;
++    request.length=265u;
++    testFalse(execute(array, request));
++    request.action=ProxyAction::ArrayGetLength;
++    testEq(execute(array, request).as<uint64_t>(), 265u);
++
++    request=ProxyRequest();
++    auto error=cli.proxy("error", ProxyKind::Process).exec();
++    testThrowsMatch<client::RemoteError>("upstream execution failed", [&]() { execute(error, request); });
++    auto unsupported=cli.proxy("unsupported", ProxyKind::Process).exec();
++    testThrowsMatch<client::RemoteError>(".*not implemented.*", [&]() { execute(unsupported, request); });
++    auto noexec=cli.proxy("noexec", ProxyKind::Process).exec();
++    testThrowsMatch<client::RemoteError>(".*not implemented.*", [&]() { execute(noexec, request); });
++
++    auto field=cli.info("proxy").subField("input").exec()->wait(5.0);
++    testEq(field.type(), TypeCode(TypeCode::Int32));
++    testEq(source->subfield, "input");
++
++    epicsEvent update;
++    auto monitor=cli.monitor("proxy").maskConnected(true).maskDisconnected(true)
++            .event([&](client::Subscription&) { update.signal(); }).exec();
++    MonitorEvent event;
++    for(unsigned attempt=0u; attempt<5u && !event.value; attempt++) {
++        event=monitor->popEvent();
++        if(!event.value) update.wait(1.0);
++    }
++    testTrue(!!event.value);
++    testEq(event.value["input"].as<int32_t>(), 42);
++    testEq(event.overrun.size(), 1u);
++    if(!event.overrun.empty()) testEq(event.overrun[0], 1u);
++    // The terminal status may arrive in a later frame.
++    bool terminalError=false;
++    for(unsigned attempt=0u; attempt<5u && !terminalError; attempt++) {
++        try {
++            auto ignored=monitor->popEvent();
++            (void)ignored;
++            update.wait(1.0);
++        } catch(client::RemoteError& e) {
++            terminalError=std::string(e.what()).find("upstream monitor failed")!=std::string::npos;
++        }
++    }
++    testTrue(terminalError);
++
++    epicsEvent squashedUpdate;
++    auto squashed=cli.monitor("squash").maskConnected(true).maskDisconnected(true)
++            .event([&](client::Subscription&) { squashedUpdate.signal(); }).exec();
++    unsigned received=0u;
++    MonitorEvent last;
++    for(unsigned attempt=0u; attempt<20u && received<4u; attempt++) {
++        auto event=squashed->popEvent();
++        if(!event.value) {
++            squashedUpdate.wait(0.25);
++            continue;
++        }
++        received++;
++        last=std::move(event);
++    }
++    testEq(received, 4u);
++    testEq(last.value["input"].as<int32_t>(), 5);
++    testEq(last.overrun.size(), 1u);
++    if(!last.overrun.empty()) testEq(last.overrun[0], 1u);
++    bool normalFinish=false;
++    for(unsigned attempt=0u; attempt<20u && !normalFinish; attempt++) {
++        try {
++            auto ignored=squashed->popEvent();
++            (void)ignored;
++            squashedUpdate.wait(0.25);
++        } catch(client::Finished&) {
++            normalFinish=true;
++        }
++    }
++    testTrue(normalFinish);
++
++    // A stopped queue must own both original and squashed reservations.
++    epicsEvent leasedUpdate;
++    auto leased=cli.monitor("lease").maskConnected(true).maskDisconnected(true)
++            .event([&](client::Subscription&) { leasedUpdate.signal(); }).exec();
++    testTrue(source->leasesQueued.wait(5.0));
++    testEq(source->leaseState->freed.load(), 0u);
++    testEq(source->leases.size(), 6u);
++    bool allAlive=true;
++    for(auto& lease : source->leases) allAlive=allAlive && !lease.expired();
++    testTrue(allAlive);
++    source->releaseLeases.signal();
++    testTrue(source->leaseState->allFreed.wait(5.0));
++    testEq(source->leaseState->freed.load(), 6u);
++    bool allExpired=true;
++    for(auto& lease : source->leases) allExpired=allExpired && lease.expired();
++    testTrue(allExpired);
++    MonitorEvent unsupportedStatus;
++    unsupportedStatus.value=source->put.cloneEmpty();
++    unsupportedStatus.status=RemoteStatus(RemoteStatus::Warning, "no wire slot", "remote stack");
++    testThrowsMatch<std::invalid_argument>(".*cannot carry a status.*", [&]() {
++        source->mon->postEvent(unsupportedStatus);
++    });
++
++    auto canceled=cli.proxy("cancel", ProxyKind::Process).exec();
++    Completion completion;
++    canceled->execute(ProxyRequest(), [&completion](client::Result&& result) { completion(std::move(result)); });
++    testTrue(source->cancelStarted.wait(5.0));
++    testTrue(canceled->cancel());
++    testTrue(source->canceled.wait(5.0));
++    testTrue(source->closed.wait(5.0));
++    testThrows<client::Interrupted>([&]() { completion.wait(); });
++    source->held.reset();
++}
++
++struct GenerationSource final : server::Source {
++    Value prototype=TypeDef(TypeCode::Struct, {members::Int32("value")}).create();
++    std::vector<std::unique_ptr<server::ExecOp>> executions;
++    epicsEvent entered, firstCanceled, currentCanceled;
++    std::atomic<unsigned> nFirstCanceled{0u}, nCurrentCanceled{0u}, nStaleCanceled{0u};
++
++    void onSearch(Search& op) override final { for(auto& name : op) name.claim(); }
++    void onCreate(std::unique_ptr<server::ChannelControl>&& op) override final
++    {
++        auto channel=std::move(op);
++        channel->onOp([this](std::unique_ptr<server::ConnectOp>&& op) {
++            op->onGet([this](std::unique_ptr<server::ExecOp>&& op) {
++                if(executions.empty()) {
++                    op->onCancel([this]() { ++nFirstCanceled; firstCanceled.signal(); });
++                } else {
++                    op->onCancel([this]() { ++nCurrentCanceled; currentCanceled.signal(); });
++                }
++                executions.emplace_back(std::move(op));
++                entered.signal();
++            });
++            op->connect(prototype);
++        });
++    }
++};
++
++// The public cancel API destroys an operation.  Inject native CANCEL_REQUEST
++// and EXEC frames to exercise the protocol's reusable IOID without changing
++// the client state which is still waiting for its execution result.
++void sendNativeGetControl(const std::shared_ptr<client::Operation>& operation, bool cancel, bool execute)
++{
++    auto base=static_cast<client::OperationBase*>(operation.get());
++    base->loop.call([base, cancel, execute]() {
++        auto conn=base->chan->conn;
++        impl::EvOutBuf wire(conn->sendBE, bufferevent_get_output(conn->connection()));
++        if(cancel) {
++            to_wire(wire, impl::Header{impl::CMD_CANCEL_REQUEST, 0u, 8u});
++            to_wire(wire, base->chan->sid);
++            to_wire(wire, base->ioid);
++        }
++        if(execute) {
++            to_wire(wire, impl::Header{impl::CMD_GET, 0u, 9u});
++            to_wire(wire, base->chan->sid);
++            to_wire(wire, base->ioid);
++            to_wire(wire, uint8_t(0u));
++        }
++        if(!wire.good()) throw std::runtime_error("Unable to encode native GET control");
++    });
++}
++
++void testGenerationFence()
++{
++    auto source=std::make_shared<GenerationSource>();
++    auto serv=server::Config::isolated().build().addSource("generation", source).start();
++    auto cli=serv.clientConfig().build();
++    epicsEvent initialized, completed;
++    client::Result result;
++    auto get=cli.get("generation").autoExec(false)
++            .onInit([&](const Value&) { initialized.signal(); }).exec();
++    if(!initialized.wait(5.0)) throw std::runtime_error("GET setup did not complete");
++    get->reExecGet([&](client::Result&& value) { result=std::move(value); completed.signal(); });
++    if(!source->entered.wait(5.0)) throw std::runtime_error("First GET execution did not arrive");
++    sendNativeGetControl(get, true, true);
++    testTrue(source->firstCanceled.wait(5.0));
++    if(!source->entered.wait(5.0)) throw std::runtime_error("Second GET execution did not arrive");
++    testEq(source->executions.size(), 2u);
++    source->executions[0]->onCancel([source]() { ++source->nStaleCanceled; source->currentCanceled.signal(); });
++    sendNativeGetControl(get, true, false);
++    testTrue(source->currentCanceled.wait(5.0));
++    testEq(source->nFirstCanceled.load(), 1u);
++    testEq(source->nCurrentCanceled.load(), 1u);
++    testEq(source->nStaleCanceled.load(), 0u);
++    sendNativeGetControl(get, false, true);
++    if(!source->entered.wait(5.0)) throw std::runtime_error("Third GET execution did not arrive");
++    testEq(source->executions.size(), 3u);
++    auto stale=source->prototype.cloneEmpty();
++    stale["value"]=999;
++    source->executions[0]->reply(stale);
++    source->executions[0]->error("late canceled error");
++    source->executions[1]->reply(stale, RemoteStatus(RemoteStatus::Warning, "late warning", "old stack"));
++    source->executions[1]->error(RemoteStatus(RemoteStatus::Fatal, "late fatal", "old stack"));
++    source->executions[0]->logRemote(Level::Warn, "stale remote log");
++    // Same-connection round trip drains earlier server work and received frames.
++    cli.info("generation").exec()->wait(5.0);
++    testFalse(completed.wait(0.0));
++    auto fresh=source->prototype.cloneEmpty();
++    fresh["value"]=89;
++    source->executions[2]->reply(fresh);
++    if(!completed.wait(5.0)) throw std::runtime_error("Current GET reply did not arrive");
++    testFalse(result.error());
++    testEq(result()["value"].as<int32_t>(), 89);
++    source->executions.clear();
++}
++
++struct AsyncCloseSource final : server::Source {
++    Value prototype=TypeDef(TypeCode::Struct, {members::Int32("value")}).create();
++    std::shared_ptr<server::ChannelControl> channel;
++    std::atomic<unsigned> created{0u}, closedCount{0u};
++    epicsEvent closed;
++
++    void onSearch(Search& op) override final { for(auto& name : op) name.claim(); }
++    void onCreate(std::unique_ptr<server::ChannelControl>&& op) override final
++    {
++        if(created.fetch_add(1u)) return;
++        channel=std::move(op);
++        channel->onClose([this](const std::string&) { ++closedCount; closed.signal(); });
++        channel->onOp([this](std::unique_ptr<server::ConnectOp>&& op) {
++            op->onGet([this](std::unique_ptr<server::ExecOp>&& op) {
++                op->error(RemoteStatus(RemoteStatus::Fatal, "timeout before close", "remote timeout stack"));
++                auto control=std::move(channel);
++                control->closeAsync();
++                control->closeAsync();
++                // Destruction here must not invalidate either queued close.
++            });
++            op->connect(prototype);
++        });
++    }
++};
++
++void testAsyncCloseOrdering()
++{
++    auto source=std::make_shared<AsyncCloseSource>();
++    auto serv=server::Config::isolated().build().addSource("async-close", source).start();
++    auto cli=serv.clientConfig().build();
++    epicsEvent connected, disconnected, completed;
++    std::atomic<bool> wasConnected{false}, disconnectedBeforeError{false};
++    std::atomic<unsigned> results{0u};
++    client::Result result;
++    auto connector=cli.connect("async-close")
++            .onConnect([&]() { wasConnected=true; connected.signal(); })
++            .onDisconnect([&]() {
++                if(wasConnected.exchange(false)) {
++                    if(!results.load()) disconnectedBeforeError=true;
++                    disconnected.signal();
++                }
++            }).exec();
++    if(!connected.wait(5.0)) throw std::runtime_error("Async-close channel did not connect");
++    auto get=cli.get("async-close").result([&](client::Result&& value) {
++        result=std::move(value); ++results; completed.signal();
++    }).exec();
++    testTrue(completed.wait(5.0));
++    testTrue(disconnected.wait(5.0));
++    testTrue(source->closed.wait(5.0));
++    testFalse(disconnectedBeforeError.load());
++    testEq(results.load(), 1u);
++    testEq(source->closedCount.load(), 1u);
++    testFalse(bool(source->channel));
++    testTrue(result.error());
++    testEq(result.status().severity, RemoteStatus::Fatal);
++    testEq(result.status().stack, "remote timeout stack");
++    testThrowsMatch<client::RemoteError>("timeout before close", [&]() { result(); });
++    serv.stop();
++    testEq(source->closedCount.load(), 1u);
++}
++
++void testTransportClose()
++{
++    auto source=std::make_shared<ProxySource>();
++    auto serv=server::Config::isolated().build().addSource("proxy", source).start();
++    {
++        auto cli=serv.clientConfig().build();
++        auto process=cli.proxy("transport-close", ProxyKind::Process).exec();
++        testFalse(execute(process, ProxyRequest()));
++    }
++    testTrue(source->channelClosed.wait(5.0));
++    testEq(source->nChannelClosed.load(), 1u);
++    serv.stop();
++    testEq(source->nChannelClosed.load(), 1u);
++}
++
++} // namespace
++
++MAIN(testproxyserver)
++{
++    testPlan(0);
++    testSetup();
++    logger_config_env();
++    try {
++        testNative();
++        testTransportClose();
++        testGenerationFence();
++        testAsyncCloseOrdering();
++    } catch(std::exception& e) {
++        testFail("Native proxy test aborted: %s", e.what());
++    }
++    cleanup_for_valgrind();
++    return testDone();
++}

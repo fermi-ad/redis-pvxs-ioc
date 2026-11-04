@@ -74,8 +74,8 @@ int main(int argc, char* argv[]) {
   }
   if (!oldConfig.empty()) {
     try {
-      const auto before = redis_pvxs_ioc::loadConfigFile(oldConfig);
-      const auto after = redis_pvxs_ioc::loadConfigFile(newConfig);
+      const auto before = redis_pvxs_ioc::loadConfigForDiff(oldConfig);
+      const auto after = redis_pvxs_ioc::loadConfigForDiff(newConfig);
       std::cout << redis_pvxs_ioc::formatConfigDiff(redis_pvxs_ioc::diffConfigs(before, after), json) << '\n';
       return 0;
     } catch (const std::exception& error) {
@@ -100,6 +100,7 @@ int main(int argc, char* argv[]) {
       std::cout << "{\"valid\":true,\"schema_version\":" << config.schemaVersion
                 << ",\"legacy_input\":" << (config.legacyInput ? "true" : "false")
                 << ",\"pv_count\":" << config.pvs.size() << ",\"rpc_service_count\":" << config.rpcServices.size()
+                << ",\"gateway_pv_count\":" << config.pvaGateway.pvs.size()
                 << ",\"summary\":" << redis_pvxs_ioc::quoteJson(summary) << "}\n";
     } else std::cout << summary << '\n';
     return 0;

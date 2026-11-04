@@ -64,7 +64,7 @@ std::string trimTrailingSlash(std::string url) {
 std::vector<ChannelFinderChannel> buildChannelFinderChannels(const AppConfig& config,
                                                              const std::string& syncTime) {
   std::vector<ChannelFinderChannel> channels;
-  size_t channelCount = config.pvs.size();
+  size_t channelCount = config.pvs.size() + config.pvaGateway.pvs.size();
   for (const auto& pv : config.pvs) {
     channelCount += pv.aliases.size();
   }
@@ -119,6 +119,22 @@ std::vector<ChannelFinderChannel> buildChannelFinderChannels(const AppConfig& co
       aliasChannel.properties["aliasOf"] = canonicalName;
       channels.push_back(std::move(aliasChannel));
     }
+  }
+
+  for (const auto& pv : config.pvaGateway.pvs) {
+    ChannelFinderChannel channel;
+    channel.name = fullGatewayName(config.server, pv);
+    channel.owner = config.channelFinder.owner;
+    std::set<std::string> seenTags;
+    for (const auto& tag : config.channelFinder.tags) addUniqueTag(channel.tags, seenTags, tag);
+    addUniqueTag(channel.tags, seenTags, "redis-pvxs-ioc");
+    addUniqueTag(channel.tags, seenTags, "pva");
+    channel.properties = {{"source", "pva-gateway"}, {"protocol", "pva"},
+        {"iocName", config.server.instance}, {"namespace", config.server.nameSpace},
+        {"pvStatus", "Active"}, {"time", syncTime}, {"pvaPort", std::to_string(pvaPort)},
+        {"upstreamPV", pv.upstream}, {"upstreamServer", pv.server}};
+    for (const auto& entry : config.channelFinder.properties) channel.properties[entry.first] = entry.second;
+    channels.push_back(std::move(channel));
   }
 
   return channels;

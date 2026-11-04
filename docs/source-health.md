@@ -6,6 +6,14 @@ read/confirmation route has role `read-confirm` and one reader. Scalar, array an
 NTNDArray sources use the same status contract; source diagnostics do not alter
 the Redis payload or timestamp encoding.
 
+Ordinary value sources also report `sourceTimeMode`, `sourceTimePresent`,
+`sourceTimeValid`, and `sourceTimeError`. These describe source timestamp quality
+separately from payload acceptance, reader connectivity and monotonic freshness.
+The default `legacy-redis-id` mode keeps the existing Redis-ID interpretation.
+Opt-in read-only numeric arrays can use `unix-nanoseconds-v1` metadata or declare
+time `unavailable`. NTNDArray reports `ntndarray-v1` for its existing envelope and
+`dataTimeStamp` contract; ordinary `source_time` policy does not change it.
+
 ## Readiness and freshness
 
 `ready` and the NTScalar `SYS:<instance>:ready` are true exactly when every
@@ -13,6 +21,16 @@ required Redis source is ready. The structure reports active `generation`,
 `total`, `required`, `readySources`, and `unreadyRequired`. An empty required set
 is ready. RPC, discovery, access policy, write destinations and alarm delivery
 are reported by their own diagnostics; this is a Redis data-source gate.
+
+A decoded waveform remains payload-valid and ready when its source time is
+missing or explicitly marked invalid. Clients receive its actual waveform and
+an INVALID/UDF alarm for the timestamp quality, with no Redis-ID or receive-time
+substitute. A present timestamp is preserved even when its validity flag is
+false. A supplied Unix epoch zero is a real timestamp; absent time also appears
+as zero in PVA and is distinguished by `sourceTimePresent`. Signed acquisition
+time may move backward without changing the exact Redis cursor or reader epoch.
+Malformed timing metadata rejects the entry, retaining the previous accepted
+waveform and timestamp until an acceptable entry arrives.
 
 A source is ready when its owned reader is active and connected, its key is not
 known missing/wrong-type, and the latest source sample is valid in the current
@@ -65,6 +83,7 @@ length. No credential fields are included.
 | --- | --- |
 | `pv`, `backend`, `key`, `role` | Canonical route identity; role is `read`, `confirm`, or `read-confirm` |
 | `state`, `error`, `required`, `ready` | `inactive`, `disconnected`, `missing`, `wrong-type`, `read-rejected`, `waiting`, `invalid`, `stale`, or `ready`; a concise failure reason |
+| `sourceTimeMode`, `sourceTimePresent`, `sourceTimeValid`, `sourceTimeError` | Timestamp contract and quality, independent of payload readiness; presence refers to the timestamp retained with the served value. Missing time or a false validity flag marks only time quality; malformed timing reports an error and retains the last accepted value/time. A rejected payload retains that accepted timestamp's quality |
 | `valid`, `fresh`, `stale`, `staleAfterMs`, `lastValidAgeMs` | Sample validity in current epoch and local monotonic age; `-1` means no valid sample observed; zero deadline leaves cadence unspecified |
 | `active`, `connected`, `hasData`, `streamKind` | Owned reader flags and observed key kind; connection is read-path evidence, not adapter command-pool ping |
 | `inspection`, `inspected`, `readerProbeMs` | `disabled`, `pending`, `available`, `rejected`, or `unavailable`; inspection flags do not claim guaranteed continuity |
@@ -78,6 +97,8 @@ length. No credential fields are included.
 
 Counters belong to the current owned runtime/reader, persist through metadata,
 alias and health-policy reloads, and reset when a route/backend is recreated.
+Changing an ordinary source-time policy recreates the runtime, so a rejected
+staged policy cannot reinterpret the active runtime's retained timestamp.
 They are not process-lifetime totals. The active generation's table excludes
 rejected staged owners. The existing `backend:health` remains a command-pool
 connection summary; it cannot establish source readiness.
@@ -115,6 +136,10 @@ acquisition-time retention. `source_health_e2e` uses two private Redis processes
 and real PVA to verify partial transport outage, unaffected alias/read access,
 unavailable-backend startup, recovery without cursor rewind, rejected and retained-policy reloads, aggregate
 required/optional readiness, and confirmation cancellation across source epochs.
+`runtime_tests` additionally checks float32 waveform bytes and units over PVA,
+read-only PUT denial, identical snapshot/update timing rules, signed exact
+nanoseconds, epoch zero, backward time, unknown/invalid time, malformed metadata
+and payload retention, metadata staging and time-policy replacement isolation.
 
 The IOC pins merged adapter `69bf18ec403c21ce396759172b24a91506283155`,
 including the upstream source-recovery API changes. Native regressions do not

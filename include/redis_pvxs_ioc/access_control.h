@@ -67,6 +67,7 @@ public:
   std::shared_ptr<pvxs::server::Source> source() const;
 
   AccessStatus status() const;
+  void validateActiveAsgs(const std::set<std::string>& requiredAsgs) const;
 
   struct Impl;
 
@@ -87,7 +88,12 @@ class OperationAuthorization {
 public:
   virtual ~OperationAuthorization() = default;
   virtual bool authorized(const pvxs::Value& value) = 0;
+  // Run the commitment under every identity/retirement fence. This path must
+  // neither wait for a lock nor log: it runs on the upstream transport loop.
+  virtual bool commit(const std::function<bool()>& action) noexcept = 0;
 };
 bool authorizeWriteDispatch(pvxs::server::ExecOp& operation, const pvxs::Value& value);
+bool authorizeWriteCommit(pvxs::server::ExecOp& operation,
+                          const std::function<bool()>& action) noexcept;
 
 }  // namespace redis_pvxs_ioc

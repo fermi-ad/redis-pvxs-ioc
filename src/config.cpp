@@ -4,11 +4,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <iomanip>
 #include <limits>
 #include <type_traits>
 #include <cctype>
 #include <filesystem>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <tuple>
 #include <map>
 #include <set>
@@ -210,7 +219,9 @@ AccessConfig parseAccessConfig(const YAML::Node& node,
   }
 
   if (config.file.empty()) {
-    fail(path + ".file", "is required when access control is enabled");
+    if (config.watch.enabled) fail(path + ".watch.enabled", "requires a policy file");
+    if (!config.macros.empty()) fail(path + ".macros", "requires a policy file");
+    return config;
   }
   std::filesystem::path policyPath(config.file);
   if (policyPath.is_relative()) {
@@ -598,8 +609,32 @@ RpcServiceConfig parseRpcService(const YAML::Node& node, const std::string& path
   return svc;
 }
 
+SourceTimeConfig parseSourceTime(const YAML::Node& node, const std::string& path) {
+  rejectUnknownKeys(node, path, {"mode", "field", "valid_field"});
+  SourceTimeConfig config;
+  const auto mode = parseString(requireNode(node, "mode", path), path + ".mode");
+  if (mode == "legacy-redis-id") config.mode = SourceTimeMode::LegacyRedisId;
+  else if (mode == "unix-nanoseconds-v1") config.mode = SourceTimeMode::UnixNanosecondsV1;
+  else if (mode == "unavailable") config.mode = SourceTimeMode::Unavailable;
+  else fail(path + ".mode", "unsupported source time mode '" + mode + "'");
+
+  if (config.mode == SourceTimeMode::UnixNanosecondsV1) {
+    config.field = parseString(requireNode(node, "field", path), path + ".field");
+    config.validField = parseString(requireNode(node, "valid_field", path), path + ".valid_field");
+    if (config.field.empty() || config.field == "_")
+      fail(path + ".field", "must be nonempty and distinct from payload field '_'");
+    if (config.validField.empty() || config.validField == "_")
+      fail(path + ".valid_field", "must be nonempty and distinct from payload field '_'");
+    if (config.field == config.validField)
+      fail(path, "field and valid_field must be distinct");
+  } else if (node["field"] || node["valid_field"]) {
+    fail(path, "field and valid_field require mode: unix-nanoseconds-v1");
+  }
+  return config;
+}
+
 PVConfig parsePV(const YAML::Node& node, const std::string& path) {
-  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health"});
+  rejectUnknownKeys(node, path, {"name", "aliases", "kind", "max_frame_bytes", "max_frame_gap", "type", "shape", "read", "write", "confirm", "metadata", "alarm", "transform", "initial", "access", "source_health", "source_time"});
 
   PVConfig pv;
   pv.name = parseString(requireNode(node, "name", path), path + ".name");
@@ -674,6 +709,12 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
       pv.sourceHealth.staleAfterMs = parseNumeric<uint32_t>(health["stale_after_ms"], path + ".source_health.stale_after_ms");
     if (pv.sourceHealth.staleAfterMs > 86400000)
       fail(path + ".source_health.stale_after_ms", "must be 0..86400000");
+  }
+  if (const auto sourceTime = node["source_time"]) {
+    pv.sourceTime = parseSourceTime(sourceTime, path + ".source_time");
+    if (pv.sourceTime.mode != SourceTimeMode::LegacyRedisId &&
+        (pv.kind != PVKind::Value || pv.shape != Shape::Array || !isNumericType(pv.type) || pv.write || pv.confirm))
+      fail(path + ".source_time", "nonlegacy modes require a read-only numeric array");
   }
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {
@@ -756,13 +797,144 @@ OperationLimitsConfig parseOperationLimits(const YAML::Node& node) {
   return result;
 }
 
+std::string parseGatewayServer(const YAML::Node& node, const std::string& where) {
+  const auto target = parseString(node, where);
+  const auto colon = target.find(':');
+  if (colon == std::string::npos || colon == 0 || colon + 1 == target.size() ||
+      target.find(':', colon + 1) != std::string::npos)
+    fail(where, "expected an explicit unicast IPv4 address:TCP-port");
+  const auto host = target.substr(0, colon), port = target.substr(colon + 1);
+  in_addr address{};
+  if (inet_pton(AF_INET, host.c_str(), &address) != 1 ||
+      !std::all_of(port.begin(), port.end(), [](unsigned char c) { return std::isdigit(c); }))
+    fail(where, "expected an explicit unicast IPv4 address:TCP-port");
+  const auto bits = ntohl(address.s_addr);
+  if ((bits >> 24) == 0 || (bits >> 24) >= 224 || (bits & 0xffu) == 255u)
+    fail(where, "broadcast, multicast and unspecified addresses are unsupported");
+  // A directed broadcast need not end in .255. Reject addresses advertised as
+  // broadcasts by any local interface, including those with narrow masks.
+  ifaddrs* interfaces = nullptr;
+  if (getifaddrs(&interfaces) != 0) fail(where, "could not validate local broadcast addresses");
+  bool broadcast = false;
+  for (auto* entry = interfaces; entry; entry = entry->ifa_next) {
+    if ((entry->ifa_flags & IFF_BROADCAST) && entry->ifa_broadaddr &&
+        entry->ifa_broadaddr->sa_family == AF_INET &&
+        reinterpret_cast<const sockaddr_in*>(entry->ifa_broadaddr)->sin_addr.s_addr == address.s_addr) {
+      broadcast = true;
+      break;
+    }
+  }
+  freeifaddrs(interfaces);
+  if (broadcast) fail(where, "local broadcast targets are unsupported");
+  unsigned long portNumber = 0;
+  try { portNumber = std::stoul(port); } catch (const std::exception&) { fail(where, "invalid port"); }
+  if (!portNumber || portNumber > 65535) fail(where, "port must be 1..65535");
+  return host + ":" + std::to_string(portNumber);
+}
+
+std::vector<GatewayPVConfig> parseGatewayPVs(const YAML::Node& pvs, const AppConfig& app,
+                                           EndpointRegistry& endpoints, const std::string& path,
+                                           bool allowAccess, bool allowEmpty) {
+  requireSequence(pvs, path);
+  if (!allowEmpty && !pvs.size()) fail(path, "must contain at least one selected PV");
+  if (pvs.size() > 100000) fail(path, "exceeds 100000 selected PVs");
+  std::vector<GatewayPVConfig> result;
+  std::set<std::pair<std::string, std::string>> upstreamNames;
+  size_t selectedNames = 0;
+  for (const auto& existing : app.pvaGateway.pvs) {
+    upstreamNames.insert({existing.server, existing.upstream}); selectedNames += 1 + existing.aliases.size();
+  }
+  for (size_t i = 0; i < pvs.size(); ++i) {
+    const auto where = path + "[" + std::to_string(i) + "]";
+    rejectUnknownKeys(pvs[i], where, allowAccess
+        ? std::set<std::string>{"name", "upstream", "server", "aliases", "access"}
+        : std::set<std::string>{"name", "upstream", "server", "aliases"});
+    GatewayPVConfig pv;
+    pv.name = parseString(requireNode(pvs[i], "name", where), where + ".name");
+    pv.upstream = parseString(requireNode(pvs[i], "upstream", where), where + ".upstream");
+    pv.server = parseGatewayServer(requireNode(pvs[i], "server", where), where + ".server");
+    if (pv.name.empty() || pv.name.size() > 1024 || pv.name.find('\0') != std::string::npos)
+      fail(where + ".name", "must be a 1..1024-byte PV name without NUL");
+    if (pv.upstream.empty() || pv.upstream.size() > 1024 || pv.upstream.find('\0') != std::string::npos)
+      fail(where + ".upstream", "must be a 1..1024-byte PV name without NUL");
+    if (!upstreamNames.insert({pv.server, pv.upstream}).second)
+      fail(where + ".upstream", "must not duplicate another selected upstream on the same server; use aliases");
+    if (pvs[i]["aliases"]) {
+      const auto aliases = requireSequence(pvs[i]["aliases"], where + ".aliases");
+      for (size_t j = 0; j < aliases.size(); ++j) {
+        auto alias = parseString(aliases[j], where + ".aliases[" + std::to_string(j) + "]");
+        if (alias.empty() || alias.size() > 1024 || alias.find('\0') != std::string::npos) fail(where + ".aliases", "must contain 1..1024-byte names without NUL");
+        pv.aliases.push_back(std::move(alias));
+      }
+    }
+    if (pvs[i]["access"]) {
+      if (!app.access.enabled) fail(where + ".access", "requires root.access.enabled: true");
+      pv.access = parseAccessAssignment(pvs[i]["access"], where + ".access");
+    } else if (app.access.enabled) pv.access = app.access.defaults.pv;
+    const auto names = fullGatewayNames(app.server, pv);
+    selectedNames += names.size();
+    if (selectedNames > 100000) fail(path, "exceeds 100000 combined canonical and alias names");
+    for (size_t j = 0; j < names.size(); ++j) {
+      if (names[j].size() > 1024) fail(where, "exported names must not exceed 1024 bytes");
+      endpoints.reserve(names[j], j ? EndpointKind::Alias : EndpointKind::Gateway, names.front(),
+                        where + (j ? ".aliases[" + std::to_string(j - 1) + "]" : ".name"));
+    }
+    result.push_back(std::move(pv));
+  }
+  for (size_t i = 0; i < result.size(); ++i)
+    if (endpoints.entries().count(result[i].upstream))
+      fail(path + "[" + std::to_string(i) + "].upstream", "must not match any locally served PV name");
+  return result;
+}
+
+GatewayConfig parseGateway(const YAML::Node& node, const AppConfig& app, EndpointRegistry& endpoints,
+                           const std::filesystem::path& configDirectory) {
+  GatewayConfig gateway;
+  if (!node) return gateway;
+  const std::string path = "root.pva_gateway";
+  rejectUnknownKeys(node, path, {"pvs", "file", "cache_file", "watch", "access_overrides"});
+  if (node["file"]) {
+    gateway.file = parseString(node["file"], path + ".file");
+    if (gateway.file.empty() || gateway.file.find('\0') != std::string::npos) fail(path + ".file", "must be a nonempty path without NUL");
+    gateway.file = (configDirectory / gateway.file).lexically_normal().string();
+  }
+  if (node["cache_file"]) {
+    gateway.cacheFile = parseString(node["cache_file"], path + ".cache_file");
+    if (gateway.file.empty() || gateway.cacheFile.empty() || gateway.cacheFile.find('\0') != std::string::npos)
+      fail(path + ".cache_file", "requires file and a nonempty path without NUL");
+    gateway.cacheFile = (configDirectory / gateway.cacheFile).lexically_normal().string();
+    if (gateway.cacheFile == gateway.file) fail(path + ".cache_file", "must differ from the input manifest");
+  }
+  if (node["watch"]) {
+    const auto watch = node["watch"];
+    rejectUnknownKeys(watch, path + ".watch", {"enabled", "interval_ms", "settle_ms"});
+    if (watch["enabled"]) gateway.watch.enabled = watch["enabled"].as<bool>();
+    if (watch["interval_ms"]) gateway.watch.intervalMs = parseNumeric<uint32_t>(watch["interval_ms"], path + ".watch.interval_ms");
+    if (watch["settle_ms"]) gateway.watch.settleMs = parseNumeric<uint32_t>(watch["settle_ms"], path + ".watch.settle_ms");
+    if (gateway.file.empty()) fail(path + ".watch", "requires file");
+    if (gateway.watch.intervalMs < 100 || gateway.watch.intervalMs > 60000) fail(path + ".watch.interval_ms", "must be between 100 and 60000");
+    if (gateway.watch.settleMs > 60000) fail(path + ".watch.settle_ms", "must not exceed 60000");
+  }
+  if (node["access_overrides"]) {
+    if (!app.access.enabled) fail(path + ".access_overrides", "requires root.access.enabled: true");
+    for (const auto& entry : requireMap(node["access_overrides"], path + ".access_overrides")) {
+      const auto name = parseString(entry.first, path + ".access_overrides.<name>");
+      if (name.empty() || name.find('\0') != std::string::npos) fail(path + ".access_overrides", "names must be nonempty without NUL");
+      gateway.accessOverrides.emplace(name, parseAccessAssignment(entry.second, path + ".access_overrides." + name));
+    }
+  }
+  if (!node["pvs"] && gateway.file.empty()) fail(path, "requires pvs or file");
+  if (node["pvs"]) gateway.pvs = parseGatewayPVs(node["pvs"], app, endpoints, path + ".pvs", true, !gateway.file.empty());
+  return gateway;
+}
+
 AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& configDirectory) {
   requireMap(root, "root");
   validateTopLevelSchema(root);
   std::vector<YAML::Node> ancestors;
   size_t visited = 0;
   validateTree(root, "root", ancestors, visited);
-  rejectUnknownKeys(root, "root", {"schema_version", "server", "access", "redis", "redis_backends", "alarms", "channelfinder", "discovery", "limits", "pvs", "rpc_services"});
+  rejectUnknownKeys(root, "root", {"schema_version", "server", "access", "redis", "redis_backends", "alarms", "channelfinder", "discovery", "limits", "pvs", "rpc_services", "pva_gateway"});
 
   AppConfig config;
   config.legacyInput = !root["schema_version"];
@@ -883,6 +1055,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
     config.pvs.push_back(std::move(pv));
   }
 
+  config.pvaGateway = parseGateway(root["pva_gateway"], config, endpoints, configDirectory);
+
   // Generic gRPC services exposed as RPC PVs (one PV per reflected method).
   if (root["rpc_services"]) {
     const auto svcNode = requireSequence(root["rpc_services"], "root.rpc_services");
@@ -898,8 +1072,8 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
     }
   }
 
-  if (config.pvs.empty() && config.rpcServices.empty()) {
-    fail("root", "must define at least one of 'pvs' or 'rpc_services'");
+  if (config.pvs.empty() && config.rpcServices.empty() && config.pvaGateway.pvs.empty() && config.pvaGateway.file.empty()) {
+    fail("root", "must define at least one of 'pvs', 'rpc_services', or 'pva_gateway.pvs'");
   }
 
   auto alarmBytes = config.limits.alarmStateBytes - config.limits.alarmQueueEntries * kAlarmQueueEntryBytes;
@@ -914,6 +1088,58 @@ AppConfig parseConfig(const YAML::Node& root, const std::filesystem::path& confi
 }
 
 }  // namespace
+
+bool readGatewayManifestFile(const std::string& path, std::string& text) {
+  const int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+  if (fd < 0) {
+    if (errno == ENOENT) return false;
+    throw std::runtime_error("manifest open failed: " + std::string(std::strerror(errno)));
+  }
+  struct Close { int fd; ~Close() { close(fd); } } closeFile{fd};
+  struct stat before{}, after{};
+  if (fstat(fd, &before) || !S_ISREG(before.st_mode) || before.st_size < 0 || before.st_size > 16 * 1024 * 1024)
+    throw std::runtime_error("manifest must be a regular file of at most 16 MiB");
+  text.clear(); text.reserve(static_cast<size_t>(before.st_size));
+  char buffer[8192];
+  for (;;) {
+    const auto count = read(fd, buffer, sizeof(buffer));
+    if (count < 0) { if (errno == EINTR) continue; throw std::runtime_error("manifest read failed"); }
+    if (!count) break;
+    if (text.size() + static_cast<size_t>(count) > 16u * 1024u * 1024u)
+      throw std::runtime_error("manifest exceeds 16 MiB");
+    text.append(buffer, static_cast<size_t>(count));
+  }
+  if (fstat(fd, &after)) throw std::runtime_error("manifest stat failed after read");
+#ifdef __APPLE__
+  const bool changed = before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec;
+#else
+  const bool changed = before.st_mtim.tv_nsec != after.st_mtim.tv_nsec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec;
+#endif
+  if (changed || before.st_size != after.st_size || before.st_mtime != after.st_mtime ||
+      before.st_ctime != after.st_ctime || text.size() != static_cast<size_t>(before.st_size))
+    throw std::runtime_error("manifest changed while being read; publish with atomic rename");
+  return true;
+}
+
+AppConfig loadConfigForDiff(const std::string& path) {
+  auto config = loadConfigFile(path);
+  if (!config.pvaGateway.file.empty()) {
+    std::string text;
+    std::exception_ptr sourceError;
+    try {
+      if (readGatewayManifestFile(config.pvaGateway.file, text))
+        return withGatewayManifest(config, loadGatewayManifestString(text, config));
+    } catch (...) { sourceError = std::current_exception(); }
+    if (!config.pvaGateway.cacheFile.empty()) {
+      try {
+        if (readGatewayManifestFile(config.pvaGateway.cacheFile, text))
+          return withGatewayManifest(config, loadGatewayManifestString(text, config));
+      } catch (...) { if (!sourceError) throw; }
+    }
+    if (sourceError) std::rethrow_exception(sourceError);
+  }
+  return config;
+}
 
 AppConfig loadConfigFile(const std::string& path) {
   const auto absolutePath = std::filesystem::absolute(path);
@@ -931,6 +1157,7 @@ std::string summarizeConfig(const AppConfig& config) {
          << " redis_backends=" << config.redisBackends.size()
          << " pvs=" << config.pvs.size()
          << " rpc_services=" << config.rpcServices.size()
+         << " gateway_pvs=" << config.pvaGateway.pvs.size()
          << " access=" << (config.access.enabled ? "enabled" : "disabled");
   if (config.access.enabled) {
     stream << "\naccess_file=" << config.access.file
@@ -947,6 +1174,8 @@ std::string summarizeConfig(const AppConfig& config) {
            << " -> " << (config.server.nameSpace.empty() ? "" : config.server.nameSpace + ":")
            << "<METHOD>" << svc.suffix;
   }
+  for (const auto& pv : config.pvaGateway.pvs)
+    stream << "\n- gateway " << fullGatewayName(config.server, pv) << " <- " << pv.upstream << " @ " << pv.server;
   for (const auto& pv : config.pvs) {
     stream << "\n- " << fullPVName(config.server, pv)
            << " [";
@@ -1064,6 +1293,8 @@ bool sameReaderTopology(const PVConfig& lhs, const PVConfig& rhs) {
          lhs.maxFrameBytes == rhs.maxFrameBytes &&
          lhs.read.backend == rhs.read.backend &&
          lhs.read.key == rhs.read.key &&
+         std::tie(lhs.sourceTime.mode, lhs.sourceTime.field, lhs.sourceTime.validField) ==
+             std::tie(rhs.sourceTime.mode, rhs.sourceTime.field, rhs.sourceTime.validField) &&
          sameOptionalRoute(lhs.write, rhs.write) &&
          sameConfirm;
 }
@@ -1141,6 +1372,59 @@ std::string fullPVName(const ServerConfig& server, const PVConfig& pv) {
   return server.nameSpace + ":" + pv.name;
 }
 
+std::vector<std::string> fullGatewayNames(const ServerConfig& server, const GatewayPVConfig& pv) {
+  std::vector<std::string> names{fullGatewayName(server, pv)};
+  for (const auto& alias : pv.aliases) names.push_back(alias);
+  return names;
+}
+
+AccessAssignment gatewayAccess(const AppConfig& config, const GatewayPVConfig& pv, const std::string& exportedName) {
+  auto override = config.pvaGateway.accessOverrides.find(exportedName);
+  if (override == config.pvaGateway.accessOverrides.end() && exportedName == fullGatewayName(config.server, pv))
+    override = config.pvaGateway.accessOverrides.find(pv.name);
+  return override == config.pvaGateway.accessOverrides.end()
+      ? pv.access.value_or(config.access.defaults.pv) : override->second;
+}
+
+GatewayManifest loadGatewayManifestString(const std::string& text, const AppConfig& base) {
+  if (text.size() > 16u * 1024u * 1024u) fail("manifest", "exceeds 16 MiB");
+  const auto documents = YAML::LoadAll(text);
+  if (documents.size() != 1) fail("manifest", "requires exactly one YAML document");
+  const auto root = documents.front();
+  std::vector<YAML::Node> ancestors;
+  size_t visited = 0;
+  validateTree(root, "manifest", ancestors, visited);
+  rejectUnknownKeys(root, "manifest", {"schema_version", "revision", "pvs"});
+  if (parseNumeric<uint32_t>(requireNode(root, "schema_version", "manifest"), "manifest.schema_version") != 1)
+    fail("manifest.schema_version", "must be 1");
+  GatewayManifest manifest;
+  uint64_t hash = 1469598103934665603ull;
+  for (const unsigned char ch : text) { hash ^= ch; hash *= 1099511628211ull; }
+  std::ostringstream fingerprint;
+  fingerprint << std::hex << std::setfill('0') << std::setw(16) << hash;
+  manifest.fingerprint = fingerprint.str();
+  manifest.revision = parseString(requireNode(root, "revision", "manifest"), "manifest.revision");
+  if (manifest.revision.empty() || manifest.revision.size() > 256 || manifest.revision.find('\0') != std::string::npos)
+    fail("manifest.revision", "must be 1..256 bytes without NUL");
+  auto endpoints = configuredEndpoints(base);
+  manifest.pvs = parseGatewayPVs(requireNode(root, "pvs", "manifest"), base, endpoints, "manifest.pvs", false, true);
+  for (const auto& pv : base.pvaGateway.pvs)
+    if (endpoints.entries().count(pv.upstream)) fail("manifest.pvs", "creates a locally served upstream loop");
+  return manifest;
+}
+
+AppConfig withGatewayManifest(const AppConfig& base, const GatewayManifest& manifest) {
+  auto result = base;
+  result.pvaGateway.manifestRevision = manifest.revision;
+  result.pvaGateway.manifestFingerprint = manifest.fingerprint;
+  result.pvaGateway.pvs.insert(result.pvaGateway.pvs.end(), manifest.pvs.begin(), manifest.pvs.end());
+  return result;
+}
+
+std::string fullGatewayName(const ServerConfig& server, const GatewayPVConfig& pv) {
+  return server.nameSpace.empty() ? pv.name : server.nameSpace + ":" + pv.name;
+}
+
 std::vector<std::string> fullPVNames(const ServerConfig& server, const PVConfig& pv) {
   std::vector<std::string> names;
   names.reserve(1u + pv.aliases.size());
@@ -1196,6 +1480,7 @@ std::vector<std::string> adminPVNames(const ServerConfig& server) {
     adminPVName(server, "access:rightsChanges"),
     adminPVName(server, "access:operations"),
     adminPVName(server, "discovery:status"),
+    adminPVName(server, "gateway:status"),
   };
 }
 

@@ -17,6 +17,11 @@ authoritative.
 | hiredis (bundled by redis-adapter) | <https://github.com/redis/hiredis> | `third_party/redis-adapter/hiredis/COPYING` |
 | redis-plus-plus (bundled by redis-adapter) | <https://github.com/sewenew/redis-plus-plus> | `third_party/redis-adapter/redis-plus-plus/LICENSE` |
 
+The bundled PVXS revision has project-owned modifications in `patches/pvxs`.
+Its manifest records the unchanged base revision, exact patch checksum and
+before/after source hashes. Those modifications retain PVXS's license; the
+runtime image includes its original notice alongside the project notices.
+
 The runtime image carries source-tree license, copying, copyright, and notice
 files under `/usr/share/doc/redis-pvxs-ioc/third-party/`, preserving their
 repository-relative paths. This includes nested source dependencies and their

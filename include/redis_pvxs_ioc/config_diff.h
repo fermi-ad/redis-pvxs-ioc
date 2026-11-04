@@ -13,6 +13,7 @@ struct ConfigDiff {
   std::vector<std::string> backendsChanged;
   std::vector<std::string> rpcServicesChanged;
   std::vector<std::string> restartRequired;
+  bool gatewayManifestChanged = false;
   bool alarmStreamChanged = false;
   bool catalogMetadataChanged = false;
 };

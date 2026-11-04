@@ -181,7 +181,9 @@ class RedisProxy:
         self.lock = threading.Lock()
         self.offline = False
         self.drop_next = False
+        self.error_next = False
         self.dropped_reply = threading.Event()
+        self.replaced_reply = threading.Event()
         self.stopped = threading.Event()
         self.sockets = set()
         self.workers = []
@@ -230,12 +232,20 @@ class RedisProxy:
                                request[0].upper() in (b"EVAL", b"EVALSHA") and
                                self.raw in request[2:] and self.lease in request[2:])
                     with self.lock:
-                        drop = publish and self.drop_next and not isinstance(reply, RedisError)
+                        committed = (publish and isinstance(reply, list) and reply and reply[0] == b"published")
+                        drop = committed and self.drop_next
+                        replace_error = committed and self.error_next
                         if drop:
                             self.drop_next = False
+                        if replace_error:
+                            self.error_next = False
                     if drop:
                         self.dropped_reply.set()
                         return
+                    if replace_error:
+                        client.sendall(b"-ERR injected failure after committed publication\r\n")
+                        self.replaced_reply.set()
+                        continue
                     client.sendall(b"".join(reply_wire))
         except (OSError, EOFError, ValueError):
             pass
@@ -260,6 +270,11 @@ class RedisProxy:
         with self.lock:
             self.drop_next = True
         self.dropped_reply.clear()
+
+    def error_after_next_committed_publication(self):
+        with self.lock:
+            self.error_next = True
+        self.replaced_reply.clear()
 
     def close(self):
         self.stopped.set()
@@ -703,6 +718,26 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(tags, sorted(tags), "recovered queue reordered pulses")
         self.assertEqual(len(self.device.connections), 1)
         eventually(lambda: re.search(r"localDrops=[1-9]", self.logs()), "counted queue drops")
+
+    def test_error_reply_after_committed_publication_is_never_replayed(self):
+        proxy = self.proxy()
+        self.start()
+        connection = self.device.accept()
+        proxy.error_after_next_committed_publication()
+        first, second = pulse(91), pulse(92)
+        connection.sendall(first)
+        self.assertTrue(proxy.replaced_reply.wait(timeout=8), "proxy did not replace committed reply")
+        self.assertEqual(self.wait_rows(1)[0][1], {b"_": first})
+        eventually(lambda: "event=uncertain_write" in self.logs(), "post-dispatch error is reported uncertain")
+        connection.sendall(second)
+        rows = self.wait_rows(2)
+        self.assertEqual([row[1][b"_"] for row in rows], [first, second])
+        deadline = time.monotonic() + 1.1
+        while time.monotonic() < deadline:
+            self.alive()
+            self.assertEqual(self.redis.command("XLEN", self.raw), 2, "post-commit error caused replay")
+            self.assertEqual(len(self.device.connections), 1, "Redis error reconnected XRM")
+            time.sleep(.05)
 
     def test_unbounded_framing_junk_latches_fault_without_reconnect(self):
         self.start()

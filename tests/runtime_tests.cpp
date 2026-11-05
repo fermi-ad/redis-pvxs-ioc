@@ -1,6 +1,7 @@
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/alarm_publisher.h"
 #include "RedisAdapter.hpp"
+#include "reader_mode_test.h"
 #include <alarm.h>
 #include <pvxs/client.h>
 #include <pvxs/server.h>
@@ -39,12 +40,13 @@ struct Completion {
   }
 };
 
-int main() {
+int main(int argc, char** argv) {
   auto server = pvxs::server::Config::isolated(AF_INET).build();
   RA_Options options;
   const auto* port = std::getenv("REDIS_PVXS_TEST_REDIS_PORT");
   assert(port);
   options.cxn.port = std::stoi(port);
+  selectTestReaderMode(options, argc, argv);
   auto adapter = std::make_shared<RedisAdapter>("runtime-tests", options);
   RedisAdapter producer("runtime-tests", options);
   assert(adapter->connected());
@@ -63,6 +65,7 @@ int main() {
   auto runtime = makeRuntime(serverConfig, config, backends, alarms, 1);
   assert(alarms->status().active == 0 && alarms->status().sent == 0);
   runtime->activate();
+  assertTestReaderBackend(*adapter, options);
   eventually([&] { return alarms->status().state == "ready"; });
   server.addPV(runtime->fullName(), runtime->sharedPV()).start();
   auto client = server.clientConfig().build();

@@ -691,6 +691,8 @@ std::shared_ptr<RedisAdapter> buildRedisAdapter(const RedisConfig& config) {
   }
   options.workers = config.workers;
   options.readers = config.readers;
+  options.readerMode = config.readerMode == RedisReaderMode::Keyspace
+      ? RA_ReaderMode::Keyspace : RA_ReaderMode::Blocking;
   options.readerProbeMs = config.readerProbeMs;
   return std::make_shared<RedisAdapter>(config.baseKey, options);
 }

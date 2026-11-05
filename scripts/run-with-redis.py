@@ -12,6 +12,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument('--redis-server', required=True)
 parser.add_argument('--timeout', type=float, default=60)
+parser.add_argument('--notify-keyspace-events', default='')
 parser.add_argument('command', nargs=argparse.REMAINDER)
 args = parser.parse_args()
 command = args.command[1:] if args.command[:1] == ['--'] else args.command
@@ -24,7 +25,8 @@ with tempfile.TemporaryDirectory(prefix='redis-pvxs-test-') as directory:
     logfile = pathlib.Path(directory) / 'redis.log'
     with logfile.open('w') as log:
         redis = subprocess.Popen([args.redis_server, '--bind', '127.0.0.1', '--port', str(port),
-                                  '--save', '', '--appendonly', 'no', '--dir', directory],
+                                  '--save', '', '--appendonly', 'no', '--dir', directory,
+                                  '--notify-keyspace-events', args.notify_keyspace_events],
                                  stdout=log, stderr=subprocess.STDOUT)
         try:
             for attempt in range(100):

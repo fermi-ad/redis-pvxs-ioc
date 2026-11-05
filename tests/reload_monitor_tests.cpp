@@ -1,6 +1,7 @@
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/monitor_sample.h"
 #include "RedisAdapter.hpp"
+#include "reader_mode_test.h"
 #include <pvxs/client.h>
 #include <pvxs/server.h>
 #include <cassert>
@@ -25,7 +26,7 @@ pvxs::Value next(const std::shared_ptr<pvxs::client::Subscription>& monitor) {
 
 template<bool Array> void exercise(RedisAdapter& producer, const RedisBackendRegistry& backends,
                                    const ServerConfig& serverConfig, pvxs::server::Server& server,
-                                   pvxs::client::Context& client) {
+                                   pvxs::client::Context& client, const RA_Options& options) {
   PVConfig config;
   config.name = Array ? "array" : "scalar";
   config.shape = Array ? Shape::Array : Shape::Scalar;
@@ -42,6 +43,7 @@ template<bool Array> void exercise(RedisAdapter& producer, const RedisBackendReg
   send(1.);
   auto runtime = makeRuntime(serverConfig, config, backends, {}, 1);
   runtime->activate();
+  assertTestReaderBackend(*backends.at("default"), options);
   server.addPV(runtime->fullName(), runtime->sharedPV());
   auto monitor = client.monitor(runtime->fullName()).record("queueSize", uint32_t(16))
       .record("pipeline", true).maskConnected(true).maskDisconnected(false)
@@ -110,16 +112,17 @@ template<bool Array> void exercise(RedisAdapter& producer, const RedisBackendReg
   std::cout << config.name << ": metadata excluded; marked duplicates and new acquisitions retained\n";
 }
 
-int main() {
+int main(int argc, char** argv) {
   RA_Options options;
   options.cxn.port = std::stoi(std::getenv("REDIS_PVXS_TEST_REDIS_PORT"));
+  selectTestReaderMode(options, argc, argv);
   auto adapter = std::make_shared<RedisAdapter>("reload-monitor-tests", options);
   RedisAdapter producer("reload-monitor-tests", options);
   RedisBackendRegistry backends{{"default", adapter}};
   ServerConfig config; config.instance = "reload-monitor-tests"; config.nameSpace = "TEST";
   auto server = pvxs::server::Config::isolated(AF_INET).build(); server.start();
   auto client = server.clientConfig().build();
-  exercise<false>(producer, backends, config, server, client);
-  exercise<true>(producer, backends, config, server, client);
+  exercise<false>(producer, backends, config, server, client, options);
+  exercise<true>(producer, backends, config, server, client, options);
   client.close(); server.stop();
 }

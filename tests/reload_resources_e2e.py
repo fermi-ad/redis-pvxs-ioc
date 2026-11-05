@@ -38,13 +38,19 @@ def main():
         with socket.create_connection(("127.0.0.1", redis_port), timeout=2) as client:
             client.sendall(packet)
             with client.makefile("rb") as reply:
-                header = reply.readline()
-                assert header[:1] != b"-", header
-                if header.startswith(b"$"):
-                    return reply.read(int(header[1:]) + 2)[:-2]
-                if header.startswith(b":"):
-                    return int(header[1:])
-                raise AssertionError(header)
+                def read_reply():
+                    header = reply.readline()
+                    assert header[:1] != b"-", header
+                    if header.startswith(b"$"):
+                        return reply.read(int(header[1:]) + 2)[:-2]
+                    if header.startswith(b":"):
+                        return int(header[1:])
+                    if header.startswith(b"*"):
+                        return [read_reply() for _ in range(int(header[1:]))]
+                    if header.startswith(b"+"):
+                        return header[1:-2]
+                    raise AssertionError(header)
+                return read_reply()
 
     def publish(base, key, value):
         command("XADD", "{" + base + "}:" + key, "*", "_", struct.pack("=d", value))
@@ -100,13 +106,15 @@ def main():
                 assert "value double = 23" in get("TEST:other")
                 # Rebuilding the unchanged stable runtime would now lose its last-good value.
                 command("DEL", "{reload-stable}:read")
-                for generation, value in ((2, 100.), (3, 200.)):
+                for generation, value in ((2, 100.), (3, 200.), (4, 300.)):
                     before = command("XLEN", "{reload-stable}:command")
                     pending = subprocess.Popen([args.pvxput, "-w", "12", "TEST:keepAlias", str(value)],
                                                env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                     wait_for(lambda: command("XLEN", "{reload-stable}:command") > before, "write dispatched")
                     changed = copy.deepcopy(config)
                     if generation == 2:
+                        changed["redis_backends"]["other"]["reader_mode"] = "keyspace"
+                    elif generation == 3:
                         changed["redis_backends"]["other"]["base_key"] = "reload-other-next"
                     else:
                         changed["alarms"]["stream"] = "reload-alarms-next"
@@ -123,17 +131,30 @@ def main():
                     wait_for(lambda: f"value int64_t = {generation}" in get("SYS:reload:config:generation"), "reload committed")
                     assert "value double = 4" in get("TEST:keep")
                     assert "value double = 4" in get("TEST:keepAlias")
-                    assert "value double = 42" in get("TEST:other")
+                    assert f"value double = {23 if generation == 2 else 42}" in get("TEST:other")
+                    if generation == 2:
+                        channel = "__keyspace@0__:{reload-other}:read"
+                        wait_for(lambda: command("PUBSUB", "NUMSUB", channel)[1] > 0,
+                                 "changed backend uses notification subscription")
                     report = get("SYS:reload:config:reloadStatus")
                     assert 'state string = "committed"' in report, report
-                    assert f"recreated uint64_t = {1 if generation == 2 else 0}" in report, report
-                    assert f"retained uint64_t = {1 if generation == 2 else 2}" in report, report
-                    if generation == 2:
+                    assert f"recreated uint64_t = {1 if generation in (2, 3) else 0}" in report, report
+                    assert f"retained uint64_t = {1 if generation in (2, 3) else 2}" in report, report
+                    if generation in (2, 3):
                         assert '"created"' in report and '"retained"' in report, report
                     config = changed
                 publish("reload-stable", "read", 9.)
                 wait_for(lambda: "value double = 9" in get("TEST:keep"), "reader still receives updates")
-                print("backend and alarm reloads preserve unchanged cached values, alias puts and readers")
+                invalid = copy.deepcopy(config)
+                invalid["redis_backends"]["other"]["reader_mode"] = "invalid"
+                path.write_text(json.dumps(invalid))
+                ioc.send_signal(signal.SIGHUP)
+                wait_for(lambda: 'state string = "failed"' in get("SYS:reload:config:reloadStatus"),
+                         "invalid reader mode rejected")
+                assert "value int64_t = 4" in get("SYS:reload:config:generation")
+                publish("reload-other-next", "read", 43.)
+                wait_for(lambda: "value double = 43" in get("TEST:other"), "old generation survives rejection")
+                print("reader-mode, backend and alarm reloads preserve unchanged cached values, alias puts and readers")
             except Exception as error:
                 print((directory / "ioc.log").read_text(), file=sys.stderr)
                 if isinstance(error, subprocess.CalledProcessError):

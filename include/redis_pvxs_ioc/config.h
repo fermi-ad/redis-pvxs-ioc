@@ -192,6 +192,8 @@ struct ServerConfig {
   bool autoBeacon = true;
 };
 
+enum class RedisReaderMode { Blocking, Keyspace };
+
 struct RedisConfig {
   std::string baseKey;
   std::string host = "127.0.0.1";
@@ -200,6 +202,7 @@ struct RedisConfig {
   std::string password;
   uint16_t workers = 1;
   uint16_t readers = 1;
+  RedisReaderMode readerMode = RedisReaderMode::Blocking;
   uint32_t readerProbeMs = 1000;
 };
 

@@ -1,6 +1,7 @@
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/ntndarray.h"
 #include "redis_pvxs_ioc/config_diff.h"
+#include "reader_mode_test.h"
 #include <alarm.h>
 #include <cassert>
 #include <chrono>
@@ -31,10 +32,11 @@ RedisAdapter::Attrs scalar(double value) {
   return {{"_", bytes}};
 }
 
-void delayedReadEvidence(sw::redis::Redis& control, uint16_t port, PVKind kind) {
+void delayedReadEvidence(sw::redis::Redis& control, uint16_t port, PVKind kind, RA_ReaderMode mode) {
   const auto base = kind == PVKind::NTNDArray ? "health-delayed-frame" : "health-delayed-scalar";
   const std::string user = std::string(base) + "-reader", key = "{" + std::string(base) + "}:read";
-  control.command<void>("ACL", "SETUSER", user, "reset", "on", "nopass", "~{" + std::string(base) + "}:*", "+@all");
+  control.command<void>("ACL", "SETUSER", user, "reset", "on", "nopass", "~{" + std::string(base) + "}:*",
+                        "&__keyspace@0__:{" + std::string(base) + "}:*", "+@all");
   const auto fields = [kind](int value) {
     if (kind == PVKind::Value) return scalar(value);
     return RedisAdapter::Attrs{{"schema", kNTNDArrayRedisSchema}, {"data_type", "1"}, {"shape", "[4]"},
@@ -48,6 +50,7 @@ void delayedReadEvidence(sw::redis::Redis& control, uint16_t port, PVKind kind) 
   send(1);
   RA_Options options; options.cxn.port = port; options.cxn.user = user;
   options.cxn.timeout = 100; options.workers = 1;
+  options.readerMode = mode;
   auto adapter = std::make_shared<RedisAdapter>(base, options);
   std::mutex mutex;
   std::condition_variable changed;
@@ -68,6 +71,7 @@ void delayedReadEvidence(sw::redis::Redis& control, uint16_t port, PVKind kind) 
   auto runtime = makeRuntime(server, config, {{"default", adapter}}, {}, 1, {}, {}, {}, policies);
   runtime->activate();
   eventually([&] { return runtime->sourceHealth()[0].ready; });
+  assertTestReaderBackend(*adapter, options);
   send(2);
   {
     std::unique_lock<std::mutex> lock(mutex);
@@ -99,16 +103,18 @@ void delayedReadEvidence(sw::redis::Redis& control, uint16_t port, PVKind kind) 
   control.command<long long>("ACL", "DELUSER", user);
 }
 
-int main() {
+int main(int argc, char** argv) {
   RA_Options options;
   options.cxn.port = std::stoi(std::getenv("REDIS_PVXS_TEST_REDIS_PORT"));
   options.cxn.timeout = 100;
+  selectTestReaderMode(options, argc, argv);
   sw::redis::ConnectionOptions connection;
   connection.host = "127.0.0.1"; connection.port = options.cxn.port;
   sw::redis::Redis control(connection);
-  delayedReadEvidence(control, options.cxn.port, PVKind::Value);
-  delayedReadEvidence(control, options.cxn.port, PVKind::NTNDArray);
-  control.command<void>("ACL", "SETUSER", "runtime-health", "reset", "on", "nopass", "~{source-health}:*", "+@all");
+  delayedReadEvidence(control, options.cxn.port, PVKind::Value, options.readerMode);
+  delayedReadEvidence(control, options.cxn.port, PVKind::NTNDArray, options.readerMode);
+  control.command<void>("ACL", "SETUSER", "runtime-health", "reset", "on", "nopass", "~{source-health}:*",
+                        "&__keyspace@0__:{source-health}:*", "+@all");
   options.cxn.user = "runtime-health";
   const std::string base = "source-health";
   const auto key = [&](const std::string& sub) { return "{" + base + "}:" + sub; };
@@ -131,6 +137,7 @@ int main() {
   auto runtime = make(config);
   assert(!runtime->sourceHealth()[0].ready); // A staged owner is not active readiness.
   runtime->activate();
+  assertTestReaderBackend(*adapter, options);
   eventually([&] { return runtime->sourceHealth()[0].ready; });
   auto health = runtime->sourceHealth()[0];
   assert(health.reader.cursor == first && health.lastValidCursor == first && health.lastValidEpoch == 1);
@@ -228,7 +235,8 @@ int main() {
 
   // Inspection denied is separate from a working source read. A wrong-type
   // repair still recovers after permission changes, with current-epoch validity.
-  control.command<void>("ACL", "SETUSER", "health-reader", "reset", "on", "nopass", "~{health-acl}:*", "+@all", "-xinfo");
+  control.command<void>("ACL", "SETUSER", "health-reader", "reset", "on", "nopass", "~{health-acl}:*",
+                        "&__keyspace@0__:{health-acl}:*", "+@all", "-xinfo");
   auto deniedOptions = options; deniedOptions.cxn.user = "health-reader";
   auto denied = std::make_shared<RedisAdapter>("health-acl", deniedOptions);
   RedisBackendRegistry deniedBackends{{"default", denied}};

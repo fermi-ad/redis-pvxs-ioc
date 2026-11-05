@@ -43,6 +43,19 @@ def main():
         versioned = dict(base, schema_version=1)
         assert check(versioned)["legacy_input"] is False
         unchanged(diff(versioned))
+        explicit_blocking = copy.deepcopy(base)
+        explicit_blocking["redis"]["reader_mode"] = "blocking"
+        unchanged(diff(explicit_blocking))
+        keyspace = copy.deepcopy(base)
+        keyspace["redis"]["reader_mode"] = "keyspace"
+        check(keyspace)
+        mode_change = diff(keyspace)
+        assert mode_change["backend_changes"] == ["default"], mode_change
+        assert not mode_change["restart_required"], mode_change
+        for mode in ("", "KEYSPACE", "unknown", None, ["keyspace"], {"value": "keyspace"}):
+            invalid_mode = copy.deepcopy(base)
+            invalid_mode["redis"]["reader_mode"] = mode
+            check(invalid_mode, False)
         defaults = dict(write_workers=4, queued_writes_per_pv=16, queued_write_bytes=67108864,
                         max_payload_bytes=33554432, alarm_queue_entries=1024, alarm_state_bytes=67108864)
         unchanged(diff(dict(base, limits=defaults)))

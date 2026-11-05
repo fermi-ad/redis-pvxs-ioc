@@ -358,7 +358,7 @@ ConfirmConfig parseConfirm(const YAML::Node& node, const std::string& path) {
 
 RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path,
                             const std::filesystem::path& directory) {
-  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "user_file", "password_file", "workers", "readers", "reader_probe_ms"});
+  rejectUnknownKeys(node, path, {"base_key", "host", "port", "user", "password", "user_file", "password_file", "workers", "readers", "reader_mode", "reader_probe_ms"});
   const auto redisNode = node;
 
   RedisConfig config;
@@ -383,6 +383,12 @@ RedisConfig parseRedisConfig(const YAML::Node& node, const std::string& path,
   }
   if (redisNode["readers"]) {
     config.readers = parseNumeric<uint16_t>(redisNode["readers"], path + ".readers");
+  }
+  if (redisNode["reader_mode"]) {
+    const auto mode = parseString(redisNode["reader_mode"], path + ".reader_mode");
+    if (mode == "blocking") config.readerMode = RedisReaderMode::Blocking;
+    else if (mode == "keyspace") config.readerMode = RedisReaderMode::Keyspace;
+    else fail(path + ".reader_mode", "must be blocking or keyspace");
   }
   if (redisNode["reader_probe_ms"])
     config.readerProbeMs = parseNumeric<uint32_t>(redisNode["reader_probe_ms"], path + ".reader_probe_ms");
@@ -1102,6 +1108,7 @@ bool sameRedisConfig(const RedisConfig& lhs, const RedisConfig& rhs) {
          lhs.password == rhs.password &&
          lhs.workers == rhs.workers &&
          lhs.readers == rhs.readers &&
+         lhs.readerMode == rhs.readerMode &&
          lhs.readerProbeMs == rhs.readerProbeMs;
 }
 

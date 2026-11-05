@@ -2,8 +2,11 @@
 
 `redis-pvxs-ioc` is a released, standalone PVAccess service with a YAML definition
 plane and Redis value plane. This document separates current behavior from tracked
-future work. The ordered [path to v0.9.0 and v1.0 RC](roadmap-v0.9.md)
-is the release checklist and maps each review finding to an outcome.
+future work. The [path to v1.0.0](roadmap-v1.0.md) is the evolving candidate and
+decision map.
+The [v0.9 roadmap](roadmap-v0.9.md) is archived planning history; the
+[v0.9.0 release](https://github.com/fermi-ad/redis-pvxs-ioc/releases/tag/v0.9.0)
+contains the release evidence.
 
 ## Supported now
 
@@ -17,7 +20,8 @@ is the release checklist and maps each review finding to an outcome.
 - one or many standalone Redis backends per config generation
 - metadata, display/control limits, scalar alarms, and linear transforms
 - Redis alarm-stream publishing
-- generation-based YAML hot reload through `SIGHUP` or an admin PV
+- schema-version validation, machine-readable configuration checks/differences,
+  and generation-based YAML hot reload through `SIGHUP` or an admin PV
 - rejection of bad replacement configurations while the active generation stays live
 - built-in version, revision, config status/error/generation, PV count, and backend
   health PVs
@@ -42,50 +46,55 @@ is the release checklist and maps each review finding to an outcome.
 - general-purpose IOC hosting or in-process support-module loading
 - hot changes to server instance, namespace, interfaces, ports, or beacon settings
 
-## Active roadmap
+## Path to 1.0 and candidate work
 
-### Configuration and reliability
+[The 1.0 decision map](roadmap-v1.0.md) records consumers, benefits, evidence,
+dependencies, interfaces, uncertainties, next validation, disposition and ownership.
+Its candidate list is open for evaluation, not a locked release checklist.
 
-- [#2: Version the config schema and define compatibility rules](https://github.com/fermi-ad/redis-pvxs-ioc/issues/2)
-- [#3: Add config diff/report and reload observability](https://github.com/fermi-ad/redis-pvxs-ioc/issues/3)
-- [#4: Harden backend outage and invalid reload behavior](https://github.com/fermi-ad/redis-pvxs-ioc/issues/4)
-- [#15: Add a Redis-backed definition source and full settings path](https://github.com/fermi-ad/redis-pvxs-ioc/issues/15)
-- [#66: Reserve the complete always-on admin PV namespace](https://github.com/fermi-ad/redis-pvxs-ioc/issues/66)
-- [#67: Always refresh user-supplied tag images in smoke tests](https://github.com/fermi-ad/redis-pvxs-ioc/issues/67)
+The current gates are Linux amd64-only IOC qualification, exact official EPICS
+Base/PVXS dependencies (#138 with #122 startup evidence), the remaining #2
+compatibility-policy decision, maintenance/handoff (#155), independent review and
+the focused 1.0 RC qualification policy/evidence work (#156). Linux arm64 CI remains informational; Darwin
+build code remains without a support promise. ARM Redis producers are unaffected.
 
-The Redis definition path must preserve generation staging: validate the full next
-definition set before cutover and leave the active generation untouched on error.
+Candidates include Redis definitions (#15), SecurePVA (#47), Redis TLS,
+authenticated gRPC, opt-in acquisition timestamps and producer command correlation,
+write tolerance/range policy, Ubuntu dependency retention (#141), and an XRM PVA
+gateway with sample forwarding to Redis (#148–#150). The XRM consumer
+profile keeps acquisition setup, triggers and scan sequencing in the external
+application. The independent BCM I2C-to-Redis producer has its own compatibility
+profile; it is not a D-TACQ adapter. Follow the decision map for focused issues and
+current dispositions.
 
 ### Normative types
 
-- [#17: Normative-types umbrella](https://github.com/fermi-ad/redis-pvxs-ioc/issues/17)
-- [#20: Reusable IDs, metadata, validation, and union framework](https://github.com/fermi-ad/redis-pvxs-ioc/issues/20)
-- [#18: General normative types](https://github.com/fermi-ad/redis-pvxs-ioc/issues/18)
-- [#19: Specific normative types](https://github.com/fermi-ad/redis-pvxs-ioc/issues/19)
-- [#21: Appendix A additions](https://github.com/fermi-ad/redis-pvxs-ioc/issues/21)
+The read-only Redis-backed `NTNDArray` subset is delivered. Broader coverage
+remains consumer-driven under [#17](https://github.com/fermi-ad/redis-pvxs-ioc/issues/17),
+with [#20](https://github.com/fermi-ad/redis-pvxs-ioc/issues/20) for reusable
+framework work, [#18](https://github.com/fermi-ad/redis-pvxs-ioc/issues/18) for
+general types, [#19](https://github.com/fermi-ad/redis-pvxs-ioc/issues/19) for
+additional specific types and [#21](https://github.com/fermi-ad/redis-pvxs-ioc/issues/21)
+for Appendix A additions. Characterizing structured upstream XRM PVA values does
+not by itself commit to new Redis-native type families.
 
-See [`normative-types-roadmap.md`](normative-types-roadmap.md) for the target type
-families and implementation guardrails.
+See [the normative-types roadmap](normative-types-roadmap.md) for type families
+and implementation guardrails.
 
-### Product boundary
+### Product and compatibility boundaries
 
-Automatic discovery is a v0.9.0 release requirement. The standalone PVA service
-owns it; conventional IOC hosting and a CA facade are outside this product.
-The legacy sidecar is retired, with historical images and source retained in
-[the migration notes](legacy-sidecar.md). No replacement repository is planned.
+Native PVA search and RecCeiver catalog registration are delivered. The legacy
+sidecar is retired, with historical source/images retained in the
+[migration notes](legacy-sidecar.md); no replacement repository is planned.
+Conventional IOC hosting and a CA facade remain outside the core release scope.
+Production fleet rollout is separate from release qualification.
 
-### Release maturity
-
-Automated runtime image publishing and GitHub Releases were completed in
-[#8](https://github.com/fermi-ad/redis-pvxs-ioc/issues/8). Remaining release work
-focuses on dependency hygiene, public contributor safety, reproducible provenance,
-and keeping checked-in image examples synchronized with immutable release digests.
-
-## Expected public-interface evolution
-
-Future work may introduce a versioned definition schema, new normative PVA types,
-and Redis-backed definitions. Native ASG assignment already exists. None of these should silently reinterpret an existing YAML
-contract or change the meaning of current `NTScalar`/`NTScalarArray` PVs.
+Existing schema-version handling, ASG assignment and runtime interfaces are
+implemented behavior. Future definition, wire and type changes need explicit
+compatibility decisions; they must not silently reinterpret valid YAML or Redis
+payloads. Current confirmation observes readback rather than command causality,
+and control limits remain advisory. Tolerance, opt-in range enforcement and causal
+correlation remain distinct candidates, not delivered features.
 
 ## Acceptance principles
 

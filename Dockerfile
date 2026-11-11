@@ -14,10 +14,6 @@ COPY packaging/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
 
 FROM pinned-base AS builder
 
-ARG REDIS_PVXS_IOC_VERSION=dev
-ARG REDIS_PVXS_IOC_REVISION=unknown
-ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
-
 RUN apt-get update --error-on=any && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
@@ -40,15 +36,8 @@ WORKDIR /opt/redis-pvxs-ioc
 
 # Build the heavy third-party deps (EPICS base + pvxs) from the submodule tree
 # FIRST, so that editing the IOC sources (src/, include/, proto/, CMakeLists)
-# does not invalidate these layers. Only VERSION + third_party are needed here.
-COPY VERSION ./
+# does not invalidate these layers. Only third_party is needed here.
 COPY third_party/ third_party/
-
-RUN VERSION_FROM_FILE="$(tr -d '\n' < VERSION)" && \
-    if [ "${REDIS_PVXS_IOC_VERSION}" != "dev" ] && [ "${REDIS_PVXS_IOC_VERSION}" != "${VERSION_FROM_FILE}" ]; then \
-      echo "REDIS_PVXS_IOC_VERSION (${REDIS_PVXS_IOC_VERSION}) must match VERSION (${VERSION_FROM_FILE})" >&2; \
-      exit 1; \
-    fi
 
 RUN test -d third_party/epics-base/modules/pvData
 RUN test -d third_party/pvxs/bundle/libevent
@@ -64,6 +53,15 @@ RUN make -C third_party/pvxs configure.install setup.install src.install tools.i
 # built artifacts created by the RUN layers above).
 COPY . .
 
+# Build metadata must not invalidate package installation or dependency builds.
+ARG REDIS_PVXS_IOC_VERSION=dev
+RUN VERSION_FROM_FILE="$(tr -d '\n' < VERSION)" && \
+    if [ "${REDIS_PVXS_IOC_VERSION}" != "dev" ] && [ "${REDIS_PVXS_IOC_VERSION}" != "${VERSION_FROM_FILE}" ]; then \
+      echo "REDIS_PVXS_IOC_VERSION (${REDIS_PVXS_IOC_VERSION}) must match VERSION (${VERSION_FROM_FILE})" >&2; \
+      exit 1; \
+    fi
+
+ARG REDIS_PVXS_IOC_REVISION=unknown
 RUN cmake -S . -B build \
     -D REDIS_PVXS_IOC_BUILD_TESTS=ON \
     -D REDIS_PVXS_IOC_GIT_REVISION_OVERRIDE="${REDIS_PVXS_IOC_REVISION}"
@@ -92,10 +90,6 @@ RUN mkdir -p /opt/notices/third-party && \
 
 FROM pinned-base
 
-ARG REDIS_PVXS_IOC_VERSION=dev
-ARG REDIS_PVXS_IOC_REVISION=unknown
-ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
-
 RUN apt-get update --error-on=any && apt-get install -y --no-install-recommends \
     ca-certificates \
     iproute2 \
@@ -112,12 +106,6 @@ RUN apt-get update --error-on=any && apt-get install -y --no-install-recommends 
 
 WORKDIR /opt/redis-pvxs-ioc
 
-LABEL org.opencontainers.image.title="redis-pvxs-ioc" \
-      org.opencontainers.image.version="${REDIS_PVXS_IOC_VERSION}" \
-      org.opencontainers.image.revision="${REDIS_PVXS_IOC_REVISION}" \
-      org.opencontainers.image.source="${REDIS_PVXS_IOC_SOURCE}" \
-      org.opencontainers.image.licenses="BSD-3-Clause"
-
 COPY --from=builder /opt/runtime /opt/redis-pvxs-ioc
 COPY demo/config.yaml /etc/redis-pvxs-ioc/config.yaml
 COPY scripts/container-entrypoint.sh /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
@@ -131,6 +119,16 @@ RUN chmod +x /opt/redis-pvxs-ioc/bin/container-entrypoint.sh
 
 RUN groupadd --gid 10001 ioc && \
     useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ioc
+
+# Labels change image metadata without invalidating filesystem layers.
+ARG REDIS_PVXS_IOC_VERSION=dev
+ARG REDIS_PVXS_IOC_REVISION=unknown
+ARG REDIS_PVXS_IOC_SOURCE=https://github.com/fermi-ad/redis-pvxs-ioc
+LABEL org.opencontainers.image.title="redis-pvxs-ioc" \
+      org.opencontainers.image.version="${REDIS_PVXS_IOC_VERSION}" \
+      org.opencontainers.image.revision="${REDIS_PVXS_IOC_REVISION}" \
+      org.opencontainers.image.source="${REDIS_PVXS_IOC_SOURCE}" \
+      org.opencontainers.image.licenses="BSD-3-Clause"
 
 ENV PATH=/opt/redis-pvxs-ioc/bin/pvxs:/opt/redis-pvxs-ioc/bin/epics-base:$PATH
 ENV LD_LIBRARY_PATH=/opt/redis-pvxs-ioc/lib/epics-base:/opt/redis-pvxs-ioc/lib/pvxs:/opt/redis-pvxs-ioc/lib/libevent

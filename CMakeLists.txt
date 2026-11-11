@@ -400,7 +400,7 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
   set_tests_properties(transaction_tests PROPERTIES TIMEOUT 75)
 
   add_test(NAME reload_resources_e2e COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --
+    ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE} --notify-keyspace-events Kt --
     ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/reload_resources_e2e.py
     --ioc $<TARGET_FILE:redis-pvxs-ioc>
     --pvxget ${PVXS_ROOT}/bin/${EPICS_HOST_ARCH}/pvxget
@@ -446,6 +446,12 @@ if(REDIS_PVXS_IOC_BUILD_TESTS)
     ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
     -- $<TARGET_FILE:ntndarray_runtime_tests>)
   set_tests_properties(ntndarray_runtime_tests PROPERTIES TIMEOUT 45)
+  foreach(_reader_test runtime_tests reload_monitor_tests ntndarray_runtime_tests source_health_tests)
+    add_test(NAME ${_reader_test}_keyspace COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/scripts/run-with-redis.py --redis-server ${REDIS_SERVER_EXECUTABLE}
+      --notify-keyspace-events Kt -- $<TARGET_FILE:${_reader_test}> --keyspace)
+    set_tests_properties(${_reader_test}_keyspace PROPERTIES TIMEOUT 75)
+  endforeach()
   add_executable(ndarray_transfer tests/ndarray_transfer.cpp)
   target_link_libraries(ndarray_transfer PRIVATE redis-pvxs-ioc-core)
   add_test(NAME ndarray_transfer_e2e COMMAND ${Python3_EXECUTABLE}

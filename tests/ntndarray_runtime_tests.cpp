@@ -1,6 +1,7 @@
 #include "redis_pvxs_ioc/runtime.h"
 #include "redis_pvxs_ioc/ntndarray.h"
 #include "RedisAdapter.hpp"
+#include "reader_mode_test.h"
 #include <alarm.h>
 #include <cassert>
 #include <chrono>
@@ -26,9 +27,10 @@ RedisAdapter::Attrs frame(int32_t id, uint8_t pixel, size_t size = 4) {
           {"color_mode", "mono"}, {"unique_id", std::to_string(id)}, {"_", std::string(size, char(pixel))}};
 }
 
-int main() {
+int main(int argc, char** argv) {
   RA_Options options;
   options.cxn.port = std::stoi(std::getenv("REDIS_PVXS_TEST_REDIS_PORT"));
+  selectTestReaderMode(options, argc, argv);
   auto redis = std::make_shared<RedisAdapter>("ndarray", options);
   RedisAdapter producer("ndarray", options);
   RedisBackendRegistry backends{{"default", redis}};
@@ -54,6 +56,7 @@ int main() {
   auto one = make(image); one->activate();
   image.name = "two";
   auto two = make(image); two->activate();
+  assertTestReaderBackend(*redis, options);
   auto server = pvxs::server::Config::isolated(AF_INET).build();
   server.addPV("TEST:one", one->sharedPV()); server.addPV("TEST:two", two->sharedPV()); server.start();
   auto client = server.clientConfig().build();

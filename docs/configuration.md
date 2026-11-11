@@ -107,6 +107,7 @@ redis:
   password: optional-password
   workers: 1
   readers: 1
+  reader_mode: blocking
   reader_probe_ms: 1000
 ```
 
@@ -141,6 +142,29 @@ redis_backends:
 
 Each backend requires `base_key`, `host`, and `port`. `user` and `password`
 default to empty; `workers` and `readers` default to `1`.
+`reader_mode` accepts `blocking` (the default) or `keyspace`. Set it per backend
+to opt into notification-driven reads when many subscribed streams make grouped
+blocking reads expensive. Redis must publish stream keyspace notifications
+(`K` plus `t`, or an existing equivalent such as `KA`); preserve any other
+notification flags when configuring the server. The IOC does not change Redis
+server configuration.
+
+In `keyspace` mode, the adapter coalesces wakeups and reads retained entries from
+saved stream IDs. It also reconciles streams on a one-second target interval,
+independently of `reader_probe_ms`. Missing notifications, subscription denial,
+or subscriber failure produce a logged fallback to blocking reads with retry.
+When CONFIG inspection is denied, the adapter waits for actual notification
+evidence before switching. Fallback preserves data-read continuity but can
+restore the original CPU cost. Backend/reason transitions appear in the adapter
+logs; the C++ `readerBackendStatus()` accessor distinguishes requested and
+effective mode. Reconciliation cannot recover entries that producers have
+already trimmed.
+
+Changing `reader_mode` uses the existing transactional reload: the changed
+backend and its dependent PV runtimes are replaced; unrelated backends retain
+their resources. Selecting `blocking` rolls back the reader strategy without
+changing Redis keys or payloads. Omitting the option and explicitly selecting
+`blocking` are equivalent.
 Worker/reader counts must be 1–256 and the Redis port must be 1–65535. Server
 ports may still be zero to request an ephemeral port.
 

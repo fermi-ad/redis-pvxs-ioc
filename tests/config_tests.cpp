@@ -763,6 +763,25 @@ pvs:
   auto probeChanged = beforeHealth.redisBackends.at("default"); probeChanged.readerProbeMs = 0;
   assert(!sameRedisConfig(beforeHealth.redisBackends.at("default"), probeChanged));
   const auto defaults = loadConfigString(kLegacyConfig);
+  assert(defaults.redisBackends.at("default").readerMode == RedisReaderMode::Blocking);
+  const auto explicitBlocking = loadConfigString(healthBase + ", reader_mode: blocking}" + healthPV + "}}]");
+  const auto omittedMode = loadConfigString(healthBase + "}" + healthPV + "}}]");
+  assert(sameRedisBackends(explicitBlocking.redisBackends, omittedMode.redisBackends));
+  const auto keyspaceMode = loadConfigString(healthBase + ", reader_mode: keyspace, reader_probe_ms: 0}" + healthPV + "}}]");
+  assert(keyspaceMode.redisBackends.at("default").readerMode == RedisReaderMode::Keyspace);
+  assert(keyspaceMode.redisBackends.at("default").readerProbeMs == 0);
+  assert(!sameRedisBackends(keyspaceMode.redisBackends, omittedMode.redisBackends));
+  auto namedModeText = std::string(kMultiBackendConfig);
+  namedModeText.insert(namedModeText.find("    base_key: BPM\n"), "    reader_mode: keyspace\n");
+  const auto namedMode = loadConfigString(namedModeText);
+  assert(namedMode.redisBackends.at("digit10").readerMode == RedisReaderMode::Keyspace);
+  assert(namedMode.redisBackends.at("system").readerMode == RedisReaderMode::Blocking);
+  for (const auto* setting : {"reader_mode: ''", "reader_mode: unknown", "reader_mode: KEYSPACE",
+                             "reader_mode: [keyspace]", "reader_mode: {value: keyspace}",
+                             "reader_mode: null", "reader_mode: keyspace, reader_mode: blocking"}) {
+    const auto text = healthBase + ", " + setting + "}" + healthPV + "}}]";
+    assert(throwsConfig(text.c_str()));
+  }
   assert(defaults.redisBackends.at("default").readerProbeMs == 1000);
   assert(defaults.pvs[0].sourceHealth.required && defaults.pvs[0].sourceHealth.staleAfterMs == 0);
   for (const auto* setting : {"reader_probe_ms: -1", "reader_probe_ms: 99", "reader_probe_ms: 60001", "reader_probe_ms: 1.5", "reader_probe_mz: 1000"}) {

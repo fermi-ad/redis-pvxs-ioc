@@ -112,6 +112,14 @@ std::string fingerprint(const CurrentConversion& source) {
   binding.channels.push_back({2, source.applied, "current-conversion-float32-v1", 0.0f, 0.0f});
   return fingerprint(binding);
 }
+std::string fingerprint(const WaveformStatistics& source) {
+  Source binding = source;
+  binding.format = "waveform-statistics-float32-v1";
+  binding.channels = {{1, source.sampleOutput, source.meanOutput},
+                      {2, source.index.setting, source.index.applied, float(source.index.bootstrap)},
+                      {3, source.window.setting, source.window.applied, float(source.window.bootstrap)}};
+  return fingerprint(binding);
+}
 size_t inputBytes(const Source& source) {
   require(!source.channels.empty() && source.channels.size() <= maxChannels && source.samplesPerChannel > 0,
           "invalid decoder bounds");
@@ -193,14 +201,16 @@ local function fence(k,token,duration,claim)
   local now = nowms()
   local owner = redis.call('HGET',k,'writer_token')
   local expiry = tonumber(redis.call('HGET',k,'writer_until_ms') or '0')
-  if owner ~= token and (not claim or expiry > now) then error('current conversion writer lease is held by another worker') end
-  if not claim and expiry <= now then error('current conversion writer lease expired') end
+  if owner ~= token and (not claim or expiry > now) then error('writer lease is held by another worker') end
+  if not claim and expiry <= now then error('writer lease expired') end
   redis.call('HSET',k,'writer_token',token,'writer_until_ms',string.format('%.0f',now+tonumber(duration)))
 end
 )LUA";
 const std::string readScript = leaseScript + R"LUA(
 local function typ(k) return redis.call('TYPE', k).ok end
 local st, ct = typ(KEYS[1]), typ(KEYS[2])
+local statistics = ARGV[9] == 'statistics'
+local conversion = not statistics and ARGV[7] and ARGV[7] ~= ''
 if ct ~= 'none' and ct ~= 'hash' then return redis.error_reply('checkpoint must be a hash') end
 local cfg = redis.call('HGET', KEYS[2], 'config')
 if cfg and cfg ~= ARGV[1] then return redis.error_reply('checkpoint configuration mismatch') end
@@ -216,7 +226,9 @@ local function response(kind,id,payload,stamp,valid,gap,reason)
   local result
   if kind == 'reject' then result = {'reject',cursor,id,reason,gap}
   else result = {'entry',cursor,id,payload,stamp,valid,gap} end
-  if ARGV[7] and ARGV[7] ~= '' then
+  if statistics then
+    table.insert(result,redis.call('HGET',KEYS[2],'pending_metadata') or '')
+  elseif conversion then
     table.insert(result,redis.call('HGET',KEYS[2],'pending_gain') or '')
     table.insert(result,redis.call('HGET',KEYS[2],'pending_gain_command_id') or '')
     table.insert(result,redis.call('HGET',KEYS[2],'pending_metadata') or '{}')
@@ -246,7 +258,13 @@ end
 local id, fields = row[1], row[2]
 local metadata = {}
 local function retain(kind,payload,stamp,valid,reason)
-  if ARGV[7] and ARGV[7] ~= '' then
+  if statistics then
+    local settings = redis.call('HMGET',KEYS[2],'index_value','window_value')
+    if not settings[1] or #settings[1] ~= 2 or not settings[2] or #settings[2] ~= 1 then
+      return redis.error_reply('validated waveform statistics settings are unavailable')
+    end
+    redis.call('HSET',KEYS[2],'pending_metadata',settings[1] .. settings[2])
+  elseif conversion then
     local gain = redis.call('HGET',KEYS[2],'gain_value')
     local gainid = redis.call('HGET',KEYS[2],'gain_command_id')
     if not gain or string.len(gain) ~= 4 or not gainid then return redis.error_reply('validated current gain is unavailable') end
@@ -257,8 +275,7 @@ local function retain(kind,payload,stamp,valid,reason)
   return response(kind,id,payload,stamp,valid,gap,reason)
 end
 local function reject(reason) return retain('reject','','','',reason) end
-local conversion = ARGV[7] and ARGV[7] ~= ''
-if #fields > (conversion and 32 or 6) or #fields % 2 ~= 0 then return reject('unsupported field count') end
+if #fields > ((statistics or conversion) and 32 or 6) or #fields % 2 ~= 0 then return reject('unsupported field count') end
 local payload, stamp, valid = nil, '', ''
 local seen = {}
 for i = 1, #fields, 2 do
@@ -274,6 +291,14 @@ for i = 1, #fields, 2 do
   elseif ARGV[6] ~= '' and k == ARGV[6] then
     if string.len(v) > 1 then return reject('acquisition validity exceeds bound') end
     valid = v
+  elseif statistics and (k == 'schema' or k == 'format' or k == 'channel' or k == 'source_stream' or k == 'source_id' or k == 'source_continuity' or k == 'upstream_source_stream' or k == 'upstream_source_id' or k == 'event_counter_0' or k == 'event_counter_1' or k == 'gain' or k == 'gain_command_id' or k == 'acquisition_time_valid') then
+    if #v > 512 then return reject('producer metadata exceeds bound') end
+    if k == 'acquisition_time_valid' and v ~= '0' then return reject('waveform statistics requires unavailable acquisition time') end
+    if k == 'format' and v ~= 'float32-le' then return reject('unsupported waveform statistics input format') end
+    if k == 'source_continuity' then
+      if v == 'unknown' then gap = '1'
+      elseif v ~= 'observed' then return reject('invalid waveform statistics input continuity') end
+    end
   elseif conversion and (k == 'schema' or k == 'format' or k == 'channel' or k == 'source_stream' or k == 'source_id' or k == 'source_continuity' or k == 'event_counter_0' or k == 'event_counter_1' or k == 'acquisition_time_valid') then
     if string.len(v) > 512 then return reject('producer metadata exceeds bound') end
     if k == 'acquisition_time_valid' and v ~= '0' then return reject('valid acquisition time requires configured timestamp fields') end
@@ -438,11 +463,7 @@ end
 return 'hydrated'
 )LUA";
 
-// KEYS[4..] are the other conversions sharing this global gain. All worker
-// states are validated and updated before the one readback acknowledgement.
-// An immutable pending ack ID makes retries idempotent after partial Lua work.
-const std::string gainApplyScript = leaseScript + R"LUA(
-local function typ(k) return redis.call('TYPE',k).ok end
+const std::string legacyTimeScript = R"LUA(
 local function legacyTime(id,message)
   local m,n = string.match(id,'^(%d+)%-(%d+)$')
   if not m or #id > 41 or (#m > 1 and string.sub(m,1,1) == '0') or (#n > 1 and string.sub(n,1,1) == '0') then error(message) end
@@ -450,6 +471,13 @@ local function legacyTime(id,message)
   if not ms or not ns or ns > 999999 or ms > 9223372036853 or (ms == 0 and ns == 0) then error(message) end
   return ms,ns
 end
+)LUA";
+
+// KEYS[4..] are the other conversions sharing this global gain. All worker
+// states are validated and updated before the one readback acknowledgement.
+// An immutable pending ack ID makes retries idempotent after partial Lua work.
+const std::string gainApplyScript = leaseScript + legacyTimeScript + R"LUA(
+local function typ(k) return redis.call('TYPE',k).ok end
 if typ(KEYS[1]) ~= 'hash' or redis.call('HGET',KEYS[1],'config') ~= ARGV[1] then return redis.error_reply('checkpoint configuration mismatch') end
 if typ(KEYS[3]) ~= 'none' and typ(KEYS[3]) ~= 'stream' then return redis.error_reply('applied gain must be a stream') end
 local checkpoints = {KEYS[1]}
@@ -509,6 +537,93 @@ end
 return 'applied'
 )LUA";
 
+// Stage each accepted setting before publishing its readback. If publication
+// succeeds but Redis loses the reply, the readback's command ID identifies it.
+// Commands are bounded to one entry per parameter per polling round.
+const std::string statisticsSettingsScript = leaseScript + legacyTimeScript + R"LUA(
+local checkpoint = KEYS[1]
+local function typ(k) return redis.call('TYPE',k).ok end
+local ct = typ(checkpoint)
+if ct ~= 'none' and ct ~= 'hash' then return redis.error_reply('checkpoint must be a hash') end
+for i=2,#KEYS do
+  local k = KEYS[i]
+  if k ~= checkpoint and typ(k) ~= 'none' and typ(k) ~= 'stream' then
+    return redis.error_reply('waveform setting and applied keys must be streams')
+  end
+end
+if ct == 'none' then
+  redis.call('HSET',checkpoint,'config',ARGV[1],'source_stream',ARGV[2],'last_id',ARGV[3],
+    'processed',0,'rejected',0,'gaps',0)
+end
+if redis.call('HGET',checkpoint,'config') ~= ARGV[1] or redis.call('HGET',checkpoint,'source_stream') ~= ARGV[2] then
+  return redis.error_reply('waveform statistics checkpoint binding mismatch')
+end
+fence(checkpoint,ARGV[4],ARGV[5],true)
+
+local function acknowledge(applied,id,value)
+  local last = redis.call('XREVRANGE',applied,'+','-','COUNT',1)
+  local ms,ns = legacyTime(ARGV[9],'invalid waveform acknowledgement clock')
+  local function advance(other)
+    local m,n = legacyTime(other,'invalid waveform setting or applied stream ID')
+    if m > ms or (m == ms and n >= ns) then
+      ms,ns = m,n+1
+      if ns == 1000000 then ms,ns = ms+1,0 end
+    end
+  end
+  if id ~= 'bootstrap' then advance(id) end
+  if #last ~= 0 then
+    local fields = last[1][2]
+    if #fields == 4 and fields[1] == '_' and fields[2] == value
+        and fields[3] == 'setting_command_id' and fields[4] == id then return end
+    if id == 'bootstrap' then error('waveform statistics applied stream already has history') end
+    advance(last[1][1])
+  end
+  redis.call('XADD',applied,'MAXLEN','=',1,string.format('%.0f-%.0f',ms,ns),
+    '_',value,'setting_command_id',id)
+end
+
+local function apply(name,setting,applied,bootstrap,width,min,max)
+  local valueField,cursorField = name .. '_value',name .. '_cursor'
+  local pendingField,errorField = name .. '_pending',name .. '_last_error'
+  if setting == checkpoint then
+    redis.call('HSETNX',checkpoint,valueField,bootstrap)
+    return ''
+  end
+  local state = redis.call('HMGET',checkpoint,cursorField,pendingField,valueField)
+  local cursor,pending,value = state[1],state[2],state[3]
+  if not cursor then
+    local last = redis.call('XREVRANGE',setting,'+','-','COUNT',1)
+    cursor,pending,value = (#last == 0 and '0-0' or last[1][1]),'bootstrap',bootstrap
+    redis.call('HSET',checkpoint,cursorField,cursor,pendingField,pending,valueField,value)
+  elseif not pending or pending == '' then
+    local rows = redis.call('XRANGE',setting,'(' .. cursor,'+','COUNT',1)
+    if #rows == 0 then return '' end
+    local id,fields = rows[1][1],rows[1][2]
+    local valid = #fields == 2 and fields[1] == '_' and #fields[2] == width
+      and pcall(legacyTime,id,'invalid waveform setting ID')
+    if valid then
+      local n = string.byte(fields[2],1) + (width == 2 and 256 * string.byte(fields[2],2) or 0)
+      valid = n >= min and n <= max
+    end
+    if not valid then
+      local reason = name .. ' setting has invalid encoding or range'
+      redis.call('HSET',checkpoint,cursorField,id,errorField,reason,name .. '_last_rejected_id',id)
+      return reason
+    end
+    pending,value = id,fields[2]
+    redis.call('HSET',checkpoint,cursorField,id,pendingField,pending,valueField,value)
+  end
+  if not value or #value ~= width then error('invalid pending waveform setting') end
+  acknowledge(applied,pending,value)
+  redis.call('HSET',checkpoint,pendingField,'',errorField,'')
+  return ''
+end
+
+local indexError = apply('index',KEYS[2],KEYS[3],ARGV[7],2,0,tonumber(ARGV[6]))
+local windowError = apply('window',KEYS[4],KEYS[5],ARGV[8],1,1,64)
+return indexError ~= '' and indexError or windowError
+)LUA";
+
 const std::string releaseScript = R"LUA(
 for _,k in ipairs(KEYS) do
   if redis.call('TYPE',k).ok == 'hash' and redis.call('HGET',k,'writer_token') == ARGV[1] then redis.call('HSET',k,'writer_until_ms','0') end
@@ -539,7 +654,7 @@ Config parseConfig(const std::string& yaml) {
   const auto docs = YAML::LoadAll(yaml);
   require(docs.size() == 1, "demux config requires exactly one YAML document");
   const auto root = docs.front();
-  keys(root, {"schema_version", "redis", "sources", "current_conversions"}, "demux");
+  keys(root, {"schema_version", "redis", "sources", "current_conversions", "waveform_statistics"}, "demux");
   require(root["schema_version"] && root["schema_version"].as<int>() == 1, "unsupported demux schema_version");
   Config config;
   const auto redis = root["redis"];
@@ -647,7 +762,62 @@ Config parseConfig(const std::string& yaml) {
     source.fingerprint = fingerprint(source);
     config.currentConversions.push_back(std::move(source));
   }
-  require(!config.sources.empty() || !config.currentConversions.empty(),"demux requires sources or current_conversions");
+  const auto statistics = root["waveform_statistics"];
+  require(!statistics || (statistics.IsSequence() && statistics.size() <= maxSources),
+          "waveform_statistics requires at most 32 entries");
+  std::map<std::string, size_t> waveformOutputs;
+  for (const auto& source : config.sources)
+    for (const auto& channel : source.channels)
+      waveformOutputs.emplace(channel.volts, source.samplesPerChannel);
+  for (const auto& source : config.currentConversions)
+    waveformOutputs.emplace(source.output, source.samplesPerChannel);
+  std::set<std::string> statisticsInputs;
+  const auto uniqueKey = [&](const YAML::Node& node, const std::string& field) {
+    const auto value = text(node, field);
+    require(allKeys.insert(value).second, "source/checkpoint/output/setting keys must be globally disjoint");
+    return value;
+  };
+  const auto parameter = [&](const YAML::Node& node, const std::string& field,
+                             unsigned minimum, unsigned maximum) {
+    keys(node, {"bootstrap", "setting", "applied"}, field);
+    WaveformParameter value;
+    require(node["bootstrap"].IsDefined(), field + ".bootstrap must be explicit");
+    value.bootstrap = number(node["bootstrap"], 0, minimum, maximum, field + ".bootstrap");
+    require(node["setting"].IsDefined() == node["applied"].IsDefined(),
+            field + " requires both setting and applied keys, or neither");
+    if (node["setting"]) {
+      value.setting = uniqueKey(node["setting"], field + ".setting");
+      value.applied = uniqueKey(node["applied"], field + ".applied");
+    }
+    return value;
+  };
+  for (const auto& node : statistics) {
+    keys(node, {"stream", "checkpoint", "start_id", "samples_per_waveform", "sample_output",
+                "mean_output", "retention", "index", "window"}, "waveform_statistics");
+    WaveformStatistics source;
+    source.stream = text(node["stream"], "waveform_statistics.stream");
+    const auto input = waveformOutputs.find(source.stream);
+    require(statisticsInputs.insert(source.stream).second &&
+            (input != waveformOutputs.end() || allKeys.insert(source.stream).second),
+            "source/checkpoint/output/setting keys must be globally disjoint");
+    source.checkpoint = uniqueKey(node["checkpoint"], "waveform_statistics.checkpoint");
+    source.sampleOutput = uniqueKey(node["sample_output"], "waveform_statistics.sample_output");
+    source.meanOutput = uniqueKey(node["mean_output"], "waveform_statistics.mean_output");
+    source.startId = text(node["start_id"], "waveform_statistics.start_id");
+    streamId(source.startId);
+    source.samplesPerChannel = number(node["samples_per_waveform"], 0, 1, 65536, "samples_per_waveform");
+    require(source.samplesPerChannel > 0, "samples_per_waveform must be explicit");
+    require(input == waveformOutputs.end() || input->second == source.samplesPerChannel,
+            "waveform statistics sample count must match its producer output");
+    source.retention = number(node["retention"], 0, 1, 100000, "retention");
+    require(source.retention > 0, "waveform statistics retention must be explicit");
+    source.index = parameter(node["index"], "index", 0, source.samplesPerChannel - 1);
+    source.window = parameter(node["window"], "window", 1, 64);
+    source.fingerprint = fingerprint(source);
+    config.waveformStatistics.push_back(std::move(source));
+  }
+  require(!config.sources.empty() || !config.currentConversions.empty() || !config.waveformStatistics.empty(),
+          "demux requires sources, current_conversions or waveform_statistics");
   return config;
 }
 
@@ -779,6 +949,39 @@ Record convertCurrent(const CurrentConversion& source, const std::string& source
 }
 
 namespace {
+std::string unsignedBytes(unsigned value, size_t width) {
+  std::string bytes(width, '\0');
+  for (size_t i = 0; i < width; ++i) bytes[i] = static_cast<char>((value >> (8 * i)) & 0xff);
+  return bytes;
+}
+
+std::vector<Record> summarize(const WaveformStatistics& source, const std::string& id,
+                              const std::string& payload, const std::string& settings, bool gap) {
+  inputRequire(payload.size() == source.samplesPerChannel * 4, "waveform statistics input has wrong size");
+  require(settings.size() == 3, "pending waveform settings have wrong size");
+  const size_t index = static_cast<unsigned char>(settings[0]) +
+                       256u * static_cast<unsigned char>(settings[1]);
+  const size_t window = static_cast<unsigned char>(settings[2]);
+  require(index < source.samplesPerChannel && window >= 1 && window <= 64,
+          "pending waveform settings are out of range");
+  const size_t count = std::min(index + 1, window);
+  double sum = 0;
+  for (size_t i = index + 1 - count; i <= index; ++i) {
+    const float value = readFloat(payload, i * 4);
+    inputRequire(std::isfinite(value), "waveform statistics window contains nonfinite float32");
+    sum += value;
+  }
+  auto record = [&](const std::string& key, std::string value) {
+    return Record{key, {{"_", std::move(value)}, {"schema", "fermi-ad/waveform-statistics:1"},
+      {"format", "float32-le"}, {"source_stream", source.stream}, {"source_id", id},
+      {"acquisition_time_valid", "0"}, {"source_continuity", gap ? "unknown" : "observed"},
+      {"sample_index", std::to_string(index)}, {"window_size", std::to_string(count)}}};
+  };
+  std::string mean(4, '\0');
+  floatBytes(mean, 0, static_cast<float>(sum / count));
+  return {record(source.sampleOutput, payload.substr(index * 4, 4)), record(source.meanOutput, std::move(mean))};
+}
+
 struct WorkerLane {
   Config config;
   mutable std::mutex mutex;
@@ -830,10 +1033,12 @@ struct WorkerLane {
     return context;
   }
   void releaseLeases(Context& context) {
-    if (config.currentConversions.empty()) return;
+    const auto size = config.currentConversions.size() + config.waveformStatistics.size();
+    if (!size) return;
     if (!context || context->err) context = connect(true);
-    std::vector<std::string> args{"EVAL",releaseScript,std::to_string(config.currentConversions.size())};
+    std::vector<std::string> args{"EVAL",releaseScript,std::to_string(size)};
     for (const auto& source : config.currentConversions) args.push_back(source.checkpoint);
+    for (const auto& source : config.waveformStatistics) args.push_back(source.checkpoint);
     args.push_back(writerToken);
     const std::atomic<bool> releaseStopping{false};
     command(context.get(),args,50,releaseStopping);
@@ -968,6 +1173,39 @@ struct WorkerLane {
     }
     return commit(context,source,previous,id,records,error,gap,true);
   }
+  bool pollStatistics(redisContext* context, const WaveformStatistics& source) {
+    const auto key = [&](const std::string& value) -> const std::string& {
+      return value.empty() ? source.checkpoint : value;
+    };
+    const auto lease = std::to_string(leaseMs);
+    const auto settings = command(context, {"EVAL", statisticsSettingsScript, "5", source.checkpoint,
+      key(source.index.setting), key(source.index.applied), key(source.window.setting), key(source.window.applied),
+      source.fingerprint, source.stream, source.startId, writerToken, lease,
+      std::to_string(source.samplesPerChannel - 1), unsignedBytes(source.index.bootstrap, 2),
+      unsignedBytes(source.window.bootstrap, 1), legacyNowId()}, config.commandTimeoutMs, stopping);
+    const auto settingError = str(settings.get());
+    if (!settingError.empty()) update("rejected-setting", source.stream + ": " + settingError);
+
+    const auto reply = command(context, {"EVAL", readScript, "2", source.stream, source.checkpoint,
+      source.fingerprint, source.startId, source.payloadField, std::to_string(source.samplesPerChannel * 4),
+      "", "", writerToken, lease, "statistics"}, config.commandTimeoutMs, stopping);
+    require(reply->type == REDIS_REPLY_ARRAY && reply->elements >= 2, "invalid waveform statistics read reply");
+    const auto kind = str(reply->element[0]);
+    if (kind == "empty" || stopping) return false;
+    require((kind == "entry" && reply->elements == 8) || (kind == "reject" && reply->elements == 6),
+            "invalid waveform statistics record");
+    const auto previous = str(reply->element[1]), id = str(reply->element[2]);
+    streamId(previous); streamId(id);
+    const bool gap = str(reply->element[kind == "entry" ? 6 : 4]) == "1";
+    std::string error;
+    std::vector<Record> records;
+    if (kind == "reject") error = str(reply->element[3]);
+    else {
+      try { records = summarize(source, id, str(reply->element[3]), str(reply->element[7]), gap); }
+      catch (const InputError& failure) { error = failure.what(); }
+    }
+    return commit(context, source, previous, id, records, error, gap, true);
+  }
   void run() noexcept {
     Context context(nullptr, &redisFree);
     while (!stopping) {
@@ -1035,6 +1273,14 @@ struct WorkerLane {
             update("retrying",source.stream + ": " + error.what()); failed = true;
           }
         }
+        for (const auto& source : config.waveformStatistics) {
+          if (stopping || context->err) break;
+          try { work |= pollStatistics(context.get(), source); }
+          catch (const std::exception& error) {
+            { std::lock_guard<std::mutex> lock(mutex); ++status.failures; }
+            update("retrying", source.stream + ": " + error.what()); failed = true;
+          }
+        }
       } catch (const std::exception& error) {
         { std::lock_guard<std::mutex> lock(mutex); ++status.failures; }
         update("retrying", error.what()); failed = true;
@@ -1042,7 +1288,7 @@ struct WorkerLane {
       if (failed) { context.reset(); wait(config.retryMs); }
       else if (!work) wait(config.pollIntervalMs);
     }
-    if (!config.currentConversions.empty()) {
+    if (!config.currentConversions.empty() || !config.waveformStatistics.empty()) {
       try {
         // A stop may interrupt an unanswered command and discard its socket.
         // Use a fresh, separately bounded connection to release our own lease;
@@ -1060,7 +1306,15 @@ struct Worker::Impl {
   std::vector<std::unique_ptr<WorkerLane>> lanes;
   std::mutex lifecycle;
   explicit Impl(Config config) {
-    require(!config.sources.empty() || !config.currentConversions.empty(), "demux worker requires validated sources or current conversions");
+    require(!config.sources.empty() || !config.currentConversions.empty() || !config.waveformStatistics.empty(),
+            "demux worker requires validated sources, current conversions or waveform statistics");
+    if (!config.waveformStatistics.empty() && (!config.sources.empty() || !config.currentConversions.empty())) {
+      auto statistics = config;
+      statistics.sources.clear();
+      statistics.currentConversions.clear();
+      config.waveformStatistics.clear();
+      lanes.push_back(std::make_unique<WorkerLane>(std::move(statistics)));
+    }
     if (!config.sources.empty() && !config.currentConversions.empty()) {
       // Redis VOLTS streams are the existing bounded handoff. Raw ingestion
       // must not wait for downstream conversions or their gain-lease retries.
@@ -1093,7 +1347,7 @@ struct Worker::Impl {
     const auto priority = [](const Status& value) {
       if (!value.running) return 0;
       if (value.state == "retrying") return 90;
-      if (value.state == "rejected-gain") return 80;
+      if (value.state == "rejected-gain" || value.state == "rejected-setting") return 80;
       if (value.state == "rejected-input") return 70;
       if (value.state == "continuity-unknown") return 60;
       if (value.state == "connecting") return 50;

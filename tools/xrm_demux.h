@@ -27,6 +27,14 @@ struct CurrentConversion : Source {
   std::string output, setting, applied;
   float bootstrap = 2.5f;
 };
+struct WaveformParameter {
+  unsigned bootstrap = 0;
+  std::string setting, applied;
+};
+struct WaveformStatistics : Source {
+  std::string sampleOutput, meanOutput;
+  WaveformParameter index, window;
+};
 struct Config {
   std::string host = "127.0.0.1";
   unsigned port = 6379, db = 0;
@@ -34,6 +42,7 @@ struct Config {
   unsigned pollIntervalMs = 100, retryMs = 1000;
   std::vector<Source> sources;
   std::vector<CurrentConversion> currentConversions;
+  std::vector<WaveformStatistics> waveformStatistics;
 };
 struct Status {
   bool running = false;

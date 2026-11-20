@@ -220,6 +220,15 @@ int openLogSink() {
 #endif
   int fd = ::open("/proc/self/fd/2", flags);
   if (fd < 0) fd = ::open("/dev/fd/2", flags);
+  if (fd >= 0) {
+    // Some /dev/fd implementations duplicate the original file description
+    // and ignore the requested status flags. Verify without changing stderr.
+    const int status = ::fcntl(fd, F_GETFL, 0);
+    if (status < 0 || !(status & O_NONBLOCK)) {
+      ::close(fd);
+      fd = -1;
+    }
+  }
   if (fd < 0) {
     const auto original = ::fcntl(STDERR_FILENO, F_GETFL, 0);
     if (original >= 0 && (original & O_NONBLOCK)) fd = ::dup(STDERR_FILENO);
@@ -261,6 +270,12 @@ Config parseConfig(const std::string& yaml, const xrm_demux::Config& demux) {
     sourceKeys(conversion);
     disjoint(conversion.output); disjoint(conversion.setting); disjoint(conversion.applied);
   }
+  for (const auto& statistics : demux.waveformStatistics) {
+    sourceKeys(statistics);
+    disjoint(statistics.sampleOutput); disjoint(statistics.meanOutput);
+    disjoint(statistics.index.setting); disjoint(statistics.index.applied);
+    disjoint(statistics.window.setting); disjoint(statistics.window.applied);
+  }
   keys(root["device"], {"host", "port"}, "capture.device");
   result.host = ipv4(text(root["device"]["host"], "capture.device.host"));
   require(root["device"]["port"].IsScalar(), "capture.device.port must be explicit");
@@ -277,6 +292,7 @@ Config parseConfig(const std::string& yaml, const xrm_demux::Config& demux) {
   // Retain only Redis connection policy, rather than another copy of all lanes.
   result.redis.sources.clear();
   result.redis.currentConversions.clear();
+  result.redis.waveformStatistics.clear();
   return result;
 }
 Config loadConfig(const std::string& path, const xrm_demux::Config& demux) {

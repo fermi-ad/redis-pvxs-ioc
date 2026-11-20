@@ -198,6 +198,107 @@ struct SlowPeer {
   }
 };
 
+void statisticsTests(Redis& redis, int port) {
+  const auto yaml = "schema_version: 1\nredis: {host: 127.0.0.1, port: " + std::to_string(port) + R"YAML(, command_timeout_ms: 100, poll_interval_ms: 5, retry_ms: 20}
+waveform_statistics:
+  - stream: 'statistics-test:wave'
+    checkpoint: 'statistics-test:checkpoint'
+    start_id: '0-0'
+    samples_per_waveform: 4
+    sample_output: 'statistics-test:sample'
+    mean_output: 'statistics-test:mean'
+    retention: 2
+    index: {bootstrap: 2, setting: 'statistics-test:index:S', applied: 'statistics-test:index:R'}
+    window: {bootstrap: 2, setting: 'statistics-test:window:S', applied: 'statistics-test:window:R'}
+)YAML";
+  const auto config = parseConfig(yaml);
+  const auto& source = config.waveformStatistics.front();
+  const auto rejectsConfig = [&](const std::string& from, const std::string& to) {
+    auto invalid = yaml;
+    const auto offset = invalid.find(from);
+    assert(offset != std::string::npos);
+    invalid.replace(offset, from.size(), to);
+    try { parseConfig(invalid); } catch (const std::runtime_error&) { return; }
+    assert(false && "invalid statistics configuration accepted");
+  };
+  rejectsConfig(source.meanOutput, source.stream);
+  rejectsConfig(source.index.applied, source.window.setting);
+  rejectsConfig(", applied: 'statistics-test:index:R'", "");
+  rejectsConfig("samples_per_waveform: 4", "samples_per_waveform: 2");
+  rejectsConfig("window: {bootstrap: 2", "window: {bootstrap: 65");
+  const std::string waveform = f32(1.f) + f32(2.f) + f32(3.f) + f32(4.f);
+  const auto publish = [&](const std::string& id, const std::string& bytes) {
+    redis.command({"XADD", source.stream, id, "_", bytes});
+  };
+  const auto check = [&](const std::string& id, float sample, float mean, const std::string& window) {
+    eventually([&] { return redis.field(source.checkpoint, "last_id") == id; });
+    const auto selected = redis.row(source.sampleOutput, id);
+    const auto averaged = redis.row(source.meanOutput, id);
+    assert(selected.at("_") == f32(sample) && averaged.at("_") == f32(mean));
+    assert(averaged.at("window_size") == window);
+    for (const auto& record : {selected, averaged}) {
+      assert(record.at("source_id") == id && record.at("source_stream") == source.stream);
+      assert(record.at("acquisition_time_valid") == "0" && !record.count("acquisition_time_ns"));
+    }
+  };
+  const std::string indexZero(2, '\0'), indexLast("\x03\x00", 2);
+  const std::string countTwo(1, '\x02'), countFour(1, '\x04'), countZero(1, '\0');
+  redis.command({"XADD", source.index.setting, "1-0", "_", indexZero});
+  Worker worker(config);
+  worker.start();
+  eventually([&] { return !redis.latestId(source.window.applied).empty(); });
+  assert(redis.row(source.window.applied, redis.latestId(source.window.applied)).at("_") == countTwo);
+  publish("1-0", waveform);
+  check("1-0", 3.f, 2.5f, "2"); // initial command predates adoption
+  {
+    Worker other(config);
+    other.start();
+    eventually([&] { return other.status().error.find("writer lease") != std::string::npos; });
+    other.stop();
+  }
+  const auto acknowledgement = redis.latestId(source.window.applied);
+  redis.command({"XADD", source.window.setting, "2-0", "_", countZero});
+  eventually([&] { return redis.field(source.checkpoint, "window_last_rejected_id") == "2-0"; });
+  assert(redis.latestId(source.window.applied) == acknowledgement);
+  redis.command({"XADD", source.index.setting, "2-0", "_", indexZero});
+  redis.command({"XADD", source.window.setting, "3-0", "_", countFour});
+  eventually([&] { return redis.field(source.checkpoint, "index_value") == indexZero &&
+                         redis.field(source.checkpoint, "window_value") == countFour; });
+  publish("2-0", waveform);
+  check("2-0", 1.f, 1.f, "1"); // window clips at the first sample
+  publish("3-0", f32(std::numeric_limits<float>::quiet_NaN()) + waveform.substr(4));
+  publish("4-0", waveform.substr(4));
+  redis.command({"XADD", source.stream, "5-0", "_", waveform, "source_continuity", "invalid"});
+  eventually([&] { return redis.field(source.checkpoint, "last_id") == "5-0"; });
+  assert(redis.field(source.checkpoint, "rejected") == "3");
+  assert(redis.latestId(source.meanOutput) == "2-0");
+  worker.stop();
+
+  // Block one output, then change the index while a waveform is pending.
+  // Both outputs for that waveform must continue to use the saved parameters.
+  redis.command({"RENAME", source.meanOutput, "statistics-test:mean-saved"});
+  redis.command({"SET", source.meanOutput, "wrong Redis type"});
+  worker.start();
+  publish("6-0", waveform);
+  eventually([&] { return redis.field(source.checkpoint, "pending_id") == "6-0"; });
+  assert(redis.latestId(source.sampleOutput) == "2-0");
+  redis.command({"XADD", source.index.setting, "3-0", "_", indexLast});
+  eventually([&] { return redis.field(source.checkpoint, "index_value") == indexLast; });
+  worker.stop();
+  redis.command({"RENAME", "statistics-test:mean-saved", source.meanOutput});
+  worker.start();
+  check("6-0", 1.f, 1.f, "1");
+  redis.command({"CLIENT", "PAUSE", "350", "ALL"});
+  eventually([&] { return worker.status().state == "retrying"; });
+  publish("7-0", waveform);
+  check("7-0", 4.f, 2.5f, "4");
+  worker.stop();
+  assert(redis.command({"XLEN", source.stream})->integer == 7);
+  assert(redis.command({"XLEN", source.sampleOutput})->integer == 2);
+  assert(redis.command({"XLEN", source.meanOutput})->integer == 2);
+  assert(redis.field(source.checkpoint, "processed") == "4");
+}
+
 int main() {
   const auto env = std::getenv("REDIS_PVXS_TEST_REDIS_PORT"); assert(env);
   const int port = std::atoi(env); assert(port > 0);
@@ -906,5 +1007,6 @@ current_conversions:
     const auto started = std::chrono::steady_clock::now(); worker.stop();
     assert(std::chrono::steady_clock::now() - started < 500ms);
   }
+  statisticsTests(redis, port);
   std::cout << "xrm demux isolated Redis fixture tests passed\n";
 }

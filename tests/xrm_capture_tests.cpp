@@ -119,6 +119,17 @@ void parseTests() {
     invalid.currentConversions.push_back(conversion);
     rejects([&] { xrm_capture::parseConfig(yaml, invalid); });
   }
+  auto combined = source;
+  combined.waveformStatistics.emplace_back();
+  auto& statistics = combined.waveformStatistics.front();
+  for (auto* key : {&statistics.stream, &statistics.checkpoint, &statistics.sampleOutput,
+                    &statistics.meanOutput, &statistics.index.setting, &statistics.index.applied,
+                    &statistics.window.setting, &statistics.window.applied}) {
+    *key = leaseKey;
+    rejects([&] { xrm_capture::parseConfig(yaml, combined); });
+    key->clear();
+  }
+  assert(xrm_capture::parseConfig(yaml, combined).redis.waveformStatistics.empty());
 }
 void framingTests() {
   const auto first = pulse(1), second = pulse(2);

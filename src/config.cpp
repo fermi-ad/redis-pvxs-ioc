@@ -713,8 +713,10 @@ PVConfig parsePV(const YAML::Node& node, const std::string& path) {
   if (const auto sourceTime = node["source_time"]) {
     pv.sourceTime = parseSourceTime(sourceTime, path + ".source_time");
     if (pv.sourceTime.mode != SourceTimeMode::LegacyRedisId &&
-        (pv.kind != PVKind::Value || pv.shape != Shape::Array || !isNumericType(pv.type) || pv.write || pv.confirm))
-      fail(path + ".source_time", "nonlegacy modes require a read-only numeric array");
+        (pv.kind != PVKind::Value || !isNumericType(pv.type) || pv.write || pv.confirm))
+      fail(path + ".source_time", "nonlegacy modes require a read-only numeric PV");
+    if (pv.sourceTime.mode == SourceTimeMode::UnixNanosecondsV1 && pv.shape != Shape::Array)
+      fail(path + ".source_time", "unix-nanoseconds-v1 requires a numeric array");
   }
 
   if (pv.shape == Shape::Array && !isArrayElementTypeSupported(pv.type)) {

@@ -220,6 +220,15 @@ int openLogSink() {
 #endif
   int fd = ::open("/proc/self/fd/2", flags);
   if (fd < 0) fd = ::open("/dev/fd/2", flags);
+  if (fd >= 0) {
+    // Some /dev/fd implementations duplicate the original file description
+    // and ignore the requested status flags. Verify without changing stderr.
+    const int status = ::fcntl(fd, F_GETFL, 0);
+    if (status < 0 || !(status & O_NONBLOCK)) {
+      ::close(fd);
+      fd = -1;
+    }
+  }
   if (fd < 0) {
     const auto original = ::fcntl(STDERR_FILENO, F_GETFL, 0);
     if (original >= 0 && (original & O_NONBLOCK)) fd = ::dup(STDERR_FILENO);

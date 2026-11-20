@@ -500,13 +500,26 @@ class CaptureTests(unittest.TestCase):
 
     def test_complete_capture_to_pva_preserves_waveforms_units_and_unknown_time(self):
         self.demux = self.configuration(self.redis.socket.getpeername()[1], currents=True)
-        # RedisAdapter's wire schema is {base}:sub. Produce the two IOC-facing
-        # streams with that schema, while retaining a unique per-test suffix.
+        # RedisAdapter's wire schema is {base}:sub. Retain unique test suffixes.
         volts_key = "{XRM}:" + self.channel(1, "volts")
         current_key = "{XRM}:" + self.channel(1, "current")
+        sample_key = "{XRM}:" + self.channel(1, "sample")
+        mean_key = "{XRM}:" + self.channel(1, "mean")
+        window_setting = self.channel(1, "window:S")
+        window_applied = self.channel(1, "window:R")
+        independent_key = self.prefix + ":independent"
+        self.redis.command("XADD", "{XRM}:" + independent_key, "*", "_", struct.pack("<I", 17))
         self.demux["sources"][0]["channels"][0]["volts"] = volts_key
         self.demux["current_conversions"][0]["stream"] = volts_key
         self.demux["current_conversions"][0]["output"] = current_key
+        self.demux["waveform_statistics"] = [{
+            "stream": current_key, "checkpoint": self.channel(1, "statistics"),
+            "start_id": "0-0", "samples_per_waveform": SAMPLES, "retention": 8,
+            "sample_output": sample_key, "mean_output": mean_key,
+            "index": {"bootstrap": 3},
+            "window": {"bootstrap": 1, "setting": "{XRM}:" + window_setting,
+                       "applied": "{XRM}:" + window_applied},
+        }]
         self.start()
         connection = self.device.accept()
         with socket.socket() as listener:
@@ -520,13 +533,22 @@ class CaptureTests(unittest.TestCase):
             "redis": {"host": "127.0.0.1", "port": self.redis.socket.getpeername()[1], "base_key": "XRM"},
             "discovery": {"enabled": False},
             "pvs": [
-                {"name": name, "type": "float32", "shape": "array",
+                {"name": name, "type": "float32", "shape": shape,
                  "read": {"backend": "redis", "key": self.channel(1, suffix)},
                  "source_time": {"mode": "unavailable"},
                  "source_health": {"required": False, "stale_after_ms": 0},
                  "metadata": {"units": units}}
-                for name, suffix, units in (("CAPTURE:VOLTS", "volts", "V"),
-                                            ("CAPTURE:MAMPS", "current", "mA"))],
+                for name, suffix, units, shape in (("CAPTURE:VOLTS", "volts", "V", "array"),
+                                                    ("CAPTURE:MAMPS", "current", "mA", "array"),
+                                                    ("CAPTURE:SAMPLE", "sample", "mA", "scalar"),
+                                                    ("CAPTURE:MEAN", "mean", "mA", "scalar"))] + [
+                {"name": "CAPTURE:WINDOW", "type": "uint8", "shape": "scalar",
+                 "read": {"backend": "redis", "key": window_applied},
+                 "write": {"backend": "redis", "key": window_setting},
+                 "confirm": {"backend": "redis", "key": window_applied, "timeout_ms": 4000},
+                 "source_health": {"required": False, "stale_after_ms": 0}},
+                {"name": "CAPTURE:INDEPENDENT", "type": "uint32", "shape": "scalar",
+                 "read": {"backend": "redis", "key": independent_key}}],
         }
         config_path = self.directory / "ioc.json"
         config_path.write_text(json.dumps(config))
@@ -537,15 +559,37 @@ class CaptureTests(unittest.TestCase):
             ioc = subprocess.Popen([ARGS.ioc, "--config", str(config_path)], stdout=log, stderr=log,
                                    env=environment)
             try:
+                def ready():
+                    result = subprocess.run([ARGS.pva_probe, endpoint, "SYS:capture-fixture:ready",
+                                             "--ready", "-"], capture_output=True, text=True, timeout=5)
+                    return result.returncode == 0
+
+                eventually(ready, "IOC ready before an optional waveform or scalar arrives")
+                self.assertEqual(self.redis.command("XLEN", mean_key), 0)
+                eventually(lambda: self.redis.command("XLEN", "{XRM}:" + window_applied) == 1,
+                           "statistics window bootstrap")
+                put = subprocess.run([ARGS.pva_probe, endpoint, "CAPTURE:WINDOW", "--put-window", "4"],
+                                     capture_output=True, text=True, timeout=8, env=environment)
+                self.assertEqual(put.returncode, 0, put.stdout + put.stderr + ioc_log_path.read_text())
+                self.assertEqual(self.redis.rows("{XRM}:" + window_applied)[0][1][b"_"], b"\x04")
                 expected = pulse(81)
                 connection.sendall(expected[:19])
                 connection.sendall(expected[19:])
-                self.assertEqual(self.wait_rows(1)[0][1], {b"_": expected})
+                pulse_id, raw = self.wait_rows(1)[0]
+                self.assertEqual(raw, {b"_": expected})
                 eventually(lambda: self.redis.command("XLEN", current_key) == 1,
                            "captured pulse reaches IOC-facing current stream", timeout=20)
                 _, volts, current = channel_goldens(81, 1)
+                eventually(lambda: self.redis.command("XLEN", mean_key) == 1, "waveform statistics published")
+                for key in (sample_key, mean_key):
+                    row_id, fields = self.redis.rows(key)[0]
+                    self.assertEqual((row_id, fields[b"source_id"]), (pulse_id, pulse_id))
+                sample = current[12:16]
+                mean = struct.pack("<f", sum(struct.unpack("<4f", current[:16])) / 4)
                 for name, units, golden in (("CAPTURE:VOLTS", "V", volts),
-                                             ("CAPTURE:MAMPS", "mA", current)):
+                                             ("CAPTURE:MAMPS", "mA", current),
+                                             ("CAPTURE:SAMPLE", "mA", sample),
+                                             ("CAPTURE:MEAN", "mA", mean)):
                     golden_path = self.directory / (name.replace(":", "-") + ".float32-le")
                     golden_path.write_bytes(golden)
                     last_probe = []

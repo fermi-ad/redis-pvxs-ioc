@@ -19,26 +19,44 @@ void require(bool value, const char* message) {
 int main(int argc, char** argv) {
   try {
     require(argc == 5, "usage: probe ENDPOINT PV EXPECTED_FLOAT32_LE_FILE UNITS");
-    std::ifstream input(argv[3], std::ios::binary);
-    require(input.good(), "cannot read expected waveform");
-    const std::vector<unsigned char> expected{std::istreambuf_iterator<char>(input), {}};
-    require(expected.size() == 16383u * 4u, "unexpected reference waveform size");
     pvxs::client::Config config;
     config.autoAddrList = false;
     config.addressList = {argv[1]};
     config.nameServers.clear();
     auto client = config.build();
+    if (std::string(argv[3]) == "--ready") {
+      auto ready = client.get(argv[2]).exec()->wait(2.0);
+      require(ready["value"].as<bool>(), "optional waveform sources blocked IOC readiness");
+      return 0;
+    }
+    if (std::string(argv[3]) == "--put-window") {
+      const auto count = static_cast<uint8_t>(std::stoi(argv[4]));
+      client.put(argv[2]).set("value", count).exec()->wait(5.0);
+      client.close();
+      return 0;
+    }
+    std::ifstream input(argv[3], std::ios::binary);
+    require(input.good(), "cannot read expected waveform");
+    const std::vector<unsigned char> expected{std::istreambuf_iterator<char>(input), {}};
+    require(expected.size() == 4u || expected.size() == 16383u * 4u,
+            "unexpected reference value size");
+    const bool scalar = expected.size() == 4u;
     auto value = client.get(argv[2]).exec()->wait(2.0);
-    require(value.id() == "epics:nt/NTScalarArray:1.0", "waveform normative type differs");
-    require(value["value"].type() == pvxs::TypeCode::Float32A, "waveform numeric type differs");
-    auto samples = value["value"].as<pvxs::shared_array<const float>>();
-    require(samples.size() == 16383u, "waveform sample count differs");
-    for (size_t i = 0; i < samples.size(); ++i) {
+    require(value.id() == (scalar ? "epics:nt/NTScalar:1.0" : "epics:nt/NTScalarArray:1.0"),
+            "waveform normative type differs");
+    require(value["value"].type() == (scalar ? pvxs::TypeCode::Float32 : pvxs::TypeCode::Float32A),
+            "waveform numeric type differs");
+    pvxs::shared_array<const float> samples;
+    if (!scalar) {
+      samples = value["value"].as<pvxs::shared_array<const float>>();
+      require(samples.size() == 16383u, "waveform sample count differs");
+    }
+    for (size_t i = 0; i < expected.size() / 4u; ++i) {
       const auto offset = i * 4u;
       const uint32_t wanted = uint32_t(expected[offset]) | (uint32_t(expected[offset + 1]) << 8u) |
           (uint32_t(expected[offset + 2]) << 16u) | (uint32_t(expected[offset + 3]) << 24u);
       uint32_t actual = 0;
-      const float sample = samples[i];
+      const float sample = scalar ? value["value"].as<float>() : samples[i];
       std::memcpy(&actual, &sample, sizeof(actual));
       require(actual == wanted, "waveform payload differs from independent float32 reference");
     }

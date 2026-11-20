@@ -4,8 +4,10 @@
 publishes the channel map consumed by `pva_gateway.file`. The sidecar handles
 inventory and naming; `redis-pvxs-ioc` handles downstream PVA operations and ACF.
 Optional independent workers capture the qualified TCP event profile and
-demultiplex configured Redis raw streams; stock PVA mirroring does not copy
-values through Redis. See [TCP capture](xrm-capture.md) for the explicit opt-in.
+demultiplex configured Redis raw streams. A separate optional waveform
+statistics worker reads calibrated float32 streams and publishes scalar samples
+and trailing means. See [Redis waveform processing](xrm-demux.md#optional-waveform-statistics)
+and [TCP capture](xrm-capture.md) for configuration.
 
 ```sh
 xrm-proxy --ip 10.200.8.253 --prefix SL:INST:ICM:XRM \

@@ -5,24 +5,28 @@ alongside PVA discovery. A demux configuration or Redis failure is reported
 without stopping mirror discovery. The worker never connects to a digitizer,
 opens an acquisition socket, changes controls, discovers Redis keys, or deletes
 keys. Only explicitly configured source streams are read. Writes target their
-exact outputs, checkpoints, and gain keys; raw input history is trimmed only
-with an explicit `input_retention` ownership grant. Inputs are otherwise
-unchanged. Without this option, no Redis worker or Redis connection is created.
+exact outputs, checkpoints, and configured parameter keys; raw input history
+is trimmed only with an explicit `input_retention` ownership grant. Inputs are
+otherwise unchanged. Without this option, no Redis worker or Redis connection
+is created.
 
 The same worker supports an optional `current_conversions` sequence for
-float32 VOLTS to MAMPS conversion. A configuration may contain raw `sources`,
-`current_conversions`, or both, with at least one nonempty sequence. This uses
-the existing sidecar binary and image; it introduces no Python service or
-hardware connection. Conversion-only operation can consume existing VOLTS
-streams while a separately managed raw capture and ADC processor continue.
+float32 VOLTS to MAMPS conversion and an optional `waveform_statistics`
+sequence for scalar extraction and within-waveform means. A configuration may
+contain any combination of these sequences and raw `sources`, with at least
+one nonempty sequence. This uses the existing sidecar binary and image; it
+introduces no Python service or hardware connection. Conversion-only operation
+can consume existing VOLTS streams while a separately managed raw capture and
+ADC processor continue.
 
-When a profile contains both raw sources and current conversions, raw ingestion
-and current conversion run in separate execution lanes and Redis connections.
+Raw ingestion, current conversion, and waveform statistics run in independent
+execution lanes and Redis connections when their sequences are selected.
 The configured VOLTS streams provide their existing bounded buffer; no in-memory
 queue is added. All current channels stay together for shared-gain ordering and
 lease fencing. A conversion retry does not stop raw ingestion, and aggregate
-status retains the degraded lane's error. Source-only and conversion-only
-profiles each use one lane.
+status retains the degraded lane's error. A statistics retry likewise does not
+stop raw ingestion or current conversion. Profiles with only one nonempty
+sequence use one lane.
 
 The default `int16-le` input is one complete pulse per Redis entry, containing
 aligned sample-major signed little-endian int16 ADC words and no event header.
@@ -115,7 +119,8 @@ This is a declared software format, not hardware timing qualification.
 
 All fields are strict: unknown or duplicate YAML fields are errors. All
 source, output, and checkpoint keys must be globally distinct, except that a
-declared raw VOLTS output may feed one declared current conversion. Conversions
+declared raw VOLTS output may feed one declared current conversion. A declared
+float32 producer output may also feed waveform statistics. Conversions
 may also share an identical global gain setting/applied pair and bootstrap.
 Other key-role collisions are rejected. Redis host is
 a numeric IPv4 address, avoiding unbounded DNS resolution. Port 4210 is
@@ -241,6 +246,124 @@ capture remains independently controlled; port 4210 is never contacted by
 this worker, and enabling conversion does not start acquisition or change
 device controls.
 
+## Optional waveform statistics
+
+`waveform_statistics` is a generic, optional sidecar operation. It reads one
+complete float32 waveform, publishes the sample at a configured index, and
+publishes the arithmetic mean of a trailing sample window from that same
+waveform. It does not average successive pulses. Public PV names, channel
+assignments, units, and application-specific index groupings belong in the
+consumer's configuration; the operation contains no instrument-specific
+names, regions, or calibration defaults. It adds no IOC core processing or
+hardware connection.
+
+For example, this statistics-only profile uses fresh output/checkpoint keys.
+Replace the example `start_id` with an explicit reviewed input boundary before
+adoption; it is not selected automatically.
+
+```yaml
+schema_version: 1
+redis:
+  host: 127.0.0.1
+  port: 6379
+  connect_timeout_ms: 200
+  command_timeout_ms: 500
+  poll_interval_ms: 100
+  retry_ms: 1000
+waveform_statistics:
+  - stream: '{waveform}:channel-1-input'
+    checkpoint: '{waveform}:statistics:channel-1:v1'
+    start_id: '1700000000123-7' # replace with the reviewed input boundary
+    samples_per_waveform: 4
+    sample_output: '{waveform}:channel-1-sample'
+    mean_output: '{waveform}:channel-1-mean'
+    retention: 1000
+    index:
+      bootstrap: 2
+      setting: '{waveform}:channel-1-index_S'
+      applied: '{waveform}:channel-1-index_R'
+    window:
+      bootstrap: 2
+      setting: '{waveform}:channel-1-window_S'
+      applied: '{waveform}:channel-1-window_R'
+```
+
+Each entry requires all the fields shown, except that each parameter's
+`setting` and `applied` keys may be omitted together for a fixed parameter.
+`bootstrap` remains required for both fixed and writable parameters; there
+are no implicit index or window defaults. Statistics entries have their own
+parameter keys. Shared setting/applied keys across channels are not supported;
+an application can configure the appropriate values for each channel.
+
+The input field is the literal `_` and contains exactly
+`samples_per_waveform * 4` bytes of little-endian IEEE754 float32, with
+`samples_per_waveform` in 1–65,536. Bounded current-producer provenance may
+accompany the payload. The worker checks declared encoding, acquisition-time
+validity, and continuity if present. Other recognized producer fields are
+ignored after checking their size.
+This operation supports unknown acquisition time only. It does not infer
+acquisition time from a Redis ID or receipt time, and it does not silently
+discard a producer's claimed valid acquisition time to fit this contract.
+
+`index` is zero-based, in `0..samples_per_waveform-1`. A writable index command
+contains exactly two little-endian uint16 bytes in `_`. `window` is a count
+in 1–64; its command contains exactly one uint8 byte in `_`. For index `i`
+and count `n`, the selected sample is `waveform[i]`, and the mean includes
+indices `max(0, i - n + 1)` through `i`, inclusive. The lower boundary clips
+at sample zero, and the divisor is the actual number of included samples.
+For `[1, 2, 3, 4]`, index 2 and count 2 produce sample **3** and mean **2.5**.
+Index 0 with any permitted count uses only the first sample. No previous
+waveform contributes to either output.
+
+On first checkpoint initialization, the newest command already present on
+each setting stream is recorded as the starting boundary and is skipped;
+it is not replayed as a newly accepted command. The explicit bootstrap is
+used and acknowledged through `applied` for each writable parameter. Later
+accepted commands are applied and confirmed through their configured
+readback keys. Malformed commands and out-of-range indices/counts are
+rejected without an applied acknowledgement. A rejected command retains
+the prior valid parameter; a setting never fabricates a waveform result.
+
+An invalid input size, invalid or unsupported metadata, or a non-finite value
+in the selected window causes a durable rejection with a checkpoint diagnostic. The worker
+does not publish a synthetic zero or partially valid scalar pair. A later
+valid waveform can advance the source again. Each accepted input produces
+one `_` float32-le value in each output at the input Redis ID. Both entries
+identify the input with `source_stream` and `source_id`, the selected index
+with `sample_index`, and the effective window with `window_size`. The
+`fermi-ad/waveform-statistics:1` schema retains source continuity information
+and publishes `acquisition_time_valid: 0`. Output retention uses the
+configured exact entry limit. Applied parameter streams retain one entry.
+
+The statistics lane preserves source history, existing output histories,
+and unrelated checkpoints. Adding it does not reset existing raw/current
+checkpoints or change their configuration fingerprints. Its own checkpoint
+binds the declared interpretation, outputs, and parameters; a restart resumes
+that state rather than choosing a new cursor. Select a new checkpoint and
+fresh outputs when changing the bound pipeline. Stop any previous writer of
+the named scalar outputs before enabling this one.
+
+Bind the scalar outputs with ordinary IOC YAML; the IOC serves the values
+and applies its existing access, write-confirmation, source-time, and health
+policies. For example, with a backend whose base key is `waveform`:
+
+```yaml
+pvs:
+  - name: EXAMPLE:WAVEFORM:SAMPLE
+    type: float32
+    shape: scalar
+    read: {backend: waveform, key: channel-1-sample}
+    source_time: {mode: unavailable}
+    source_health: {required: false, stale_after_ms: 0}
+```
+
+Use `source_time: {mode: unavailable}` for both scalar routes. Optional source
+health keeps them outside readiness requirements and avoids assuming a
+publication cadence. Consumers must inspect their source diagnostics and
+INVALID/UDF acquisition-time alarm. Writable index/count PVs use the standard
+read/write/confirm routes to the corresponding `setting` and `applied` keys;
+the domain-specific names and groupings remain outside the sidecar operation.
+
 ## Outputs and restart behavior
 
 Each valid source entry produces one raw and one volts stream entry per
@@ -363,6 +486,11 @@ checkpoint additionally retains at most one pending pulse in Redis. A producer
 can still impose server-side cost by writing enormous Redis records; size
 limits prevent returning those records to this client, not their original
 creation or temporary representation inside Redis.
+
+Each statistics input is bounded independently to 65,536 float32 samples
+(262,144 payload bytes); its selected mean contains at most 64 samples. Its
+independent execution lane uses bounded reads and does not add an unbounded
+cross-pulse accumulator.
 
 Connection and command deadlines are 1–2,000 ms. Redis command I/O is
 nonblocking, with an absolute deadline across all writes and reply reads;

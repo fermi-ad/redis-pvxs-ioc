@@ -10,8 +10,9 @@ Ordinary value sources also report `sourceTimeMode`, `sourceTimePresent`,
 `sourceTimeValid`, and `sourceTimeError`. These describe source timestamp quality
 separately from payload acceptance, reader connectivity and monotonic freshness.
 The default `legacy-redis-id` mode keeps the existing Redis-ID interpretation.
-Opt-in read-only numeric arrays can use `unix-nanoseconds-v1` metadata or declare
-time `unavailable`. NTNDArray reports `ntndarray-v1` for its existing envelope and
+Read-only numeric scalars and arrays can declare time `unavailable`. Read-only
+numeric arrays can also use `unix-nanoseconds-v1` metadata. NTNDArray reports
+`ntndarray-v1` for its existing envelope and
 `dataTimeStamp` contract; ordinary `source_time` policy does not change it.
 
 ## Readiness and freshness

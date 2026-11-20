@@ -458,9 +458,10 @@ little-endian IOC host.
 If `source_time` is present, `mode` is required. Unix mode requires both field
 names to be nonempty and distinct from each other and `_`. The other modes
 forbid `field` and `valid_field`. Unknown or duplicate fields reject the
-configuration. Both nonlegacy modes require an ordinary read-only numeric
-array: scalars, boolean/string arrays, and write/confirmation routes are
-rejected. NTNDArray rejects every `source_time` declaration because it has a
+configuration. Both nonlegacy modes require an ordinary read-only numeric PV.
+Use `unavailable` for either a scalar or an array. The
+`unix-nanoseconds-v1` metadata mode requires an array. NTNDArray rejects
+every `source_time` declaration because it has a
 separate [frame timestamp contract](ntndarray.md).
 
 Unix timestamp text accepts an optional `+` or `-` followed by decimal digits,
@@ -471,7 +472,7 @@ absent or `0`. Validity `1` requires a supplied timestamp. Malformed supplied
 time rejects the sample even when validity is false.
 
 Accepted payloads with invalid or absent acquisition time still update the
-waveform, with an INVALID alarm. Any supplied timestamp is preserved exactly,
+value, with an INVALID alarm. Any supplied timestamp is preserved exactly,
 including invalid, negative, zero and backward times; absent time publishes
 zero. No mode substitutes the IOC's receipt time or host clock for unavailable
 acquisition time. Malformed timing retains the previous accepted value and

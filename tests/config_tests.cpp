@@ -818,7 +818,8 @@ pvs:
     assert(throwsConfig(timingConfig(timing, "    confirm: {key: ack}\n").c_str()));
     auto scalarTime = timingConfig(timing);
     scalarTime.replace(scalarTime.find("shape: array"), std::string("shape: array").size(), "shape: scalar");
-    assert(throwsConfig(scalarTime.c_str()));
+    if (timing == unixTiming) assert(throwsConfig(scalarTime.c_str()));
+    else assert(loadConfigString(scalarTime).pvs[0].sourceTime.mode == SourceTimeMode::Unavailable);
     for (const auto* type : {"bool", "string"}) {
       auto unsupported = timingConfig(timing);
       unsupported.replace(unsupported.find("type: float64"), std::string("type: float64").size(), std::string("type: ") + type);
